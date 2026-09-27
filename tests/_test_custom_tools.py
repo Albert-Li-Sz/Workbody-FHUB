@@ -147,6 +147,10 @@ stream2 = [
 raw2 = b"".join(P.stream_responses_events(iter(stream2), "m", {"usage": None, "custom_names": {"apply_patch"}})).decode()
 check("function_call_arguments.delta present", "response.function_call_arguments.delta" in raw2)
 check("function_call_arguments.done present", "response.function_call_arguments.done" in raw2)
+normal_fc_events = [json.loads(l[6:]) for l in raw2.splitlines()
+                    if l.startswith("data: ") and '"response.function_call_arguments.' in l]
+check("ordinary function events carry item_id",
+      normal_fc_events and all(e.get("item_id") for e in normal_fc_events), normal_fc_events)
 check("no custom events for a normal tool", "custom_tool_call_input" not in raw2)
 
 print()

@@ -3766,6 +3766,7 @@ def stream_responses_events(upstream, model, holder):
             else:
                 yield ev("response.function_call_arguments.done", {
                     "output_index": entry["output_index"],
+                    "item_id": entry["item_id"],
                     "call_id": entry["id"],
                     "arguments": entry["arguments"],
                 })
@@ -3823,11 +3824,13 @@ def stream_responses_events(upstream, model, holder):
                 })
                 yield ev("response.function_call_arguments.delta", {
                     "output_index": out_idx,
+                    "item_id": fc_item["id"],
                     "call_id": fc_item["call_id"],
                     "delta": fc_item["arguments"],
                 })
                 yield ev("response.function_call_arguments.done", {
                     "output_index": out_idx,
+                    "item_id": fc_item["id"],
                     "call_id": fc_item["call_id"],
                     "arguments": fc_item["arguments"],
                 })
@@ -3971,6 +3974,7 @@ def stream_responses_events(upstream, model, holder):
                         else:
                             yield ev("response.function_call_arguments.delta", {
                                 "output_index": entry["output_index"],
+                                "item_id": entry["item_id"],
                                 "call_id": entry["id"],
                                 "delta": fn_args,
                             })
