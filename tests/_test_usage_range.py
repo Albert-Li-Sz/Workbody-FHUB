@@ -1,9 +1,15 @@
-"""Deterministic tests for the dashboard time-range filter (issue #39).
+"""Deterministic tests for the dashboard time-range filter (issues #39, #68).
 
-The metrics page reports "today" and "all time" side by side. The range
-selector used to drive only the KPI cards, so the model matrix kept showing
-all-time figures while the page claimed today; /usage and /usage/perf now
-accept a range parameter and this pins its semantics.
+The metrics page reports the selected window and all time side by side. The
+range selector used to drive only the KPI cards, so the model matrix kept
+showing all-time figures while the page claimed today; /usage and /usage/perf
+now accept a range parameter and this pins its semantics.
+
+The selector also grew past "today / all time" (issue #68): this week, this
+month and a custom interval. Two things matter for those and are pinned here:
+the bounds are calendar windows anchored to local midnight, and the resolved
+bounds - not a today/all flag - key the caches, because this week and this
+month overlap and one entry cannot describe both.
 
 No network: the usage log is synthesised in a temp directory.
 """
@@ -64,15 +70,34 @@ with io.open(P.USAGE_LOG, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + chr(10))
 
-print("[1] range_since: only today is a filter, everything else is history")
-check("today maps to local midnight", P.range_since("today") == TODAY0,
-      (P.range_since("today"), TODAY0))
-check("Today is accepted case-insensitively", P.range_since("TODAY") == TODAY0)
-check("1d is an alias", P.range_since("1d") == TODAY0)
-check("all disables the filter", P.range_since("all") is None)
-check("an empty value disables the filter", P.range_since("") is None)
-check("a missing value disables the filter", P.range_since(None) is None)
-check("an unknown value disables the filter", P.range_since("last-week") is None)
+print("[1] range_window: today/week/month are calendar windows, the rest is history")
+check("today maps to local midnight", P.range_window("today") == (TODAY0, None),
+      (P.range_window("today"), (TODAY0, None)))
+check("Today is accepted case-insensitively", P.range_window("TODAY")[0] == TODAY0)
+check("1d is an alias", P.range_window("1d")[0] == TODAY0)
+check("week starts on Monday at local midnight",
+      time.localtime(P.range_window("week")[0]).tm_wday == 0
+      and time.localtime(P.range_window("week")[0]).tm_hour == 0,
+      time.strftime("%Y-%m-%d %H:%M", time.localtime(P.range_window("week")[0])))
+check("the week window starts no later than today", P.range_window("week")[0] <= TODAY0,
+      (P.range_window("week")[0], TODAY0))
+check("month starts on the 1st at local midnight",
+      time.localtime(P.range_window("month")[0]).tm_mday == 1
+      and time.localtime(P.range_window("month")[0]).tm_hour == 0,
+      time.strftime("%Y-%m-%d %H:%M", time.localtime(P.range_window("month")[0])))
+check("the month window starts no later than today", P.range_window("month")[0] <= TODAY0,
+      (P.range_window("month")[0], TODAY0))
+check("an open-ended window has no upper bound", P.range_window("week")[1] is None)
+check("all disables the filter", P.range_window("all") == (None, None))
+check("an empty value disables the filter", P.range_window("") == (None, None))
+check("a missing value disables the filter", P.range_window(None) == (None, None))
+check("an unknown value disables the filter", P.range_window("last-week") == (None, None))
+check("7d is not silently read as this week", P.range_window("7d") == (None, None))
+check("custom takes both bounds", P.range_window("custom", 100, 200) == (100, 200))
+check("custom accepts one open side", P.range_window("custom", 100, None) == (100, None))
+check("custom swaps reversed bounds", P.range_window("custom", 200, 100) == (100, 200))
+check("custom drops an unparseable bound", P.range_window("custom", "abc", 200) == (None, 200))
+check("custom drops a negative bound", P.range_window("custom", -5, None) == (None, None))
 
 print()
 print("[2] /usage: the window applies to every total it reports")
@@ -117,14 +142,84 @@ check("the cached entries kept their own values",
       a["requests"] == 4 and b["requests"] == 2, (a["requests"], b["requests"]))
 
 print()
-print("[5] the analytics payload keeps its own today/all split")
-an = P.compute_usage_analytics(ttl=0)
-check("analytics today matches the range filter",
-      an["summary"]["today"]["total_tokens"] == 800,
-      an["summary"]["today"]["total_tokens"])
+print("[5] a custom window is inclusive on both ends")
+pair = P.usage_snapshot(realm="all", ttl=0, range="custom",
+                        since=TODAY0 + 3600, until=TODAY0 + 7200)
+check("both ends are inside the window", pair["requests"] == 2, pair["requests"])
+check("the lower bound is inclusive",
+      P.usage_snapshot(realm="all", ttl=0, range="custom",
+                       since=TODAY0 + 3600)["requests"] == 2)
+check("a single instant matches only the row at that instant",
+      P.usage_snapshot(realm="all", ttl=0, range="custom",
+                       since=TODAY0 + 3600, until=TODAY0 + 3600)["requests"] == 1)
+check("a window past every row counts nothing",
+      P.usage_snapshot(realm="all", ttl=0, range="custom",
+                       since=TODAY0 + 99999)["requests"] == 0)
+check("an open start reaches back to the log's first row",
+      P.usage_snapshot(realm="all", ttl=0, range="custom",
+                       until=TODAY0 + 3600)["requests"] == 3)
+
+print()
+print("[6] week and month filter the same way, and do not share a cache entry")
+WEEK0 = P.range_window("week")[0]
+MONTH0 = P.range_window("month")[0]
+want_week = sum(1 for r in rows if r["at"] >= WEEK0)
+want_month = sum(1 for r in rows if r["at"] >= MONTH0)
+week = P.usage_snapshot(realm="all", ttl=0, range="week")
+month = P.usage_snapshot(realm="all", ttl=0, range="month")
+check("week counts every row from its Monday on", week["requests"] == want_week,
+      (week["requests"], want_week))
+check("month counts every row from the 1st on", month["requests"] == want_month,
+      (month["requests"], want_month))
+# Overlapping windows are the trap the old today/all cache key could not
+# express: a shared entry would serve one window's totals under the other's
+# label, and the numbers below would come out identical.
+cached_week = P.usage_snapshot(realm="all", ttl=60, range="week")
+cached_month = P.usage_snapshot(realm="all", ttl=60, range="month")
+check("a cached week read is not served for month",
+      cached_week["requests"] == want_week and cached_month["requests"] == want_month,
+      (cached_week["requests"], want_week, cached_month["requests"], want_month))
+
+print()
+print("[7] the analytics payload labels its first column with the selected window")
+an = P.compute_usage_analytics(ttl=0, range="today")
+an_week = P.compute_usage_analytics(ttl=0, range="week")
+an_all = P.compute_usage_analytics(ttl=0, range="all")
+check("the payload reports the bounds it applied",
+      an_week["window"] == {"since": WEEK0, "until": None}, an_week["window"])
+check("analytics window matches the range filter",
+      an["summary"]["window"]["total_tokens"] == 800,
+      an["summary"]["window"]["total_tokens"])
 check("analytics all_time matches the unfiltered snapshot",
       an["summary"]["all_time"]["total_tokens"] == 8300,
       an["summary"]["all_time"]["total_tokens"])
+check("the week bucket follows the week window",
+      an_week["summary"]["window"]["total_tokens"]
+      == sum(r["total_tokens"] for r in rows if r["at"] >= WEEK0),
+      an_week["summary"]["window"]["total_tokens"])
+check("all_time is the same figure in every window",
+      an_week["summary"]["all_time"]["total_tokens"]
+      == an_all["summary"]["all_time"]["total_tokens"] == 8300,
+      (an_week["summary"]["all_time"]["total_tokens"], an_all["summary"]["all_time"]["total_tokens"]))
+check("accounts carry a window bucket",
+      all("window" in a and "window_models" in a for a in an_week["accounts"]),
+      [sorted(a.keys()) for a in an_week["accounts"]][:1])
+check("the old today bucket is gone from accounts",
+      all("today" not in a for a in an_week["accounts"]))
+
+print()
+print("[8] perf reports how far its sample reaches into the window")
+perf_small = P.perf_stats(3, realm="all", ttl=0)
+perf_big = P.perf_stats(5000, realm="all", ttl=0)
+check("a capped sample says so", perf_small["sample_capped"] is True,
+      perf_small["sample_capped"])
+check("a capped sample reports where it starts", perf_small["sample_from"] is not None,
+      perf_small["sample_from"])
+check("an uncapped sample is not flagged", perf_big["sample_capped"] is False,
+      perf_big["sample_capped"])
+check("the sample still describes the window",
+      P.perf_stats(3, realm="all", ttl=0, range="today")["sampled"] == 2,
+      P.perf_stats(3, realm="all", ttl=0, range="today")["sampled"])
 
 shutil.rmtree(_TMP, ignore_errors=True)
 print()

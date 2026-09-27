@@ -293,22 +293,81 @@ def realm_scope(realm, fallback=None):
     return realm or fallback
 
 
-def range_since(value):
-    """Epoch cutoff for the dashboard's time-range selector, or None for "all".
+def _local_midnight(ts=None, days_back=0):
+    """Local midnight `days_back` days before `ts` (default: now).
 
-    "today" is local midnight rather than a rolling 24 hours, matching the
-    definition the analytics payload has always used for its Today figures;
-    two different meanings of "today" on one page would be worse than either.
+    mktime normalises an out-of-range day, so stepping back past the 1st of a
+    month still lands on a real local midnight instead of raising.
+    """
+    lt = time.localtime(ts if ts is not None else time.time())
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_back, 0, 0, 0, 0, 0, -1))
 
-    Anything unrecognised - including "all", an empty value and a client that
-    omits the parameter entirely - disables the filter, so existing callers
-    keep receiving the full history they used to get.
+
+def _epoch_or_none(value):
+    """A panel-supplied epoch second, or None when it cannot be trusted.
+
+    A negative or unparseable bound is dropped rather than clamped. The panel
+    rejects those before they are ever sent, so one arriving here means a
+    hand-written URL, and "no bound on this side" is a much smaller surprise
+    than silently slicing the log at 1970.
+    """
+    if value in (None, "", False):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def range_window(value, since=None, until=None):
+    """Resolve the dashboard's time-range selector into a (since, until) pair.
+
+    Both bounds are cutoffs on a row's `at`; None means "unbounded on that
+    side", and (None, None) - an unknown, empty or missing range - disables
+    filtering entirely, which is what every caller did before windows existed,
+    so an older panel keeps receiving the full history it used to get.
+
+    today/week/month are calendar windows anchored to local midnight, matching
+    the definition the analytics payload has always used for its Today
+    figures: two different meanings of "today" on one page would be worse than
+    either. The week starts on Monday. Rolling aliases ("7d", "30d") are
+    deliberately absent - they would mean "the last seven days", which is a
+    different window from "this week" and would make the button's label wrong
+    on six days out of seven.
+
+    custom takes the two epochs the panel sends. Either side may be missing
+    ("from this date onwards" / "up to this date"), and reversed bounds are
+    swapped rather than rejected, because the two inputs are independent and
+    an empty end is the normal case.
     """
     v = str(value or "").strip().lower()
     if v in ("today", "day", "1d"):
-        now = time.localtime()
-        return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
-    return None
+        return _local_midnight(), None
+    if v in ("week", "w"):
+        return _local_midnight(days_back=time.localtime().tm_wday), None
+    if v in ("month", "m"):
+        lt = time.localtime()
+        return time.mktime((lt.tm_year, lt.tm_mon, 1, 0, 0, 0, 0, 0, -1)), None
+    if v == "custom":
+        lo, hi = _epoch_or_none(since), _epoch_or_none(until)
+        if lo is not None and hi is not None and hi < lo:
+            lo, hi = hi, lo
+        return lo, hi
+    return None, None
+
+
+def range_query(query):
+    """Pull the three range parameters out of a parsed query string.
+
+    parse_qs hands every key back as a list, and an older panel that sends
+    none of them at all is the normal case, so every lookup falls back to
+    None - which range_window() reads as "no filter on that side".
+    """
+    def first(name):
+        values = query.get(name) or [None]
+        return values[0] if values else None
+    return first("range"), first("since"), first("until")
 def row_outcome(row):
     """Terminal state of a request row.
 
@@ -470,7 +529,7 @@ _perf_cache = {}
 _perf_lock = threading.Lock()
 
 
-def perf_stats(sample=5000, realm=None, ttl=None, range=None):
+def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=None):
     """Cached wrapper: parsing thousands of rows is CPU-heavy, and the
     dashboard polls this endpoint every few seconds.
 
@@ -478,22 +537,27 @@ def perf_stats(sample=5000, realm=None, ttl=None, range=None):
     scan of the log."""
     ttl = _STATS_TTL if ttl is None else ttl
     r = realm_scope(realm, CURRENT_REALM)
-    since = range_since(range)
+    lo, hi = range_window(range, since, until)
     try:
-        key = (int(sample), r or "all", "today" if since else "all")
+        # The key carries the resolved bounds rather than a today/all flag:
+        # this week and this month overlap, so a flag cannot tell them apart
+        # and one window's latency would be served under the other's label.
+        key = (int(sample), r or "all",
+               lo if lo is not None else -1, hi if hi is not None else -1)
     except Exception:
-        key = (5000, r or "all", "today" if since else "all")
+        key = (5000, r or "all",
+               lo if lo is not None else -1, hi if hi is not None else -1)
     now = time.time()
     with _perf_lock:
         hit = _perf_cache.get(key)
         if hit is not None and (now - hit[0]) < ttl:
             return hit[1]
-        data = _perf_stats_uncached(sample, r, since=since)
+        data = _perf_stats_uncached(sample, r, since=lo, until=hi)
         _perf_cache[key] = (time.time(), data)
     return data
 
 
-def _perf_stats_uncached(sample=5000, realm=None, since=None):
+def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
     """Latency percentiles + derived rates, computed from the JSONL log."""
     ttfts, gens, walls, rates, hits, tok_rates = [], [], [], [], [], []
     total = ok = err = aborted = 0
@@ -507,6 +571,12 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None):
     ma_buckets = {}
     # 只读日志末尾 sample 行：原先 readlines() 会把整个日志读成字符串列表
     rows = [raw.decode("utf-8", "replace") for raw in _tail_lines(USAGE_LOG, sample)]
+    # The tail read stops at `sample` lines, so a window wider than the sample
+    # is only described by its newest requests. Both facts are reported so the
+    # matrix can say the latency columns cover a partial slice instead of
+    # presenting them as the whole window.
+    sample_capped = len(rows) >= sample
+    sample_from = None
     for line in rows:
         line = line.strip()
         if not line:
@@ -515,11 +585,16 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None):
             r = json.loads(line)
         except Exception:
             continue
+        if sample_from is None:
+            sample_from = r.get("at")
         if realm and not row_matches_realm(r, realm):
             continue
         # Same window as the usage snapshot, so the latency and speed columns
         # of the matrix describe the same requests as its token columns.
-        if since and (r.get("at") or 0) < since:
+        at = r.get("at") or 0
+        if since and at < since:
+            continue
+        if until and at > until:
             continue
         total += 1
         outcome = row_outcome(r)
@@ -600,6 +675,11 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None):
         }
     return {
         "sampled": total,
+        # Where the sampled slice starts and whether it was cut short, so a
+        # week/month view can admit that its latency columns do not reach back
+        # to the window's own start.
+        "sample_from": sample_from,
+        "sample_capped": sample_capped,
         "success": ok,
         "errors": err,
         "client_aborted": aborted,
@@ -669,7 +749,7 @@ _snap_lock = threading.Lock()
 _STATS_TTL = float(os.environ.get("WB_STATS_TTL", 15))
 
 
-def usage_snapshot(realm=None, ttl=None, range=None):
+def usage_snapshot(realm=None, ttl=None, range=None, since=None, until=None):
     """Cached wrapper: the dashboard polls this every few seconds.
 
     The rebuild happens while holding the lock on purpose. Releasing it first
@@ -679,19 +759,22 @@ def usage_snapshot(realm=None, ttl=None, range=None):
     """
     ttl = _STATS_TTL if ttl is None else ttl
     r = realm_scope(realm, CURRENT_REALM)
-    since = range_since(range)
+    lo, hi = range_window(range, since, until)
     now = time.time()
     with _snap_lock:
-        key = "%s|%s" % (r or "all", "today" if since else "all")
+        # Bounds, not a today/all flag: this week and this month overlap, so a
+        # flag would let one window serve the other's totals from the cache.
+        key = "%s|%s|%s" % (r or "all",
+                            lo if lo is not None else "", hi if hi is not None else "")
         hit = _snap_cache.get(key)
         if hit is not None and (now - hit[0]) < ttl:
             return hit[1]
-        data = _usage_snapshot_uncached(r, since=since)
+        data = _usage_snapshot_uncached(r, since=lo, until=hi)
         _snap_cache[key] = (time.time(), data)
     return data
 
 
-def _usage_snapshot_uncached(realm=None, since=None):
+def _usage_snapshot_uncached(realm=None, since=None, until=None):
     # None means every realm; usage_snapshot() has already mapped "all"
     # onto it, so the filter below is simply skipped.
     r = realm
@@ -713,7 +796,10 @@ def _usage_snapshot_uncached(realm=None, since=None):
                 # The window is applied before the request is counted, so every
                 # total below - requests, tokens, per-model and per-account
                 # breakdowns - describes the same slice of the log.
-                if since and (row.get("at") or 0) < since:
+                at = row.get("at") or 0
+                if since and at < since:
+                    continue
+                if until and at > until:
                     continue
                 outcome = row_outcome(row)
                 if outcome != "completed":
@@ -1121,22 +1207,28 @@ _analytics_cache = {}
 _analytics_lock = threading.Lock()
 
 
-def compute_usage_analytics(ttl=None, realm=None):
+def compute_usage_analytics(ttl=None, realm=None, range=None, since=None, until=None):
     """Cached analytics payload.
 
     Unlike perf_stats/usage_snapshot/usage_by_account this used to run
     uncached, re-reading the whole JSONL on every call while the metrics tab
     polls it every 5 seconds. Same shared TTL as its siblings now, and the
     rebuild runs under the lock so parallel pollers do not each scan the log.
+
+    The window joins the cache key for the same reason it does in the other
+    readers: the payload's window bucket is what the KPI cards print, and this
+    week and this month overlap, so one entry cannot serve both.
     """
     ttl = _STATS_TTL if ttl is None else ttl
     now = time.time()
-    cache_key = realm or "all"
+    lo, hi = range_window(range, since, until)
+    cache_key = "%s|%s|%s" % (realm or "all",
+                              lo if lo is not None else "", hi if hi is not None else "")
     with _analytics_lock:
         entry = _analytics_cache.get(cache_key)
         if entry is not None and (now - entry["at"]) < ttl:
             return entry["data"]
-        data = _compute_usage_analytics_uncached(realm=realm_scope(realm))
+        data = _compute_usage_analytics_uncached(realm=realm_scope(realm), since=lo, until=hi)
         _analytics_cache[cache_key] = {"at": time.time(), "data": data}
     return data
 
@@ -1153,8 +1245,15 @@ def _new_analytics_stat():
         }
 
 
-def _scan_usage_log(all_summary, today_summary, acct_map, model_map, today_ts, realm=None):
-    """Walk the usage JSONL once, folding every row into the maps."""
+def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None, until=None,
+                    realm=None):
+    """Walk the usage JSONL once, folding every row into the maps.
+
+    `all_summary` always covers the whole log (it is the stable reference the
+    page shows next to the selection); `window_summary` and the per-account /
+    per-model "window" buckets cover only the selected range, which is what
+    every figure on the first column of the page describes.
+    """
     if os.path.exists(USAGE_LOG):
         try:
             with open(USAGE_LOG, encoding="utf-8") as fh:
@@ -1178,7 +1277,10 @@ def _scan_usage_log(all_summary, today_summary, acct_map, model_map, today_ts, r
                         continue
                     is_err = outcome != "completed"
                     at = r.get("at", 0)
-                    is_today = (at >= today_ts)
+                    # Same bounds as /usage and /usage/perf, so the three
+                    # readers agree on what the selected range contains.
+                    in_window = ((since is None or at >= since)
+                                 and (until is None or at <= until))
                     acct_uid = r.get("account") or "(unattributed)"
                     m_id = r.get("model") or "(unknown)"
                     def feed(stat_obj, is_error):
@@ -1206,37 +1308,37 @@ def _scan_usage_log(all_summary, today_summary, acct_map, model_map, today_ts, r
                             stat_obj["elapsed_sum"] += r["elapsed_ms"]
                             stat_obj["elapsed_n"] += 1
                     feed(all_summary, is_err)
-                    if is_today:
-                        feed(today_summary, is_err)
+                    if in_window:
+                        feed(window_summary, is_err)
                     if acct_uid not in acct_map:
                         acct_map[acct_uid] = {
                             "uid": acct_uid,
                             "nickname": acct_uid,
                             "realm": r.get("realm", ""),
                             "domain": "",
-                            "today": _new_analytics_stat(),
+                            "window": _new_analytics_stat(),
                             "all_time": _new_analytics_stat(),
-                            "today_models": {},
+                            "window_models": {},
                             "all_models": {},
                         }
                     feed(acct_map[acct_uid]["all_time"], is_err)
-                    if is_today:
-                        feed(acct_map[acct_uid]["today"], is_err)
+                    if in_window:
+                        feed(acct_map[acct_uid]["window"], is_err)
                     if not is_err:
                         tm = acct_map[acct_uid]["all_models"].setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0})
                         tm["requests"] += 1
                         tm["tokens"] += (r.get("total_tokens") or 0)
                         tm["reasoning"] += (r.get("reasoning_tokens") or 0)
-                        if is_today:
-                            tdm = acct_map[acct_uid]["today_models"].setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0})
+                        if in_window:
+                            tdm = acct_map[acct_uid]["window_models"].setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0})
                             tdm["requests"] += 1
                             tdm["tokens"] += (r.get("total_tokens") or 0)
                             tdm["reasoning"] += (r.get("reasoning_tokens") or 0)
                     if m_id not in model_map:
-                        model_map[m_id] = {"model": m_id, "today": _new_analytics_stat(), "all_time": _new_analytics_stat()}
+                        model_map[m_id] = {"model": m_id, "window": _new_analytics_stat(), "all_time": _new_analytics_stat()}
                     feed(model_map[m_id]["all_time"], is_err)
-                    if is_today:
-                        feed(model_map[m_id]["today"], is_err)
+                    if in_window:
+                        feed(model_map[m_id]["window"], is_err)
         except Exception as exc:
             log("compute_usage_analytics failed: %s" % exc)
 
@@ -1253,17 +1355,17 @@ def _enrich_accounts_from_pool(acct_map, realm=None):
                 acct_map[a.uid]["domain"] = a.domain
                 acct_map[a.uid]["credits"] = getattr(a, "credits", None) or {}
             else:
-                acct_map[a.uid] = {
-                    "uid": a.uid,
-                    "nickname": a.nickname,
-                    "realm": a.realm,
-                    "domain": a.domain,
-                    "credits": getattr(a, "credits", None) or {},
-                    "today": _new_analytics_stat(),
-                    "all_time": _new_analytics_stat(),
-                    "today_models": {},
-                    "all_models": {},
-                }
+                    acct_map[a.uid] = {
+                        "uid": a.uid,
+                        "nickname": a.nickname,
+                        "realm": a.realm,
+                        "domain": a.domain,
+                        "credits": getattr(a, "credits", None) or {},
+                        "window": _new_analytics_stat(),
+                        "all_time": _new_analytics_stat(),
+                        "window_models": {},
+                        "all_models": {},
+                    }
 
 
 def _finalize_analytics_stat(stat_obj):
@@ -1278,30 +1380,32 @@ def _finalize_analytics_stat(stat_obj):
         stat_obj["elapsed_ms_avg"] = round(stat_obj["elapsed_sum"] / stat_obj["elapsed_n"]) if stat_obj["elapsed_n"] > 0 else 0
         return stat_obj
 
-def _compute_usage_analytics_uncached(realm=None):
+def _compute_usage_analytics_uncached(realm=None, since=None, until=None):
     """Detailed analytics for Token, Cache, and Reasoning metrics page."""
-    now = time.localtime()
-    today_ts = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
     all_summary = _new_analytics_stat()
-    today_summary = _new_analytics_stat()
+    window_summary = _new_analytics_stat()
     acct_map = {}
     model_map = {}
-    _scan_usage_log(all_summary, today_summary, acct_map, model_map, today_ts, realm=realm)
+    _scan_usage_log(all_summary, window_summary, acct_map, model_map,
+                    since=since, until=until, realm=realm)
     _enrich_accounts_from_pool(acct_map, realm=realm)
     _finalize_analytics_stat(all_summary)
-    _finalize_analytics_stat(today_summary)
+    _finalize_analytics_stat(window_summary)
     for a in acct_map.values():
-        _finalize_analytics_stat(a["today"])
+        _finalize_analytics_stat(a["window"])
         _finalize_analytics_stat(a["all_time"])
     for m in model_map.values():
-        _finalize_analytics_stat(m["today"])
+        _finalize_analytics_stat(m["window"])
         _finalize_analytics_stat(m["all_time"])
-    accts_list = sorted(acct_map.values(), key=lambda a: (-a["today"]["total_tokens"], -a["all_time"]["total_tokens"]))
-    models_list = sorted(model_map.values(), key=lambda m: (-m["today"]["total_tokens"], -m["all_time"]["total_tokens"]))
+    accts_list = sorted(acct_map.values(), key=lambda a: (-a["window"]["total_tokens"], -a["all_time"]["total_tokens"]))
+    models_list = sorted(model_map.values(), key=lambda m: (-m["window"]["total_tokens"], -m["all_time"]["total_tokens"]))
     return {
-        "today_ts": today_ts,
+        # The resolved window travels with the payload so the page can label
+        # its first column from what the server actually applied, not from
+        # what the panel hoped it sent.
+        "window": {"since": since, "until": until},
         "realm": realm or "all",
-        "summary": {"today": today_summary, "all_time": all_summary},
+        "summary": {"window": window_summary, "all_time": all_summary},
         "accounts": accts_list,
         "models": models_list,
     }
@@ -1335,7 +1439,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.6.2",
+        "version": "1.6.3",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -4135,7 +4239,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.6.2"
+    server_version = "wb-proxy/1.6.3"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -4606,8 +4710,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
-        req_range = query.get('range', [None])[0]
-        return self._json(200, usage_snapshot(realm=req_realm, range=req_range))
+        req_range, req_since, req_until = range_query(query)
+        return self._json(200, usage_snapshot(realm=req_realm, range=req_range,
+                                              since=req_since, until=req_until))
 
     def _get_usage_recent(self, query):
         if not self._authorized():
@@ -4688,7 +4793,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         req_realm = query.get("realm", [None])[0] or None
-        return self._json(200, compute_usage_analytics(realm=req_realm))
+        req_range, req_since, req_until = range_query(query)
+        return self._json(200, compute_usage_analytics(realm=req_realm, range=req_range,
+                                                       since=req_since, until=req_until))
 
     def _get_usage_by_account(self):
         if not self._authorized():
@@ -4703,8 +4810,9 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             sample = 5000
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
-        req_range = query.get('range', [None])[0]
-        return self._json(200, perf_stats(sample, realm=req_realm, range=req_range))
+        req_range, req_since, req_until = range_query(query)
+        return self._json(200, perf_stats(sample, realm=req_realm, range=req_range,
+                                          since=req_since, until=req_until))
 
     def _get_tasks(self, query):
         if not self._authorized():

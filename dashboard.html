@@ -599,7 +599,18 @@ a:hover{text-decoration:underline}
       </div>
       <div style="display:flex;gap:4px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
         <button id="btnRangeToday" class="range-btn active" onclick="setAnalyticsRange('today')">今日数据 (Today)</button>
+        <button id="btnRangeWeek" class="range-btn" onclick="setAnalyticsRange('week')">本周 (This Week)</button>
+        <button id="btnRangeMonth" class="range-btn" onclick="setAnalyticsRange('month')">本月 (This Month)</button>
         <button id="btnRangeAll" class="range-btn" onclick="setAnalyticsRange('all')">全部历史 (All Time)</button>
+        <button id="btnRangeCustom" class="range-btn" onclick="setAnalyticsRange('custom')">自定义 (Custom)</button>
+        <span id="rangeCustomBox" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--dim)">
+          <input type="datetime-local" id="rangeCustomSince" class="slot-select" style="padding:4px 6px"
+                 onchange="onRangeCustomChange()">
+          <span>~</span>
+          <input type="datetime-local" id="rangeCustomUntil" class="slot-select" style="padding:4px 6px"
+                 onchange="onRangeCustomChange()">
+          <span style="font-size:11px">留空表示不限</span>
+        </span>
       </div>
     </div>
 
@@ -1690,7 +1701,7 @@ function renderAccounts(){
       + '<div style="color:var(--dim);font-size:13px;margin-bottom:18px">'
       +   '请先登录或导入一个 ' + viewName + ' 账号，之后相关请求都会走该账号'
       + '</div>'
-      + '<button onclick="startLogin()" style="font-size:14px;padding:10px 22px">'
+      + '<button onclick="openLoginModal()" style="font-size:14px;padding:10px 22px">'
       +   '登录新账号 (OAuth)'
       + '</button>'
       + '</div>';
@@ -2349,7 +2360,6 @@ const MAIN_TABS = ['gateway', 'analytics', 'logs', 'settings'];
 const MAIN_TAB_STORE = 'wb-proxy-main-tab';
 let currentMainTab = 'gateway';
 let analyticsRange = 'today';
-let cachedAnalyticsData = null;
 let cachedMatrixData = null;
 let matrixAcctFilter = '';
 let matrixModelFilter = '';
@@ -3339,27 +3349,76 @@ async function clearServerLogs(){
   }
 }
 
+/* 时间范围：每个窗口都是服务端的一段切片，切换即重新取数。
+ *
+ * 只有「今日 / 全部历史」时，一次 /usage/analytics 同时带回两个桶，切换按钮
+ * 重渲染缓存就够了；窗口变多之后一个 payload 装不下所有窗口，继续重渲染缓存
+ * 只会把上一个窗口的数字挂到新标签下面，所以一律重取。 */
 function setAnalyticsRange(range){
   analyticsRange = range;
-  const btnToday = document.getElementById('btnRangeToday');
-  const btnAll = document.getElementById('btnRangeAll');
-  if(range === 'all'){
-    if(btnToday) btnToday.classList.remove('active');
-    if(btnAll) btnAll.classList.add('active');
-  } else {
-    if(btnToday) btnToday.classList.add('active');
-    if(btnAll) btnAll.classList.remove('active');
-  }
-  if(cachedAnalyticsData){
-    renderAnalytics(cachedAnalyticsData);
-  } else {
-    loadAnalytics();
-  }
+  const btns = {today:'btnRangeToday', week:'btnRangeWeek', month:'btnRangeMonth',
+                all:'btnRangeAll', custom:'btnRangeCustom'};
+  Object.keys(btns).forEach(k => {
+    const b = document.getElementById(btns[k]);
+    if(b) b.classList.toggle('active', k === range);
+  });
+  const box = document.getElementById('rangeCustomBox');
+  if(box) box.style.display = (range === 'custom') ? 'inline-flex' : 'none';
+  if(range === 'custom') prefillCustomRange();
+  loadAnalytics();
   // The model matrix reads /usage and /usage/perf directly, so it has to be
   // refetched: without this the table kept showing all-time figures while the
   // page said "today", which is the inconsistency the range buttons were
   // meant to remove.
   loadAnalyticsMatrix();
+}
+
+/* 自定义区间的输入框初始为空，而空 = 不限，画面会和「全部历史」一模一样，看起来
+ * 像按钮坏了。第一次点开时把起点填成今天零点：一个能看懂的默认窗口，操作者再自己
+ * 放宽或收窄；终点留空表示「到现在」。 */
+function prefillCustomRange(){
+  const el = document.getElementById('rangeCustomSince');
+  if(!el || el.value) return;
+  const d = new Date();
+  el.value = toLocalInputValue(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000);
+}
+
+function pad2(n){ return String(n).padStart(2, '0'); }
+
+/* datetime-local 与 epoch 互转：输入框里是操作者按日历读到的本地墙上时间，所以
+ * 转换用浏览器自己的时区；服务端拿 epoch 与它自己的时钟比较。 */
+function toLocalInputValue(epochSec){
+  if(!epochSec) return '';
+  const d = new Date(epochSec * 1000);
+  if(isNaN(d.getTime())) return '';
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+    + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+}
+
+function fromLocalInputValue(value){
+  if(!value) return null;
+  const t = new Date(value).getTime();
+  return isNaN(t) ? null : Math.floor(t / 1000);
+}
+
+function onRangeCustomChange(){
+  loadAnalytics();
+  loadAnalyticsMatrix();
+}
+
+/* 三个取数端点共用同一个查询串，避免 /usage 与 /usage/perf 各拼一份而漏掉自定义
+ * 区间——那正是「卡片与表格口径不一致」的复发路径。 */
+function analyticsQuery(){
+  let q = '?realm=all&range=' + encodeURIComponent(analyticsRange || 'today');
+  if(analyticsRange === 'custom'){
+    const sEl = document.getElementById('rangeCustomSince');
+    const uEl = document.getElementById('rangeCustomUntil');
+    const s = fromLocalInputValue(sEl ? sEl.value : '');
+    const u = fromLocalInputValue(uEl ? uEl.value : '');
+    if(s !== null) q += '&since=' + s;
+    if(u !== null) q += '&until=' + u;
+  }
+  return q;
 }
 
 /* 模型性能指标与用量一览
@@ -3369,7 +3428,7 @@ function setAnalyticsRange(range){
  * models this page exists to compare. */
 async function loadAnalyticsMatrix(){
   try{
-    const q = '?realm=all&range=' + encodeURIComponent(analyticsRange || 'today');
+      const q = analyticsQuery();
     const [usage, perf, models] = await Promise.all([
       getJSON('/usage' + q),
       getJSON('/usage/perf' + q),
@@ -3674,7 +3733,16 @@ function renderPerfMatrix(usage, perf){
         + '</tr>';
     }).join('');
 
-    matrixEl.innerHTML = '<table class="data-cards"><thead><tr>'
+    // 延迟 / 速度列取自日志末尾的采样，窗口比采样更宽时它们只覆盖最新的那一段。
+    // 明说覆盖范围，比让局部数字冒充整个窗口要好。
+    let coverageNote = '';
+    if(perf && perf.sample_capped && perf.sample_from){
+      coverageNote = '<div style="font-size:12px;color:var(--dim);margin-bottom:8px">'
+        + '延迟 / 速度列只覆盖日志末尾的部分请求（自 '
+        + esc(new Date(perf.sample_from * 1000).toLocaleString())
+        + ' 起），更早的请求未纳入这三列。</div>';
+    }
+    matrixEl.innerHTML = coverageNote + '<table class="data-cards"><thead><tr>'
       + '<th style="text-align:left">模型名称</th>'
       + '<th style="text-align:center;width:76px">区域</th>'
       + '<th style="text-align:left">账号</th>'
@@ -3687,20 +3755,23 @@ function renderPerfMatrix(usage, perf){
 
 async function loadAnalytics(){
   try {
-    const data = await getJSON('/usage/analytics');
-    cachedAnalyticsData = data;
+    // 载荷永远按当前选中的窗口取，它的 window 桶就是第一列要展示的数字。
+    const data = await getJSON('/usage/analytics' + analyticsQuery());
     renderAnalytics(data);
   } catch(err) {
     console.error('loadAnalytics failed:', err);
   }
 }
 
+/* 第一列的口径随范围切换，标签必须跟着走，否则「本周」的数字会被当成「今日」读。 */
+const RANGE_LABELS = {today:'今日', week:'本周', month:'本月', custom:'自定义区间', all:'全部历史'};
+function rangeLabel(){ return RANGE_LABELS[analyticsRange] || RANGE_LABELS.today; }
+
 function renderAnalytics(data){
   if(!data || !data.summary) return;
-  const isToday = (analyticsRange === 'today');
-  const sumToday = data.summary.today || {};
+  const sumWindow = data.summary.window || {};
   const sumAll = data.summary.all_time || {};
-  const currentSum = isToday ? sumToday : sumAll;
+  const currentSum = sumWindow;
 
   // KPI 1: follows the range selector. It used to be hard-wired to the Today
   // bucket while the card next to it was hard-wired to All Time, so the range
@@ -3708,7 +3779,7 @@ function renderAnalytics(data){
   const elTodayTok = document.getElementById('kpiTodayTokens');
   const elTodayDetail = document.getElementById('kpiTodayTokensDetail');
   const elTodayTitle = document.getElementById('kpiRangeTokenTitle');
-  if(elTodayTitle) elTodayTitle.textContent = isToday ? '今日消耗 Token' : '全部历史消耗 Token';
+  if(elTodayTitle) elTodayTitle.textContent = rangeLabel() + '消耗 Token';
   if(elTodayTok) elTodayTok.textContent = fmt(currentSum.total_tokens || 0);
   if(elTodayDetail) elTodayDetail.innerHTML =
     '<span style="color:var(--accent)">输入 ' + fmt(currentSum.prompt_tokens || 0) + '</span>' +
@@ -3725,10 +3796,10 @@ function renderAnalytics(data){
     ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(sumAll.reasoning_tokens || 0) + '</span>' +
     // Two cards showing the same number reads as a broken counter rather than
     // as "there is nothing older to show", so say which case it is.
-    ((!isToday && (sumAll.total_tokens || 0) > 0)
+    ((analyticsRange === 'all' && (sumAll.total_tokens || 0) > 0)
       ? '<br><span style="color:var(--dim);font-size:11px">当前为「全部历史」视图，两张卡片口径相同</span>'
-      : ((isToday && (sumAll.total_tokens || 0) === (sumToday.total_tokens || 0) && (sumAll.total_tokens || 0) > 0)
-        ? '<br><span style="color:var(--dim);font-size:11px">与今日相同：日志中暂无更早的数据</span>'
+      : ((analyticsRange !== 'all' && (sumAll.total_tokens || 0) === (sumWindow.total_tokens || 0) && (sumAll.total_tokens || 0) > 0)
+        ? '<br><span style="color:var(--dim);font-size:11px">与' + rangeLabel() + '相同：所选范围已覆盖日志中的全部请求</span>'
         : ''));
 
   // KPI 3: 网关平均生成速度
@@ -3745,7 +3816,7 @@ function renderAnalytics(data){
   const elReqTitle = document.getElementById('kpiReqTitle');
   const elReqCount = document.getElementById('kpiReqCount');
   const elReqSuccess = document.getElementById('kpiReqSuccess');
-  if(elReqTitle) elReqTitle.textContent = (isToday ? '今日' : '累计') + '请求数 & 成功率';
+  if(elReqTitle) elReqTitle.textContent = (analyticsRange === 'all' ? '累计' : rangeLabel()) + '请求数 & 成功率';
   const totalReq = (currentSum.requests || 0) + (currentSum.errors || 0);
   const successPct = totalReq > 0 ? ((currentSum.requests / totalReq) * 100).toFixed(1) : '100.0';
   if(elReqCount) elReqCount.textContent = fmt(currentSum.requests || 0) + ' 次';
@@ -3755,7 +3826,7 @@ function renderAnalytics(data){
   const acctTbody = document.getElementById('analyticsAccountTbody');
   const acctCountEm = document.getElementById('analyticsAcctCount');
   let accts = (data.accounts || []).filter(a => {
-    if(a.uid === '(unattributed)' && !(a.today.requests || a.all_time.requests)) return false;
+    if(a.uid === '(unattributed)' && !((a.window || {}).requests || a.all_time.requests)) return false;
     return true;
   });
   if(acctCountEm) acctCountEm.textContent = accts.length ? '(' + accts.length + ' 个账号)' : '';
@@ -3765,8 +3836,9 @@ function renderAnalytics(data){
       acctTbody.innerHTML = '<tr><td colspan="7" class="empty">暂无账号用量数据</td></tr>';
     } else {
       acctTbody.innerHTML = accts.map(a => {
-        const st = isToday ? a.today : a.all_time;
-        const modelsMap = isToday ? a.today_models : a.all_models;
+        // window 桶就是当前选中的范围，也就是这张表要展示的口径。
+        const st = a.window || {};
+        const modelsMap = a.window_models || {};
         const entries = Object.entries(modelsMap || {}).sort((x, y) => (y[1].tokens || 0) - (x[1].tokens || 0));
         
         let pills = '<span style="color:var(--dim)">无调用</span>';
