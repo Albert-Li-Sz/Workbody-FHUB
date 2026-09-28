@@ -2762,7 +2762,7 @@ const REALM_CHOICES = [
 ];
 
 /* Model allow-list per key. Patterns are matched case-insensitively with `*`
-   wildcards ("deepseek/*", "gpt-6-astra"). An empty list means no limit, which
+   wildcards ("deepseek*", "gpt-6-astra"). An empty list means no limit, which
    is how every key saved before this field existed comes back. */
 function parseModelPatterns(text){
   const out = [];
@@ -2807,7 +2807,7 @@ function renderKeyRows(){
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
         +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">模型限制 <span style="color:var(--dim-light)">(选填，留空 = 不限制)</span></div>'
-        +     '<input type="text" id="editKeyModels_' + i + '" value="' + esc(modelPatternsText(row.models)) + '" placeholder="如 deepseek/* 或 gpt-6-astra；多个用逗号分隔，支持 * 通配" '
+          +     '<input type="text" id="editKeyModels_' + i + '" value="' + esc(modelPatternsText(row.models)) + '" placeholder="如 deepseek* 或 gpt-6-astra；多个用逗号分隔，支持 * 通配" '
         +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
