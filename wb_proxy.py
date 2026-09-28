@@ -5243,6 +5243,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_accounts_checkin(payload)
         if path == "/accounts/daily-chat":
             return self._route_accounts_daily_chat(payload)
+        if path == "/accounts/daily-chat-web":
+            return self._route_accounts_daily_chat_web(payload)
         if path == "/accounts/login/start":
             return self._route_accounts_login_start(payload)
         if path == "/accounts/login/cancel":
@@ -5455,6 +5457,28 @@ class Handler(BaseHTTPRequestHandler):
             if account is None:
                 continue
             res = account.daily_chat()
+            results.append({"uid": account.uid, "nickname": account.nickname, **res})
+        return self._json(200, {"results": results, "accounts": account_views()})
+
+    def _route_accounts_daily_chat_web(self, payload):
+        """网页通道打卡：只建网页端会话，不发桌面端那条轻量对话。
+
+        手动触发用。刻意不写 lastDailyChat——那是「今天已经打过卡」的闸门，
+        手动补一次不该让定时巡检跳过当天的正常流程。
+        """
+        uid = payload.get("uid")
+        if uid:
+            targets = [POOL.get(uid)]
+        else:
+            targets = [a for a in POOL.accounts if a.realm == "intl" and a.enabled]
+        results = []
+        for account in targets:
+            if account is None:
+                continue
+            res = account.daily_chat_web()
+            log("account %s: 网页通道打卡 -> %s"
+                % (account.uid[:8], res.get("conversation") if res.get("ok") else res.get("error")),
+                level="INFO" if res.get("ok") else "WARN")
             results.append({"uid": account.uid, "nickname": account.nickname, **res})
         return self._json(200, {"results": results, "accounts": account_views()})
 
