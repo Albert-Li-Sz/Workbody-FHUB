@@ -320,6 +320,34 @@ def set_reserve_credits(accounts_dir, value):
     return value
 
 
+def daily_token_limit(accounts_dir):
+    """Global daily guard: an account that already burned this many tokens
+    today stays idle until local midnight.
+
+    Zero disables the guard, which keeps installs that predate the setting
+    behaving exactly as before.
+    """
+    try:
+        value = int(load(accounts_dir).get("daily_token_limit") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def set_daily_token_limit(accounts_dir, value):
+    """Persist the daily token threshold. Returns the stored value."""
+    try:
+        value = int(value or 0)
+    except (TypeError, ValueError):
+        value = 0
+    value = max(0, value)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_token_limit"] = value
+        save(accounts_dir, data)
+    return value
+
+
 def auto_switch_product(accounts_dir):
     """Whether an upstream 429 may rotate an account's outbound identity.
 

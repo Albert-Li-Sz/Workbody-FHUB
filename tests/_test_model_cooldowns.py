@@ -124,6 +124,11 @@ class ModelCooldownTests(unittest.TestCase):
             def list_public(self):
                 return [a.public() for a in self.accounts]
 
+            def apply_daily_token_limit(self, value=None, usage=None):
+                # The production path pushes the daily guard into the pool before
+                # picking; this stub only needs to answer the call.
+                return value or 0
+
         old_pool, old_urlopen = proxy.POOL, accounts.urlopen
         old_parser = proxy.parse_rate_limit_reset
         proxy.POOL = Pool()

@@ -239,6 +239,16 @@ class Account(object):
         # what makes the upstream start sending nagging SMS). Resolved from the
         # global setting by AccountPool.apply_reserve_credits(); 0 disables it.
         self.reserve_credits = 0
+        # Daily token guard: an account that already burned this many tokens
+        # today stops being handed out, so a client that would burn the rest
+        # of the day's quota rotates to another account instead of hitting
+        # the upstream wall. Resolved from the global setting by
+        # AccountPool.apply_daily_token_limit(); 0 disables it.
+        # daily_tokens_today stays None until the proxy has folded the usage
+        # log at least once, so a fresh process never parks anyone on an
+        # unknown count.
+        self.daily_token_limit = 0
+        self.daily_tokens_today = None
         # Serialise token refresh and file writes. Request threads, /health,
         # dashboard polls and the scheduler can all reach refresh()/save() for
         # the same account at once; without a lock the upstream rotates the
@@ -317,6 +327,11 @@ class Account(object):
             "credits": self.credits,
             "reserveCredits": int(self.reserve_credits or 0),
             "reserveBlocked": self.reserve_blocked(),
+            "dailyTokenLimit": int(self.daily_token_limit or 0),
+            "dailyTokensToday": (int(self.daily_tokens_today)
+                                 if isinstance(self.daily_tokens_today, int)
+                                 else None),
+            "dailyLimitBlocked": self.daily_limit_blocked(),
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
             "canCheckin": self.realm == "cn",
@@ -376,6 +391,26 @@ class Account(object):
             return False
         return remain <= reserve
 
+    def daily_limit_blocked(self):
+        """True when today's counted usage has reached the configured limit.
+
+        Only a *counted* day can block: until the proxy has folded the usage
+        log once, the count is None and the account stays usable.
+        """
+        try:
+            limit = int(self.daily_token_limit or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if limit <= 0:
+            return False
+        used = self.daily_tokens_today
+        if used is None:
+            return False
+        try:
+            return int(used) >= limit
+        except (TypeError, ValueError):
+            return False
+
     def ready(self, model=None):
         if not self.enabled or not self.access_token:
             return False
@@ -384,6 +419,10 @@ class Account(object):
         # Parked below the reserve: serving a request here is what would push
         # the balance to zero and trigger the upstream reminder SMS.
         if self.reserve_blocked():
+            return False
+        # Today's token budget is spent: keep the seat for tomorrow instead
+        # of letting the upstream answer 429 for the rest of the day.
+        if self.daily_limit_blocked():
             return False
         exp = self.expires_at or jwt_exp(self.access_token)
         if not exp:
@@ -1007,6 +1046,44 @@ class AccountPool(object):
         with self._lock:
             for account in self.accounts:
                 account.reserve_credits = value
+        return value
+
+    def apply_daily_token_limit(self, value=None, usage=None):
+        """Re-resolve the daily token guard for every account.
+
+        Same shape as apply_reserve_credits(): settings.json holds the limit,
+        while `usage` (uid -> tokens counted today) comes from the caller,
+        because only the proxy reads the usage log. Passing None keeps the
+        last known counts, so a settings change never turns them into
+        "unknown".
+        """
+        import wb_settings
+
+        if value is None:
+            value = wb_settings.daily_token_limit(self.dir)
+        try:
+            value = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            value = 0
+        with self._lock:
+            for account in self.accounts:
+                was_blocked = account.daily_limit_blocked()
+                account.daily_token_limit = value
+                if usage is not None:
+                    try:
+                        account.daily_tokens_today = int(usage.get(account.uid, 0))
+                    except (TypeError, ValueError):
+                        account.daily_tokens_today = None
+                now_blocked = account.daily_limit_blocked()
+                if now_blocked != was_blocked:
+                    if now_blocked:
+                        self.log("account %s parked: daily token limit reached "
+                                 "(%s/%s tokens today)"
+                                 % (str(account.uid)[:8],
+                                    account.daily_tokens_today, value))
+                    else:
+                        self.log("account %s resumed: daily token limit cleared"
+                                 % str(account.uid)[:8])
         return value
 
     def set_proxy_slot(self, uid, slot_id):

@@ -777,6 +777,25 @@ a:hover{text-decoration:underline}
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">每日 Token 限额 <em id="setDailyTokenState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              账号当日消耗的 token 达到该值后暂停接单，请求自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示不限（不限额）；与「保留积分」各自独立，任一命中都会暂停接单。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <div>
+              <div style="font-size:12px;color:var(--dim);margin-bottom:4px">每账号每日上限（token）</div>
+              <input id="setDailyTokenLimit" type="number" min="0" step="1000000" value="0"
+                     style="width:170px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+            </div>
+            <button onclick="saveDailyTokenLimit(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">429 自动切换出站身分 <em id="setAutoSwitchState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额通道，开启后 429 会少一些。默认关闭。
@@ -1703,6 +1722,7 @@ function accountRow(a){
   const usage = USAGE_BY_ACCOUNT[a.uid] || {};
   const state = !a.enabled ? '<span class="badge off">已停用</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
+              : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmt(a.dailyTokensToday || 0) + ' / ' + fmt(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
               : a.inCooldown ? '<span class="badge warn">冷却 ' + (a.cooldownFor||0) + 's</span>'
               : a.expiresIn === 'expired' ? '<span class="badge bad">已过期</span>'
               : '<span class="badge ok">可用</span>';
@@ -2274,12 +2294,14 @@ async function refreshInner(){
   // An account parked by the low-credit guard is enabled but not serving, so
   // the pool card must not count it as "正常".
   const accts = window.ACCOUNTS || [];
-  const activeAccts = accts.filter(a => a.enabled && !a.reserveBlocked).length;
+  const activeAccts = accts.filter(a => a.enabled && !a.reserveBlocked && !a.dailyLimitBlocked).length;
   const totalAccts = accts.length;
   const parkedAccts = accts.filter(a => a.enabled && a.reserveBlocked).length;
   const disabledAccts = accts.filter(a => !a.enabled).length;
+  const dailyAccts = accts.filter(a => a.enabled && a.dailyLimitBlocked).length;
   const poolNotes = [];
   if(parkedAccts) poolNotes.push(parkedAccts + ' 个保留积分');
+  if(dailyAccts) poolNotes.push(dailyAccts + ' 个达日限额');
   if(disabledAccts) poolNotes.push(disabledAccts + ' 个停用');
   const poolSub = poolNotes.length ? poolNotes.join(' · ') : '全部启用 · 状态健康';
   const pctRemain = totSize > 0 ? ((totRemain / totSize) * 100).toFixed(1) + '%' : '';
@@ -2582,6 +2604,14 @@ async function loadSettings(showToast){
         reserveState.textContent = reserveValue > 0 ? ('(低于 ' + reserveValue + ' 暂停接单)') : '(未启用)';
         reserveState.style.color = reserveValue > 0 ? 'var(--accent2)' : 'var(--dim)';
       }
+      const dailyTokValue = Number(data.daily_token_limit || 0);
+      const dailyTokInput = document.getElementById('setDailyTokenLimit');
+      if(dailyTokInput) dailyTokInput.value = String(dailyTokValue);
+      const dailyTokState = document.getElementById('setDailyTokenState');
+      if(dailyTokState){
+        dailyTokState.textContent = dailyTokValue > 0 ? ('(每账号每天 ' + fmt(dailyTokValue) + ' token)') : '(不限)';
+        dailyTokState.style.color = dailyTokValue > 0 ? 'var(--accent2)' : 'var(--dim)';
+      }
       const autoSwitch = data.auto_switch_product === true;
       const autoSwitchInput = document.getElementById('setAutoSwitch');
       if(autoSwitchInput) autoSwitchInput.checked = autoSwitch;
@@ -2658,6 +2688,22 @@ async function saveReserveCredits(btn){
   try {
     await postJSON('/settings/save', {reserve_credits: value});
     toast(value > 0 ? ('已启用：余额低于 ' + value + ' 的账号暂停接单') : '已关闭保留积分', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveDailyTokenLimit(btn){
+  const el = document.getElementById('setDailyTokenLimit');
+  const value = Math.floor(Number((el || {}).value || 0));
+  if(!Number.isFinite(value) || value < 0){ toast('请填写 0 或正整数（token）', 'warn'); return; }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {daily_token_limit: value});
+    toast(value > 0 ? ('已启用：账号当日超过 ' + fmt(value) + ' token 后暂停接单') : '已设为不限（0 = 不限额）', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

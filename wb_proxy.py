@@ -749,6 +749,113 @@ _snap_lock = threading.Lock()
 _STATS_TTL = float(os.environ.get("WB_STATS_TTL", 15))
 
 
+# ---------------------------------------------------------------------------
+# Daily token guard
+#
+# The upstream caps a free window at a fixed token budget (code 6004), and by
+# the time it answers 429 the window is already spent. This counter lets the
+# operator park an account at a threshold instead: usage.jsonl is folded into
+# uid -> tokens-since-local-midnight, AccountPool.apply_daily_token_limit()
+# copies the numbers onto the accounts and ready() refuses them, so the next
+# request rotates to another account. The scan is incremental (byte offset +
+# per-day totals), so the hot path only reads rows that arrived since the
+# last scan.
+# ---------------------------------------------------------------------------
+_daily_usage = {"day": "", "totals": None, "offset": 0, "at": 0.0}
+_daily_usage_lock = threading.Lock()
+
+
+def _scan_daily_tokens(offset, totals):
+    """Fold rows at/after today's local midnight into `totals`.
+
+    Returns (totals, new_offset). A line without its trailing newline is left
+    for the next scan: rows are appended whole, so a partial tail only means
+    this read raced the writer.
+    """
+    midnight = _local_midnight()
+    with open(USAGE_LOG, encoding="utf-8") as fh:
+        fh.seek(offset)
+        while True:
+            pos = fh.tell()
+            line = fh.readline()
+            if not line:
+                break
+            if not line.endswith("\n"):
+                return totals, pos
+            offset = fh.tell()
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if (row.get("at") or 0) < midnight:
+                continue
+            # Same rule as the analytics scan: a client cancellation is not a
+            # consumed request, and its token counts are incomplete.
+            if row_outcome(row) == "client_aborted":
+                continue
+            uid = row.get("account")
+            if not uid:
+                continue
+            totals[uid] = totals.get(uid, 0) + (row.get("total_tokens") or 0)
+    return totals, offset
+
+
+def daily_tokens_by_account(ttl=None):
+    """uid -> tokens counted since local midnight, cached for `ttl` seconds.
+
+    None means the log could not be read at all; callers keep that distinct
+    from zero so a failed read never parks an account.
+    """
+    ttl = _STATS_TTL if ttl is None else ttl
+    day = time.strftime("%Y-%m-%d")
+    now = time.time()
+    with _daily_usage_lock:
+        c = _daily_usage
+        if c["day"] == day and c["totals"] is not None and (now - c["at"]) < ttl:
+            return dict(c["totals"])
+        # A new day keeps the byte offset: everything past it is today's, and
+        # the midnight filter drops whatever old rows are still unread.
+        totals = dict(c["totals"] or {}) if c["day"] == day else {}
+        offset = int(c["offset"] or 0)
+        try:
+            size = os.path.getsize(USAGE_LOG)
+        except OSError:
+            size = 0
+        if offset > size:
+            totals, offset = {}, 0
+        try:
+            totals, offset = _scan_daily_tokens(offset, totals)
+        except Exception as exc:
+            log("daily token scan failed: %s" % exc)
+            _daily_usage.update({"day": day, "totals": None, "offset": 0,
+                                 "at": time.time()})
+            return None
+        _daily_usage.update({"day": day, "totals": totals, "offset": offset,
+                             "at": time.time()})
+        return dict(totals)
+
+
+def seconds_until_local_midnight():
+    """Seconds until the local day rolls over (at least a minute)."""
+    lt = time.localtime()
+    nxt = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+    return max(60, int(nxt - time.time()))
+
+
+def apply_daily_token_limit(refresh=False):
+    """Push the daily token setting and today's counts into the pool."""
+    if POOL is None:
+        return 0
+    limit = wb_settings.daily_token_limit(ACCOUNTS_DIR)
+    usage = None
+    if limit > 0:
+        usage = daily_tokens_by_account(ttl=0 if refresh else None)
+    return POOL.apply_daily_token_limit(limit, usage)
+
+
 def usage_snapshot(realm=None, ttl=None, range=None, since=None, until=None):
     """Cached wrapper: the dashboard polls this every few seconds.
 
@@ -1436,12 +1543,13 @@ def runtime_settings_view():
         "auth_required": auth_required(),
         "api_keys": keys,
         "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
+        "daily_token_limit": wb_settings.daily_token_limit(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.6.5",
+        "version": "1.6.6",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -2666,10 +2774,14 @@ class RateLimited(Exception):
     """Upstream throttled this model (429 / code 6004). Distinct from a dead
     pool: the credential is fine, only the model is cooling down for a while."""
 
-    def __init__(self, http_error=None, detail="", wait=60):
+    def __init__(self, http_error=None, detail="", wait=60, message=""):
         self.http_error = http_error
         self.detail = detail or ""
         self.wait = max(1, int(wait or 60))
+        # 429s answered without an upstream call (the pool is parked by the
+        # daily token guard) carry their own text instead of the upstream
+        # wording.
+        self.message = message or ""
         super().__init__("upstream rate limit: %s" % (self.detail[:200] or "429"))
 
 
@@ -2824,6 +2936,11 @@ def parse_rate_limit_reset(detail):
 
 
 def open_upstream(payload, session_key=None, target_realm=None):
+    # Refresh the daily token guard before picking. The scan underneath is
+    # incremental and TTL-cached, so this is a stat() plus a cached dict on
+    # the hot path, and an account parked by the guard is skipped like any
+    # other unusable one.
+    apply_daily_token_limit()
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
     upstream_body = build_upstream_body(payload)
@@ -2971,7 +3088,16 @@ def open_upstream(payload, session_key=None, target_realm=None):
     throttled, wait = realm_model_throttled(realm, model)
     if throttled:
         raise RateLimited(None, "usage exceeds frequency limit", wait=wait)
-    raise RuntimeError(f"no usable account for realm '{realm}': all are disabled, cooling down, or expired")
+    enabled = [a for a in POOL.accounts
+               if a.realm == realm and a.enabled and a.access_token] if POOL else []
+    if enabled and all(a.daily_limit_blocked() for a in enabled):
+        reason = ("every usable account reached today's token limit (%s per "
+                  "account); the pool resumes after local midnight"
+                  % wb_settings.daily_token_limit(ACCOUNTS_DIR))
+        raise RateLimited(None, reason,
+                          wait=seconds_until_local_midnight(), message=reason)
+    raise RuntimeError(f"no usable account for realm '{realm}': all are disabled, "
+                       f"cooling down, expired or parked by the daily token limit")
 def extract_session_key(headers, payload):
     key = (
         headers.get("X-Conversation-Id") or
@@ -4253,7 +4379,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.6.5"
+    server_version = "wb-proxy/1.6.6"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -4426,14 +4552,24 @@ class Handler(BaseHTTPRequestHandler):
         the shortest model cooldown we know about.
         """
         wait = max(1, int(getattr(exc, "wait", 60) or 60))
+        # A 429 raised without an upstream call (the pool is parked by the
+        # daily token guard) carries its own text; everything else keeps the
+        # upstream wording.
+        custom = getattr(exc, "message", "")
+        text = custom or (
+            "upstream rate limit reached for this model; retry in %ds" % wait)
+        # The upstream detail only decorates the upstream wording; a local
+        # message would only repeat itself.
+        detail = ""
+        if exc.detail and not custom:
+            detail = " - " + exc.detail[:200]
         # 429 can be answered before the body is read (the model cooldown is
         # checked on the way in), so drain it exactly like _error does.
         self._handle_expect_continue()
         self._discard_body()
         body = json.dumps({
             "error": {
-                "message": ("upstream rate limit reached for this model; retry in %ds"
-                            % wait) + ((" - " + exc.detail[:200]) if exc.detail else ""),
+                "message": text + detail,
                 "type": "rate_limit_error",
                 "code": 429,
                 "retry_after": wait,
@@ -4753,6 +4889,9 @@ class Handler(BaseHTTPRequestHandler):
     def _get_accounts(self, query):
         if not self._authorized():
             return
+        # Fold the usage log before building the view, so the 日限额 badge and
+        # the parked count describe right now instead of the last request.
+        apply_daily_token_limit()
         return self._json(200, {
             "accounts": account_views(realm=query.get('realm', [None])[0] or CURRENT_REALM),
             "storage": ACCOUNTS_DIR,
@@ -5074,6 +5213,22 @@ class Handler(BaseHTTPRequestHandler):
             if POOL:
                 POOL.apply_reserve_credits(reserve)
             reply["reserve_credits"] = reserve
+        if "daily_token_limit" in payload:
+            raw = payload.get("daily_token_limit")
+            if isinstance(raw, bool) or raw is None:
+                return self._error(400, "daily_token_limit must be a whole number",
+                                   "invalid_request_error")
+            try:
+                limit = int(raw)
+            except (TypeError, ValueError):
+                return self._error(400, "daily_token_limit must be a whole number",
+                                   "invalid_request_error")
+            if limit < 0:
+                return self._error(400, "daily_token_limit cannot be negative",
+                                   "invalid_request_error")
+            wb_settings.set_daily_token_limit(ACCOUNTS_DIR, limit)
+            apply_daily_token_limit(refresh=True)
+            reply["daily_token_limit"] = limit
         if "auto_switch_product" in payload:
             # Strictly a JSON boolean: a string like "false" would be truthy and
             # silently switch the feature on, which is the one thing an operator
@@ -6191,6 +6346,7 @@ def _bootstrap_runtime(args):
     POOL.load()
     POOL.apply_proxy_slots()
     POOL.apply_reserve_credits()
+    apply_daily_token_limit()
     load_persisted_realm()
     global SCHEDULER
     from wb_scheduler import Scheduler
