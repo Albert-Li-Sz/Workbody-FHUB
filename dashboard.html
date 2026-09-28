@@ -2609,6 +2609,7 @@ async function loadSettings(showToast){
       stored_key: '',
       masked: k.masked || '',
       realm: k.realm || '',
+      models: Array.isArray(k.models) ? k.models.slice() : [],
       enabled: k.enabled !== false,
       created_at: k.created_at || '',
       _editing: false,
@@ -2714,6 +2715,21 @@ const REALM_CHOICES = [
   ['cn', '固定国内版出口'],
 ];
 
+/* Model allow-list per key. Patterns are matched case-insensitively with `*`
+   wildcards ("deepseek/*", "gpt-6-astra"). An empty list means no limit, which
+   is how every key saved before this field existed comes back. */
+function parseModelPatterns(text){
+  const out = [];
+  String(text || '').split(/[,;]/).forEach(part => {
+    const pattern = part.trim().toLowerCase();
+    if(pattern && out.indexOf(pattern) === -1) out.push(pattern);
+  });
+  return out;
+}
+function modelPatternsText(patterns){
+  return Array.isArray(patterns) ? patterns.join(', ') : '';
+}
+
 function renderKeyRows(){
   const box = document.getElementById('keyList');
   if(!box) return;
@@ -2744,6 +2760,11 @@ function renderKeyRows(){
         +     '</select>'
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
+        +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">模型限制 <span style="color:var(--dim-light)">(选填，留空 = 不限制)</span></div>'
+        +     '<input type="text" id="editKeyModels_' + i + '" value="' + esc(modelPatternsText(row.models)) + '" placeholder="如 deepseek/* 或 gpt-6-astra；多个用逗号分隔，支持 * 通配" '
+        +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
+        +   '</div>'
+        +   '<div style="grid-column:1 / -1">'
         +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">API Key 内容 ' + (row.masked ? '<span style="color:var(--dim-light)">(已保存: ' + esc(row.masked) + '，留空表示不改)</span>' : '') + '</div>'
         +     '<div style="display:flex;gap:8px">'
         +       '<input type="text" id="editKeyValue_' + i + '" value="' + esc(row.key || '') + '" placeholder="' + (row.masked ? '留空表示保持原 Key 不变' : '输入自定义密钥，或点击右侧生成') + '" '
@@ -2769,6 +2790,10 @@ function renderKeyRows(){
       ? '<span class="realm-badge-cn" style="font-size:11px">固定国内版出口</span>'
       : '<span class="badge s" style="font-size:11px">跟随面板切换</span>';
 
+    const modelBadge = (Array.isArray(row.models) && row.models.length)
+      ? '<span class="badge s" style="font-size:11px">限 ' + esc(modelPatternsText(row.models)) + '</span>'
+      : '';
+
     const displayKey = row.masked || (row.key ? (row.key.slice(0, 4) + '******' + row.key.slice(-4)) : '未设置');
     const createdStr = row.created_at ? ('创建时间 ' + esc(row.created_at)) : '';
 
@@ -2779,6 +2804,7 @@ function renderKeyRows(){
       +       '<span style="font-size:15px;font-weight:700;color:var(--fg)">' + esc(row.name || '未命名') + '</span>'
       +       statusBadge
       +       realmBadge
+      +       modelBadge
       +     '</div>'
       +     '<div style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
       +       '<span>Key: <span class="mono" style="color:var(--fg);font-weight:500">' + esc(displayKey) + '</span></span>'
@@ -2825,6 +2851,7 @@ async function saveSingleKey(index, btn){
   const nameInput = document.getElementById('editKeyName_' + index);
   const realmSelect = document.getElementById('editKeyRealm_' + index);
   const keyInput = document.getElementById('editKeyValue_' + index);
+  const modelsInput = document.getElementById('editKeyModels_' + index);
 
   const name = nameInput ? nameInput.value.trim() : (row.name || '');
   const realm = realmSelect ? realmSelect.value : (row.realm || '');
@@ -2837,6 +2864,7 @@ async function saveSingleKey(index, btn){
 
   row.name = name || '未命名';
   row.realm = realm;
+  row.models = parseModelPatterns(modelsInput ? modelsInput.value : modelPatternsText(row.models));
   if(keyVal) row.key = keyVal;
   row._editing = false;
 
@@ -2880,6 +2908,7 @@ function addApiKeyRow(){
     name: '',
     key: randomKeyValue(),
     realm: '',
+    models: [],
     enabled: true,
     masked: '',
     _editing: true
@@ -2942,6 +2971,7 @@ async function saveApiKeys(btn){
     id: row.id || '',
     name: row.name || '',
     realm: row.realm || '',
+    models: row.models || [],
     enabled: row.enabled !== false,
     // Blank means "keep the stored key", which the server honours per row.
     key: (row.key || '').trim(),
