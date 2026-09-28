@@ -2561,16 +2561,34 @@ BACKGROUND_TRIGGER_KEYWORDS = (
 )
 
 
-def background_request_reason(payload):
-    """若這是 Codex 自己發的背景請求，回傳說明字串；否則回傳 ""。
+# Thread sources that belong to a job the client started on its own. A
+# compaction request carries one of these when the client triggered it, and the
+# user's own thread when the operator pressed "compact the context" - so the
+# source has to be read before the keyword list, where "compaction" matches
+# both and would otherwise refuse the button.
+BACKGROUND_THREAD_SOURCES = (
+    "memory_consolidation",
+    "memory",
+    "ambient",
+    "suggestion",
+    "auto_review",
+    "autoreview",
+    "title",
+)
 
-    只看 client_metadata，不碰訊息內容。
+
+def turn_metadata_fields(payload):
+    """Flatten the request_kind / turn_trigger / thread_source hints we get.
+
+    Codex sends them either as plain client_metadata keys or as a JSON string
+    under a metadata key of its own, so both shapes are read. Returns {} when
+    the payload carries none of them.
     """
     if not isinstance(payload, dict):
-        return ""
+        return {}
     meta = payload.get("client_metadata")
     if not isinstance(meta, dict):
-        return ""
+        return {}
 
     # 收集所有可能的來源/觸發欄位
     fields = {}
@@ -2586,8 +2604,35 @@ def background_request_reason(payload):
                         fields[k] = inner[k]
         if key in ("request_kind", "turn_trigger", "thread_source"):
             fields[key] = value
+    return fields
 
+
+def is_compaction_request(payload):
+    """True for the operator's own "compact the context" request.
+
+    request_kind=compaction carries the same word as the background keyword, but
+    this request is one the user asked for: the client sends it on the user's
+    thread, while a compaction the client started by itself names the job that
+    started it. Refusing this one takes the context-compaction button away.
+    """
+    fields = turn_metadata_fields(payload)
+    kind = str(fields.get("request_kind") or "").strip().lower()
+    if "compact" not in kind:
+        return False
+    source = str(fields.get("thread_source") or "").strip().lower()
+    return source not in BACKGROUND_THREAD_SOURCES
+
+
+def background_request_reason(payload):
+    """若這是 Codex 自己發的背景請求，回傳說明字串；否則回傳 ""。
+
+    只看 client_metadata，不碰訊息內容。
+    """
+    fields = turn_metadata_fields(payload)
     if not fields:
+        return ""
+
+    if is_compaction_request(payload):
         return ""
 
     blob = " ".join(str(v) for v in fields.values()).lower()
