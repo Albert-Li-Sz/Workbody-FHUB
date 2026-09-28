@@ -186,10 +186,12 @@ class Account(object):
         if not self.domain:
             self.domain = get_realm_config(self.realm)["domain"]
         self.platform = str(data.get("platform") or "CLI")
-        # 出站身分預設以 WorkBuddy 獨立桌面端 (workbuddy) 開局。
-        # 面板手動切換或 429 自動切換只影響這次執行；重啟就回到預設的 workbuddy 桌面端。
-        self.product = wb_identity.PRODUCT_DESKTOP
-        self.saved_product = wb_identity.normalize_product(data.get("product"))
+        # 出站身分讀回憑證檔裡保存的值：面板手動切換與 429 自動切換都會經由
+        # save() 寫進憑證檔（to_dict() 序列化的是當下身分），所以重啟後接著用
+        # 上次實際生效的那條通道，而不是每次都回到預設。
+        # 憑證檔沒有這個欄位、或值不合法時 normalize_product() 會回退到
+        # WorkBuddy 獨立桌面端 (workbuddy)，升級前就已存在的帳號行為不變。
+        self.product = wb_identity.normalize_product(data.get("product"))
         self.enterprise_id = str(data.get("enterpriseId") or "")
         self.access_token = token
         self.refresh_token = str(data.get("refreshToken") or "")

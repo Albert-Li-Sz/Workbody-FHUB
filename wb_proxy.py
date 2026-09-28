@@ -2680,6 +2680,9 @@ class RateLimited(Exception):
 #
 # 某模型在 cli 池被限流（429 / code 6004）時，換成 workbuddy 身分通常
 # 還能繼續用 —— 那是另一條配額線。每輪只切一次，避免來回彈跳。
+ #
+ # 身分會寫進憑證檔並在重啟後讀回（issue #76）：面板手動切換當下就落盤，
+ # 這裡的自動切換則在下一次任何 save() 時一併寫入。
 # ---------------------------------------------------------------------------
 
 AUTO_SWITCH_PRODUCT = False
@@ -5259,6 +5262,14 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             try:
                 if account.set_product(target):
+                    # 立刻落盤：set_product() 只改記憶體，而面板上這一下是操作者
+                    # 的明確選擇，不能等到別的路徑（refresh / 簽到 / 查積分）剛好
+                    # 存檔才生效——切完就重啟容器的人會白白丟掉這次切換。
+                    try:
+                        account.save(ACCOUNTS_DIR)
+                    except Exception as exc:
+                        log("product save failed for %s: %s" % (account.uid[:8], exc),
+                            level="WARN")
                     changed.append(account.uid[:8])
                     log("account %s: 面板手動切換身分 -> %s"
                         % (account.uid[:8], target), level="INFO")
