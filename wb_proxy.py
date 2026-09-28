@@ -57,7 +57,8 @@ def detect_model_realm(model_id):
     m = str(model_id).lower()
     intl_only = {
         "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-        "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash"
+        "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash",
+        "grok-4.7"
     }
     if m in intl_only or any(m.startswith(p) for p in ("gpt-", "gemini-")):
         return "intl"
@@ -82,6 +83,7 @@ CN_EXCLUSIVE_PREFIXES = ("minimax-", "deepseek-v4-pro")
 INTL_EXCLUSIVE = {
     "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash",
+    "grok-4.7",
 }
 CN_EXCLUSIVE = {
     "deepseek-v4-pro", "glm-5.1", "glm-5v-turbo",
@@ -1549,7 +1551,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.6.7",
+        "version": "1.6.8",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -1698,6 +1700,9 @@ VIRTUAL_ALIAS_MODELS = {
     "balanced-model",
     "primary-model",
     "deep-model",
+    # The domestic exit's auto-router entry: the picker shows it, but it is
+    # not a model a client can pin, so it stays out of the advertised list.
+    "auto",
 }
 NON_CHAT_MODELS = {"lite"} | VIRTUAL_ALIAS_MODELS
 NON_CHAT_PREFIXES = ("codewise-", "completion-")
@@ -1738,6 +1743,7 @@ INTL_UI_ORDER = [
     "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
+    "grok-4.7",
     "gemini-3.5-flash",
     "glm-5.3-flash",
     "glm-5.3",
@@ -1746,7 +1752,7 @@ INTL_UI_ORDER = [
     "kimi-k2.6",
     "kimi-k2.8-preview",
 ]
-def merge_catalog(primary, realm=None):
+def merge_catalog(primary, realm=None, extras=False):
     r = realm or CURRENT_REALM
     merged = {}
     # "all" is the union of both realms. The analytics dashboard lists every
@@ -1780,20 +1786,42 @@ def merge_catalog(primary, realm=None):
         if mid in merged and mid not in seen:
             seen.add(mid)
             out.append((mid, merged[mid]))
+    if extras:
+        # A model the curated table has never heard of still ships when the
+        # *live* catalogue lists it - that is how a newly added upstream model
+        # reaches /v1/models without a release. The bundled snapshot alone is
+        # not enough: it also carries legacy entries the picker may not show.
+        for mid, _meta in primary or []:
+            if mid in merged and mid not in seen:
+                seen.add(mid)
+                out.append((mid, merged[mid]))
     return out
+_catalog_lock = threading.Lock()
+
 def fetch_models(realm=None):
     r = realm or CURRENT_REALM
     with _lock:
         c = _models_cache.get(r) or {"at": 0.0, "data": None}
         if c["data"] and time.time() - c["at"] < 300:
             return c["data"]
-    live = read_product_config_models(realm=r)
-    if not live and r in ("intl", "all"):
-        live = [(m, {}) for m in fetch_endpoint_models()]
-    entries = merge_catalog(live, realm=r)
-    with _lock:
-        _models_cache[r] = {"at": time.time(), "data": entries}
-    return entries
+    # One upstream walk per realm even when several callers miss the cache at
+    # the same moment: a batch of /v1/models requests must not turn into a
+    # batch of upstream requests.
+    with _catalog_lock:
+        with _lock:
+            c = _models_cache.get(r) or {"at": 0.0, "data": None}
+            if c["data"] and time.time() - c["at"] < 300:
+                return c["data"]
+        live, extras = curated_live_sources(r)
+        if not live and r in ("intl", "all"):
+            # The narrow endpoint is not the desktop catalogue, so it keeps the
+            # old whitelist behaviour: only names the order table knows.
+            live = [(m, {}) for m in fetch_endpoint_models()]
+            extras = False
+        entries = merge_catalog(live, realm=r, extras=extras)
+        with _lock:
+            _models_cache[r] = {"at": time.time(), "data": entries}
+        return entries
 def model_entry(mid, meta):
     """Build a rich /v1/models entry from the desktop app catalog metadata.
     The OpenAI spec only names id/object/created/owned_by, so capability data is
@@ -1940,6 +1968,269 @@ def _read_product_config_dir(cache_dir):
         if isinstance(mid, str) and mid:
             out.append((mid, m))
     return out
+#: The desktop client's own product-config endpoint. The cache file that
+#: read_product_config_models() reads is this response written to disk, so
+#: calling it directly is what lets a machine without the desktop app
+#: (Docker, NAS, a headless server) advertise the live catalogue - live
+#: multipliers included - instead of the narrower endpoint or the bundled
+#: snapshot.
+REMOTE_CONFIG_PATH = "/v3/config"
+
+#: Suffixes that mark a variant of a name the catalogue already carries: the
+#: regional build (deepseek-v4.1-flash-sg) and the experimental one (hy3-x).
+#: Measured on both exits: the plain name is the free (x0.00) one and the
+#: variant is the paid one, so the plain name is what gets advertised.
+VARIANT_SUFFIXES = ("-sg", "-x")
+
+
+def remote_config_headers(account, realm, ua=None):
+    """Headers for the product-config call.
+
+    The UA decides which catalogue comes back and only the desktop UA returns
+    the full list (an unknown one is a hard 400, code 12403), so this uses a
+    realm's fixed desktop UA rather than the account's current identity.
+    """
+    cfg = wb_accounts.get_realm_config(realm)
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": ua or cfg["chat_ua"],
+        "Origin": cfg["origin"],
+        "Referer": cfg["origin"] + "/",
+        "Authorization": "Bearer " + account.access_token,
+        "X-User-Id": account.uid,
+    }
+
+
+def _agent_model_lists(payload):
+    """Every agent's bare-string model list, cli-named agents first.
+
+    The catalogue the picker shows rides in agents[].models. The endpoint
+    answers with it under a "data" key while the desktop cache file is the
+    same document written to disk without that envelope, so both are read.
+    """
+    roots = [payload]
+    data = payload.get("data")
+    if isinstance(data, dict):
+        roots.append(data)
+    cli, other = [], []
+    for root in roots:
+        agents = root.get("agents")
+        if isinstance(agents, dict):
+            entries = list(agents.items())
+        elif isinstance(agents, list):
+            entries = [((entry.get("name") if isinstance(entry, dict) else None),
+                        entry) for entry in agents]
+        else:
+            continue
+        for name, entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            models = entry.get("models")
+            if not (isinstance(models, list) and models
+                    and isinstance(models[0], str)):
+                continue
+            ids = [str(m).strip() for m in models if isinstance(m, str)]
+            ids = [m for m in ids if m]
+            if not ids:
+                continue
+            (cli if str(name or "").strip().lower() == "cli" else other).append(ids)
+    return cli, other
+
+
+def parse_remote_catalog(payload):
+    """(ids, meta) from a /v3/config response, or None when it carries none.
+
+    The picker's list rides in agents[].models as bare ids - under "data" in
+    the endpoint's answer, at the top level in the desktop cache file. The
+    per-model metadata (credits, limits, copy) lives in a separate models
+    array. An unusable credential answers HTTP 200 with an *empty* list, so
+    an empty catalogue is reported as None and the caller falls back instead
+    of publishing "this exit has no models".
+    """
+    if not isinstance(payload, dict):
+        return None
+    cli_lists, other_lists = _agent_model_lists(payload)
+    pool = cli_lists or other_lists
+    best = max(pool, key=len) if pool else None
+    ids, seen = [], set()
+    for mid in best or []:
+        if mid not in seen:
+            seen.add(mid)
+            ids.append(mid)
+    if not ids:
+        return None
+
+    meta = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            models = node.get("models")
+            if isinstance(models, list) and models \
+                and isinstance(models[0], dict) and models[0].get("id"):
+                for item in models:
+                    mid = str(item.get("id") or "").strip()
+                    if mid:
+                        meta.setdefault(mid, item)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(payload)
+    return ids, meta
+
+
+def snapshot_credits():
+    """id -> credits from the bundled catalogue (both realms, intl first).
+
+    Used to answer "is there a free sibling?" for a variant the remote lists
+    but whose sibling it no longer does: the free hy4-preview-f, for example,
+    is what the cn picker keeps while the remote only names the paid one.
+    """
+    out = {}
+    for source in (getattr(wb_catalog, "STATIC_INTL_MODELS", []),
+                           getattr(wb_catalog, "STATIC_CN_MODELS", [])):
+        for item in source or []:
+            mid = str(item.get("id") or "").strip()
+            if mid:
+                out.setdefault(mid, str(item.get("credits") or "").strip().lower())
+    return out
+
+
+def curate_remote_catalog(realm, ids, meta=None):
+    """Trim a remote catalogue to the models the picker should offer.
+
+      - virtual aliases (default-model ... auto) are not models;
+      - "-sg" / "-x" builds are the paid variant of a name the list already
+        carries;
+      - when a free ("x0.00") sibling exists, the free one is the one the
+        picker shows, so the paid sibling is dropped;
+      - everything else keeps its upstream order. Names the upstream does not
+        list at all stay available through the curated order tables and the
+        bundled snapshot, which merge_catalog() keeps.
+    """
+    credits = snapshot_credits()
+    for mid, item in (meta or {}).items():
+        if isinstance(item, dict):
+            credits[mid] = str(item.get("credits") or "").strip().lower()
+    order = CN_UI_ORDER if realm == "cn" else INTL_UI_ORDER
+    known = set(ids) | set(credits) | set(order)
+
+    def free(mid):
+        return credits.get(mid) in ("x0.00", "x0", "0", "0.00")
+
+    out = []
+    for mid in ids:
+        if not is_chat_model(mid):
+            continue
+        if mid.endswith(VARIANT_SUFFIXES):
+            continue
+        if mid.endswith("-f"):
+            base = mid[:-2]
+            if base in known and free(base) and not free(mid):
+                continue
+        elif (mid + "-f") in known and free(mid + "-f") and not free(mid):
+            continue
+        out.append(mid)
+    return out
+
+
+def fetch_remote_product_config(realm):
+    """(ids, meta) from the realm's own product-config endpoint, or None.
+
+    At most two 10s attempts bound the wait: one per desktop UA, because the
+    endpoint sits behind the WAF where a dropped connection is normal, and
+    every caller has a fallback (the desktop cache file, the narrow model
+    endpoint, the bundled snapshot).
+    """
+    if realm not in ("intl", "cn") or POOL is None:
+        return None
+    account = POOL.representative(realm=realm)
+    if account is None or not account.access_token:
+        log("remote catalog: no usable %s account, skipping" % realm)
+        return None
+    cfg = wb_accounts.get_realm_config(realm)
+    url = cfg["chat_upstream"] + REMOTE_CONFIG_PATH
+    # The chat UA is the desktop identity the rest of the gateway uses; the
+    # plain app UA is the second try, for a build that answers only to it.
+    uas = [cfg["chat_ua"]]
+    if cfg.get("billing_ua") and cfg["billing_ua"] != cfg["chat_ua"]:
+        uas.append(cfg["billing_ua"])
+    last = None
+    for ua in uas:
+        headers = remote_config_headers(account, realm, ua)
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with wb_accounts.urlopen(req, timeout=10, proxy=account.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as exc:
+            last = exc
+            continue
+        parsed = parse_remote_catalog(payload)
+        if parsed:
+            return parsed
+        last = "empty catalogue"
+    log("remote catalog: %s fetch failed (%s)" % (realm, last))
+    return None
+
+
+def product_config_path(realm):
+    """The desktop cache file for a realm (the intl app writes its own)."""
+    home = os.path.expanduser("~")
+    cache_dir = ".workbuddy-ai" if realm == "intl" else ".workbuddy"
+    return os.path.join(home, cache_dir, "cache", "acc-product-config-v3.json")
+
+
+def read_cached_remote_catalog(realm):
+    """(ids, meta) from the desktop cache file, parsed like the remote."""
+    if realm == "all":
+        first = read_cached_remote_catalog("intl")
+        second = read_cached_remote_catalog("cn")
+        if not first:
+            return second
+        if not second:
+            return first
+        ids = list(first[0]) + [m for m in second[0] if m not in set(first[0])]
+        meta = dict(second[1])
+        meta.update(first[1])
+        return ids, meta
+    try:
+        with open(product_config_path(realm), encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return None
+    return parse_remote_catalog(payload)
+
+
+def curated_live_sources(realm):
+    """(entries, extras) for the realm's live catalogue, already curated.
+
+    Remote first, then the desktop cache file - the cache is this very
+    response written to disk, so both go through the same parser and the same
+    rules. `extras` says the entries came from the desktop catalogue, whose
+    membership may add a model the curated tables have never seen; the legacy
+    readers keep the old whitelist behaviour.
+    """
+    remote = None
+    try:
+        remote = fetch_remote_product_config(realm)
+    except Exception as exc:
+        log("remote catalog: %s failed (%s)" % (realm, exc))
+    source = remote or read_cached_remote_catalog(realm)
+    if source:
+        ids, meta = source
+        return ([(mid, meta.get(mid) or {})
+                for mid in curate_remote_catalog(realm, ids, meta)], True)
+    legacy = read_product_config_models(realm=realm)
+    if legacy:
+        ids = [mid for mid, _ in legacy]
+        meta = dict((mid, m) for mid, m in legacy if isinstance(m, dict))
+        keep = set(curate_remote_catalog(realm, ids, meta))
+        return ([(mid, m) for mid, m in legacy if mid in keep], False)
+    return [], False
+
+
 def fetch_endpoint_models():
     account = POOL.pick(realm="intl") if POOL else None
     if account is None:
@@ -4433,7 +4724,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.6.7"
+    server_version = "wb-proxy/1.6.8"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
