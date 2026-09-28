@@ -320,6 +320,27 @@ def set_reserve_credits(accounts_dir, value):
     return value
 
 
+def auto_switch_product(accounts_dir):
+    """Whether an upstream 429 may rotate an account's outbound identity.
+
+    Off unless the operator turns it on. Rotating identity spends the request's
+    retry budget and leaves the account on a channel nobody picked, so the
+    gateway does not decide that on its own - and an install that predates the
+    setting keeps behaving exactly as it did.
+    """
+    return load(accounts_dir).get("auto_switch_product") is True
+
+
+def set_auto_switch_product(accounts_dir, enabled):
+    """Persist the auto-switch toggle. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["auto_switch_product"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
 _SLOT_ID_RE = re.compile(r"^slot-(\d+)$")
 
 

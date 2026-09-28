@@ -1436,6 +1436,7 @@ def runtime_settings_view():
         "auth_required": auth_required(),
         "api_keys": keys,
         "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
+        "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
@@ -2674,20 +2675,26 @@ class RateLimited(Exception):
 # ---------------------------------------------------------------------------
 # 出站身分自動切換
 #
-# 官方有兩套身分，端點與配額池都不同：
-#   cli        -> codebuddy.ai (國際) / copilot.tencent.com (國內)
-#   workbuddy  -> workbuddy.ai  (國際) / workbuddy.cn        (國內)
+# 官方有三套身分（workbuddy / vscode / cli），端點與配額通道各不相同，
+# 對照表見 wb_identity._ENDPOINTS。
 #
-# 某模型在 cli 池被限流（429 / code 6004）時，換成 workbuddy 身分通常
-# 還能繼續用 —— 那是另一條配額線。每輪只切一次，避免來回彈跳。
- #
- # 身分會寫進憑證檔並在重啟後讀回（issue #76）：面板手動切換當下就落盤，
- # 這裡的自動切換則在下一次任何 save() 時一併寫入。
+# 某模型在某條通道被限流（429 / code 6004）時，換成另一套身分通常還能繼續
+# 用 —— 那是另一條配額線。每輪最多切 MAX_PRODUCT_SWITCHES 次，避免來回彈跳。
+#
+# 身分會寫進憑證檔並在重啟後讀回（issue #76）：面板手動切換當下就落盤，
+# 這裡的自動切換則在下一次任何 save() 時一併寫入。
+#
+# 這個開關交給面板設定決定（issue #67），預設關閉：自動切換會吃掉重試預算，
+# 也會把帳號留在操作者沒主動選過的身分上，要用的話自己開。
 # ---------------------------------------------------------------------------
 
-AUTO_SWITCH_PRODUCT = False
 MAX_PRODUCT_SWITCHES = 4
 _SWITCH_LOG = {}
+
+
+def auto_switch_product_enabled():
+    """Whether a 429 may rotate the outbound identity (panel setting, off by default)."""
+    return wb_settings.auto_switch_product(ACCOUNTS_DIR)
 
 
 def _switch_count(account, model):
@@ -2835,7 +2842,10 @@ def open_upstream(payload, session_key=None, target_realm=None):
     last_429_detail = ""
     last_403_detail = ""
     transient_hits = 0
-    max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if AUTO_SWITCH_PRODUCT else 0)
+    # Read once per request, not per attempt: this is a panel setting, and a
+    # settings read on every retry would be pure overhead.
+    auto_switch = auto_switch_product_enabled()
+    max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
     for _attempt in range(max_attempts):
         account = POOL.pick_for_session(realm=realm, session_key=session_key,
                                         exclude=tried, model=model) if POOL else None
@@ -2879,7 +2889,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 # so sibling models stay serviceable on the same credential.
                 account.note_error("HTTP 429 (model throttled)", model=model, until=reset_at,
                                    cooldown=wait)
-                if AUTO_SWITCH_PRODUCT and _try_switch_product(account, model):
+                if auto_switch and _try_switch_product(account, model):
                     # 換了身分就等於換了一條配額線：要把它從「已試過」拿掉，
                     # 並清掉剛剛記下的模型冷卻，否則下一輪迴圈會找不到帳號。
                     tried.discard(account.uid)
@@ -5063,6 +5073,16 @@ class Handler(BaseHTTPRequestHandler):
             if POOL:
                 POOL.apply_reserve_credits(reserve)
             reply["reserve_credits"] = reserve
+        if "auto_switch_product" in payload:
+            # Strictly a JSON boolean: a string like "false" would be truthy and
+            # silently switch the feature on, which is the one thing an operator
+            # turning it off must not get.
+            raw = payload.get("auto_switch_product")
+            if not isinstance(raw, bool):
+                return self._error(400, "auto_switch_product must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_auto_switch_product(ACCOUNTS_DIR, raw)
+            reply["auto_switch_product"] = raw
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()

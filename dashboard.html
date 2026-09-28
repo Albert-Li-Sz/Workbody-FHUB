@@ -768,13 +768,34 @@ a:hover{text-decoration:underline}
             <input id="setReserveCredits" type="number" min="0" step="1" value="0"
                    style="width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
           </div>
-          <button onclick="saveReserveCredits(this)">保存</button>
+            <button onclick="saveReserveCredits(this)">保存</button>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section>
-      <h2>运行信息</h2>
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">429 自动切换出站身分 <em id="setAutoSwitchState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额通道，开启后 429 会少一些。默认关闭。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：切换后的身分会被保存，重启后继续沿用，不会自动回到 WB。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAutoSwitch" type="checkbox" style="width:16px;height:16px">
+              启用自动切换
+            </label>
+            <button onclick="saveAutoSwitchProduct(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>运行信息</h2>
       <table>
         <tbody>
           <tr><td>当前版本</td><td class="mono" id="setVersion">-</td></tr>
@@ -2514,11 +2535,19 @@ async function loadSettings(showToast){
     const reserveValue = Number(data.reserve_credits || 0);
     const reserveInput = document.getElementById('setReserveCredits');
     if(reserveInput) reserveInput.value = String(reserveValue);
-    const reserveState = document.getElementById('setReserveState');
-    if(reserveState){
-      reserveState.textContent = reserveValue > 0 ? ('(低于 ' + reserveValue + ' 暂停接单)') : '(未启用)';
-      reserveState.style.color = reserveValue > 0 ? 'var(--accent2)' : 'var(--dim)';
-    }
+      const reserveState = document.getElementById('setReserveState');
+      if(reserveState){
+        reserveState.textContent = reserveValue > 0 ? ('(低于 ' + reserveValue + ' 暂停接单)') : '(未启用)';
+        reserveState.style.color = reserveValue > 0 ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const autoSwitch = data.auto_switch_product === true;
+      const autoSwitchInput = document.getElementById('setAutoSwitch');
+      if(autoSwitchInput) autoSwitchInput.checked = autoSwitch;
+      const autoSwitchState = document.getElementById('setAutoSwitchState');
+      if(autoSwitchState){
+        autoSwitchState.textContent = autoSwitch ? '(已启用)' : '(未启用)';
+        autoSwitchState.style.color = autoSwitch ? 'var(--accent2)' : 'var(--dim)';
+      }
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
     API_KEY_ROWS = (data.api_keys || []).map(k => ({
@@ -2579,6 +2608,21 @@ async function saveReserveCredits(btn){
   try {
     await postJSON('/settings/save', {reserve_credits: value});
     toast(value > 0 ? ('已启用：余额低于 ' + value + ' 的账号暂停接单') : '已关闭保留积分', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveAutoSwitchProduct(btn){
+  const el = document.getElementById('setAutoSwitch');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {auto_switch_product: value});
+    toast(value ? '已启用：429 时自动切换出站身分' : '已关闭自动切换出站身分', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

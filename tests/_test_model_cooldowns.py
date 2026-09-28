@@ -5,6 +5,7 @@ No upstream credentials or outbound network are used.
 """
 import atexit
 import io
+import json
 import os
 import sys
 import tempfile
@@ -22,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_accounts as accounts
 import wb_proxy as proxy
+import wb_settings as settings
 
 
 class ModelCooldownTests(unittest.TestCase):
@@ -97,20 +99,28 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertFalse(any(thread.is_alive() for thread in threads), "worker did not stop")
         self.assertEqual(failures, [])
 
-    def test_upstream_429_reaches_accounts_payload(self):
-        account = self.account()
+    def drive_one_429(self, account):
+        """Drive open_upstream into an upstream 429 with a stubbed urlopen.
+
+        Returns the reset instant the stubbed parser reported, so callers can
+        assert the cooldown the gateway recorded.
+        """
         reset = time.time() + 600
         detail = "usage exceeds frequency limit"
         error = urllib.error.HTTPError("https://upstream.invalid", 429, "rate limit", {},
-                                      io.BytesIO(detail.encode("utf-8")))
+                                       io.BytesIO(detail.encode("utf-8")))
+
         class Pool(object):
             accounts = [account]
             affinity = types.SimpleNamespace(unbind=lambda _key: None)
+
             def count_ready(self, realm, model=None):
                 return sum(a.ready(model=model) for a in self.accounts)
+
             def pick_for_session(self, realm, session_key=None, exclude=(), model=None):
                 return next((a for a in self.accounts if a.uid not in exclude
                              and a.realm == realm and a.ready(model=model)), None)
+
             def list_public(self):
                 return [a.public() for a in self.accounts]
 
@@ -118,22 +128,74 @@ class ModelCooldownTests(unittest.TestCase):
         old_parser = proxy.parse_rate_limit_reset
         proxy.POOL = Pool()
         accounts.urlopen = lambda *args, **kwargs: (_ for _ in ()).throw(error)
-        # Keep this test on the 429 -> account-list path, independent of the
+        # Keep these tests on the 429 -> account-list path, independent of the
         # existing parser's timezone handling.
         proxy.parse_rate_limit_reset = lambda _detail: reset
         try:
             with self.assertRaises(proxy.RateLimited):
                 proxy.open_upstream({"model": "glm-5.3", "messages": [
                     {"role": "user", "content": "hello"}]}, target_realm="cn")
-            row = proxy.POOL.list_public()[0]
-            self.assertFalse(row["inCooldown"])
-            self.assertEqual(row["modelCooldowns"][0]["model"], "glm-5.3")
-            self.assertLess(abs(row["modelCooldowns"][0]["expiresAt"] - reset), 2)
-            self.assertTrue(account.ready(model="another-model"))
         finally:
             proxy.POOL, accounts.urlopen = old_pool, old_urlopen
             proxy.parse_rate_limit_reset = old_parser
             error.close()
+        return reset
+
+    def test_upstream_429_reaches_accounts_payload(self):
+        account = self.account()
+        reset = self.drive_one_429(account)
+        row = account.public()
+        self.assertFalse(row["inCooldown"])
+        self.assertEqual(row["modelCooldowns"][0]["model"], "glm-5.3")
+        self.assertLess(abs(row["modelCooldowns"][0]["expiresAt"] - reset), 2)
+        self.assertTrue(account.ready(model="another-model"))
+
+    def test_the_auto_switch_setting_is_opt_in(self):
+        """Off on a fresh install, and only a real JSON boolean turns it on."""
+        directory = tempfile.mkdtemp(prefix="auto-switch-setting-")
+        self.assertFalse(settings.auto_switch_product(directory))
+        self.assertTrue(settings.set_auto_switch_product(directory, True))
+        self.assertTrue(settings.auto_switch_product(directory))
+        self.assertFalse(settings.set_auto_switch_product(directory, False))
+        self.assertFalse(settings.auto_switch_product(directory))
+        with open(settings.settings_path(directory), "w", encoding="utf-8") as fh:
+            json.dump({"auto_switch_product": "false"}, fh)
+        self.assertFalse(settings.auto_switch_product(directory),
+                         "a hand-edited string must not read as enabled")
+
+    def test_a_429_keeps_the_identity_while_the_setting_is_off(self):
+        directory = tempfile.mkdtemp(prefix="auto-switch-off-")
+        old_dir = proxy.ACCOUNTS_DIR
+        proxy.ACCOUNTS_DIR = directory
+        proxy._SWITCH_LOG.clear()
+        try:
+            account = self.account()
+            self.drive_one_429(account)
+            self.assertEqual(account.product, "workbuddy")
+            self.assertEqual(proxy._SWITCH_LOG, {})
+        finally:
+            proxy.ACCOUNTS_DIR = old_dir
+            proxy._SWITCH_LOG.clear()
+
+    def test_a_429_rotates_the_identity_once_the_setting_is_on(self):
+        directory = tempfile.mkdtemp(prefix="auto-switch-on-")
+        settings.set_auto_switch_product(directory, True)
+        old_dir = proxy.ACCOUNTS_DIR
+        old_budget = proxy.MAX_PRODUCT_SWITCHES
+        proxy.ACCOUNTS_DIR = directory
+        # One switch makes the assertion exact and independent of how large the
+        # real budget is (an even number of rotations ends back at workbuddy).
+        proxy.MAX_PRODUCT_SWITCHES = 1
+        proxy._SWITCH_LOG.clear()
+        try:
+            account = self.account()
+            self.drive_one_429(account)
+            self.assertEqual(account.product, "vscode")
+            self.assertTrue(proxy._SWITCH_LOG)
+        finally:
+            proxy.ACCOUNTS_DIR = old_dir
+            proxy.MAX_PRODUCT_SWITCHES = old_budget
+            proxy._SWITCH_LOG.clear()
 
 
 if __name__ == "__main__":
