@@ -12,6 +12,26 @@ import urllib.request
 import uuid
 from wb_fingerprint import derive_id, generate_request_id
 import wb_identity
+import wb_settings
+
+# ---------------------------------------------------------------------------
+# 网页版通道（issue #75 / #59）
+#
+# 网页版 app 的「对话」不是 chat/completions，而是 console/as 下的 agent 会话：
+# 创建会话时带上 prompt，后端就按该 prompt 起一次任务。抓包确认这条链路只用
+# Authorization: Bearer <accessToken> 与 X-User-Id 两个凭据头，没有桌面端的
+# X-IDE-* 指纹，所以网关手里同一份账号凭据可以直接用（实测 GET 列表与 POST
+# batch-get 都返回业务响应而不是 401），不需要额外的网页登录。
+#
+# 每日活跃奖励只认网页端对话：桌面身分发 chat/completions 不计数（issue #75、
+# #59 两份实测）。因此国际版打卡在桌面端对话之外，再走一次这条网页通道。
+# ---------------------------------------------------------------------------
+WEB_ORIGIN = "https://www.workbuddy.ai"
+WEB_CONVERSATIONS_URL = WEB_ORIGIN + "/console/as/conversations/"
+WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
+DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
+DAILY_CHAT_WEB_PROMPT = "Hi"
 
 
 def _retryable(exc):
@@ -522,15 +542,69 @@ class Account(object):
         today_str = time.strftime("%Y-%m-%d")
         return not str(self.last_daily_chat).startswith(today_str)
 
-    def daily_chat(self):
-        """国际版每日活跃对话（满足官方客户端每日对话送 30/50 积分活跃奖励规则）。"""
+    def web_headers(self):
+        """网页版 app 的出站头：只有 bearer 与 X-User-Id，没有桌面端指纹。"""
+        return {
+            "Authorization": "Bearer " + self.access_token,
+            "X-User-Id": self.uid,
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": WEB_ORIGIN,
+            "Referer": WEB_ORIGIN + "/app",
+            "User-Agent": WEB_USER_AGENT,
+        }
+
+    def daily_chat_web(self):
+        """网页通道的每日活跃会话：在 console/as 下建一个带 prompt 的会话。
+
+        返回 {"ok": True, "conversation": <id>} 或 {"ok": False, "error": ...}。
+        """
+        if self.realm != "intl":
+            return {"ok": False, "error": "web daily chat is only for international accounts"}
+        body = {
+            "prompt": DAILY_CHAT_WEB_PROMPT,
+            "model": DAILY_CHAT_MODEL,
+            # 网页端建会话时固定带上这两项（抓包所得），保持请求形态一致。
+            "conversationOrigin": "workbuddy-app",
+            "plugins": [{"name": "weixinpay", "marketplace": "codebuddy-builtin"}],
+        }
+        req = urllib.request.Request(
+            WEB_CONVERSATIONS_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=self.web_headers(), method="POST")
+        try:
+            with urlopen(req, timeout=30, proxy=self.proxy) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace") or "{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:
+                detail = str(exc)
+            return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120])}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "unexpected response"}
+        conversation = (payload.get("data") or {}).get("id")
+        if payload.get("code") not in (0, None) or not conversation:
+            return {"ok": False, "error": "code=%s msg=%s"
+                    % (payload.get("code"), payload.get("msg"))}
+        return {"ok": True, "conversation": conversation}
+
+    def daily_chat(self, web=None):
+        """国际版每日活跃对话（官方每日活跃 30/50 积分）。
+
+        两步：桌面端身分的轻量对话（一直以来的做法），以及网页通道的会话
+        （issue #75/#59：实测只有网页端对话会被算作活跃）。web=None 时按
+        settings.json 里的 daily_chat_web 决定，True/False 可显式指定。
+        """
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
         import wb_proxy
         url = self.chat_base_url() + wb_proxy.CHAT_PATH
         headers = self.headers("chat")
         body = {
-            "model": "deepseek-v4.1-flash",
+            "model": DAILY_CHAT_MODEL,
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": True,
             "max_tokens": 10,
@@ -549,7 +623,16 @@ class Account(object):
                 self.fetch_credits()
             except Exception:
                 pass
-            return {"ok": True, "msg": "每日活跃对话成功完成"}
+            result = {"ok": True, "msg": "每日活跃对话成功完成"}
+            if web is None:
+                web = bool(self.path) and wb_settings.daily_chat_web(os.path.dirname(self.path))
+            if web:
+                res = self.daily_chat_web()
+                result["web"] = res
+                result["msg"] = ("每日活跃对话成功完成（网页通道已建会话 %s）"
+                                 % res.get("conversation")) if res.get("ok") else (
+                                 "每日活跃对话成功完成（网页通道失败：%s）" % res.get("error"))
+            return result
         except urllib.error.HTTPError as exc:
             try:
                 err = exc.read().decode("utf-8", "replace")

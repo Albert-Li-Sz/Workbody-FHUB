@@ -795,6 +795,27 @@ a:hover{text-decoration:underline}
       </section>
 
       <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页通道的会话（在 console/as 下建一个带 prompt 的会话）。实测只有网页端对话会被计入官方「每日活跃」，桌面身分的对话不计入。默认开启。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：网页通道会真的起一次任务，消耗该账号少量积分，换来的是每日 30/50 积分活跃奖励。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setDailyChatWeb" type="checkbox" style="width:16px;height:16px">
+              走网页通道
+            </label>
+            <button onclick="saveDailyChatWeb(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
         <h2>运行信息</h2>
       <table>
         <tbody>
@@ -2548,6 +2569,14 @@ async function loadSettings(showToast){
         autoSwitchState.textContent = autoSwitch ? '(已启用)' : '(未启用)';
         autoSwitchState.style.color = autoSwitch ? 'var(--accent2)' : 'var(--dim)';
       }
+      const dailyWeb = data.daily_chat_web !== false;
+      const dailyWebInput = document.getElementById('setDailyChatWeb');
+      if(dailyWebInput) dailyWebInput.checked = dailyWeb;
+      const dailyWebState = document.getElementById('setDailyChatWebState');
+      if(dailyWebState){
+        dailyWebState.textContent = dailyWeb ? '(已启用)' : '(仅桌面端对话)';
+        dailyWebState.style.color = dailyWeb ? 'var(--accent2)' : 'var(--dim)';
+      }
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
     API_KEY_ROWS = (data.api_keys || []).map(k => ({
@@ -2623,6 +2652,21 @@ async function saveAutoSwitchProduct(btn){
   try {
     await postJSON('/settings/save', {auto_switch_product: value});
     toast(value ? '已启用：429 时自动切换出站身分' : '已关闭自动切换出站身分', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveDailyChatWeb(btn){
+  const el = document.getElementById('setDailyChatWeb');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {daily_chat_web: value});
+    toast(value ? '已启用：国际版打卡走网页通道' : '已关闭：国际版打卡只发桌面端对话', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

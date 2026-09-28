@@ -341,6 +341,30 @@ def set_auto_switch_product(accounts_dir, enabled):
     return enabled
 
 
+def daily_chat_web(accounts_dir):
+    """Whether the intl daily check-in also opens a web-channel conversation.
+
+    On unless the operator turns it off: the desktop-identity chat completion
+    this automation used to send does not register the daily activity, while a
+    web conversation does (issues #75, #59). An install that never touched the
+    setting keeps the web step, because that is the behaviour that earns the
+    credits; the toggle exists so a deployment can opt back into the old
+    single-request check-in.
+    """
+    value = load(accounts_dir).get("daily_chat_web")
+    return True if value is None else value is True
+
+
+def set_daily_chat_web(accounts_dir, enabled):
+    """Persist the web-channel toggle. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["daily_chat_web"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
 _SLOT_ID_RE = re.compile(r"^slot-(\d+)$")
 
 

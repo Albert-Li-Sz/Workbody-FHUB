@@ -1437,10 +1437,11 @@ def runtime_settings_view():
         "api_keys": keys,
         "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
+        "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.6.3",
+        "version": "1.6.4",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -4252,7 +4253,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.6.3"
+    server_version = "wb-proxy/1.6.4"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -5083,6 +5084,13 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_auto_switch_product(ACCOUNTS_DIR, raw)
             reply["auto_switch_product"] = raw
+        if "daily_chat_web" in payload:
+            raw = payload.get("daily_chat_web")
+            if not isinstance(raw, bool):
+                return self._error(400, "daily_chat_web must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_daily_chat_web(ACCOUNTS_DIR, raw)
+            reply["daily_chat_web"] = raw
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()
