@@ -2614,6 +2614,15 @@ def banned_model_message(model):
             % (model, allowed))
 
 
+def key_model_message(entry, model):
+    """Explain a per-key model restriction the same way the global ban does."""
+    name = (entry or {}).get("name") or "未命名"
+    allowed = "、".join((entry or {}).get("models") or []) or "-"
+    return ("API Key「%s」的模型限制不允許 %s。該 Key 目前允許：%s。"
+            "請在看板「設置」頁修改這個 Key 的模型限制，或改用允許該模型的 Key。"
+            % (name, model, allowed))
+
+
 def build_upstream_body(payload):
     model = payload.get("model") or ""
     # Resolve the effective thinking state before the backfill below: while
@@ -4678,6 +4687,19 @@ class Handler(BaseHTTPRequestHandler):
         if not is_model_banned(model):
             return ""
         return banned_model_message(model)
+
+    def _key_model_error(self, model):
+        """Per-key model restriction: reject before the request reaches upstream.
+
+        A key that lists no models stays unrestricted, so this is a no-op
+        unless the operator asked for a limit.
+        """
+        entry = self.key_entry
+        if not entry:
+            return ""
+        if wb_settings.key_allows_model(entry, model):
+            return ""
+        return key_model_message(entry, model)
     def _request_realm(self, explicit=None):
         """Pick the upstream exit for this request.
         Priority: an explicit ?realm= argument, then the realm bound to the
@@ -5186,12 +5208,20 @@ class Handler(BaseHTTPRequestHandler):
                 if realm not in ("", "intl", "cn"):
                     return self._error(400, "realm must be intl, cn or empty",
                                        "invalid_request_error")
+                # An older cached panel does not know this field at all, so a
+                # row that omits it keeps whatever is stored instead of
+                # silently dropping the restriction.
+                if "models" in item:
+                    models = item.get("models")
+                else:
+                    models = existing.get(entry_id, {}).get("models")
                 created_at = item.get("created_at") or (existing.get(entry_id, {}).get("created_at") if entry_id in existing else None) or time.strftime("%Y/%m/%d %H:%M")
                 cleaned.append({
                     "id": entry_id,
                     "name": str(item.get("name") or "").strip(),
                     "key": value,
                     "realm": realm,
+                    "models": models,
                     "enabled": item.get("enabled", True) is not False,
                     "created_at": created_at,
                 })
@@ -5892,6 +5922,9 @@ class Handler(BaseHTTPRequestHandler):
             banned = self._banned_model_error(chat_req.get("model"))
             if banned:
                 return self._error(400, banned, "invalid_request_error")
+            key_blocked = self._key_model_error(chat_req.get("model"))
+            if key_blocked:
+                return self._error(400, key_blocked, "invalid_request_error")
             upstream, account = open_upstream(chat_req, session_key=session_key, target_realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
@@ -6082,6 +6115,9 @@ class Handler(BaseHTTPRequestHandler):
             banned = self._banned_model_error(payload.get("model"))
             if banned:
                 return self._error(400, banned, "invalid_request_error")
+            key_blocked = self._key_model_error(payload.get("model"))
+            if key_blocked:
+                return self._error(400, key_blocked, "invalid_request_error")
             upstream, account = open_upstream(payload, session_key=session_key, target_realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],

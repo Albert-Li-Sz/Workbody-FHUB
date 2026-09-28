@@ -7,6 +7,7 @@ password is never stored in clear text - only a PBKDF2-SHA256 digest.
 Only the Python standard library is required.
 """
 
+import fnmatch
 import hashlib
 import hmac
 import json
@@ -147,6 +148,45 @@ def ensure_launcher_key(accounts_dir):
 REALMS = ("", "intl", "cn")
 
 
+def _clean_model_patterns(value):
+    """Normalize one key's model allow-list into a list of lowercase patterns.
+
+    The panel posts a list; a hand-edited settings.json tends to hold a
+    comma-separated string, so both shapes are accepted. Matching is done with
+    fnmatch, which makes an exact name (`gpt-6-astra`) and a wildcard
+    (`deepseek/*`) behave the same way. An empty result means "no restriction",
+    which is what every key written before this field existed reads back as -
+    an upgrade therefore keeps behaving exactly as before.
+    """
+    if isinstance(value, str):
+        raw = [part for part in re.split(r"[,;\n]", value)]
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        return []
+    out = []
+    for item in raw:
+        pattern = str(item or "").strip().lower()
+        if pattern and pattern not in out:
+            out.append(pattern)
+    return out
+
+
+def key_allows_model(entry, model):
+    """True when `entry` places no model restriction, or `model` matches it.
+
+    A key with an empty list stays unrestricted, so nothing changes for
+    installs that never touch this field.
+    """
+    patterns = _clean_model_patterns((entry or {}).get("models"))
+    if not patterns:
+        return True
+    name = str(model or "").strip().lower()
+    if not name:
+        return True
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
 def _clean_key_entry(entry):
     """Normalize one stored key entry; returns None when unusable."""
     if not isinstance(entry, dict):
@@ -162,6 +202,7 @@ def _clean_key_entry(entry):
         "name": str(entry.get("name") or "").strip() or "未命名",
         "key": key,
         "realm": realm,
+        "models": _clean_model_patterns(entry.get("models")),
         "enabled": entry.get("enabled", True) is not False,
         "created_at": entry.get("created_at") or time.strftime("%Y/%m/%d %H:%M"),
     }
@@ -225,6 +266,7 @@ def api_keys(accounts_dir):
                 "name": "默认（跟随面板切换）",
                 "key": legacy,
                 "realm": "",
+                "models": [],
                 "enabled": True,
             }]
     return []
@@ -275,6 +317,7 @@ def match_api_key(accounts_dir, supplied, extra_keys=()):
                 "name": "启动参数",
                 "key": candidate,
                 "realm": "",
+                "models": [],
                 "enabled": True,
                 "source": "launcher",
             }
