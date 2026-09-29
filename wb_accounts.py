@@ -914,13 +914,6 @@ class AccountPool(object):
                     self.log("account %s unreadable: %s" % (name, exc))
                     continue
                 if account.uid:
-                    # Migration: disabled accounts must not hold an exit slot.
-                    if not account.enabled and account.proxy_slot:
-                        account.proxy_slot = ""
-                        try:
-                            account.save(self.dir)
-                        except Exception:
-                            pass
                     self.accounts.append(account)
             self.apply_reserve_credits()
             return self.accounts
@@ -1050,10 +1043,6 @@ class AccountPool(object):
         account.enabled = bool(enabled)
         if enabled:
             account.clear_error()
-        else:
-            # A disabled account must not hold an exit slot: free it so the
-            # slot can be handed to an active account.
-            account.proxy_slot = ""
         account.save(self.dir)
         self.apply_proxy_slots()
         return account.public()
@@ -1166,10 +1155,6 @@ class AccountPool(object):
                 account.enabled = bool(enabled)
                 if enabled:
                     account.clear_error()
-                else:
-                    # Same rule as set_enabled: a disabled account must not
-                    # hold an exit slot.
-                    account.proxy_slot = ""
                 account.save(self.dir)
         self.apply_proxy_slots()
 

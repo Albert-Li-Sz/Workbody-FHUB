@@ -111,8 +111,8 @@ for n in range(3):
 check("every generation got a distinct id", len(seen) == 4, repr(sorted(seen)))
 shutil.rmtree(work, ignore_errors=True)
 
-# ---- [4] bulk disable releases slots, like single disable ----------------
-print("[4] set-all-disabled releases slots")
+# ---- [4] bulk disable keeps every binding (issue #89) --------------------
+print("[4] set-all-disabled keeps the bindings")
 work = make_store()
 slots = wb_settings.set_proxy_slots(work, [
     {"id": "", "name": "A", "url": "http://10.0.0.1:17901", "enabled": True},
@@ -125,11 +125,11 @@ check("both accounts use the slot",
       all(a.proxy == "http://10.0.0.1:17901" for a in pool.accounts))
 
 pool.set_all_enabled(False)
-check("all slots released on bulk disable",
-      all(a.proxy_slot == "" for a in pool.accounts),
+check("bindings survive bulk disable",
+      all(a.proxy_slot == slots[0]["id"] for a in pool.accounts),
       repr([a.proxy_slot for a in pool.accounts]))
-check("runtime proxy cleared too",
-      all(a.proxy == "" for a in pool.accounts),
+check("runtime proxy unchanged",
+      all(a.proxy == "http://10.0.0.1:17901" for a in pool.accounts),
       repr([a.proxy for a in pool.accounts]))
 shutil.rmtree(work, ignore_errors=True)
 

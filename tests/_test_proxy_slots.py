@@ -198,18 +198,17 @@ check(
 )
 check("view has url", by_id["slot-2"]["url"] == "http://slot:2")
 
-print()
-print("[9] disabling an account releases its slot")
+print("[9] disabling an account keeps its exit binding (issue #89)")
 pool.set_enabled("u-1", False)
 u1 = pool.get("u-1")
-check("disabled account proxySlot cleared", u1.proxy_slot == "", repr(u1.proxy_slot))
+check("disabled account keeps proxySlot", u1.proxy_slot == "slot-2", repr(u1.proxy_slot))
 check(
-    "disabled account falls back to legacy (not slot)",
-    u1.proxy == "http://legacy:9",
+    "and keeps resolving that slot",
+    u1.proxy == "http://slot:2",
     repr(u1.proxy),
 )
 check(
-    "disabled account no longer counted",
+    "the slot counts only the enabled account as in use",
     {v["id"]: v for v in P.proxy_slots_view()}["slot-2"]["bound"] == 1,
     P.proxy_slots_view(),
 )
@@ -217,13 +216,18 @@ check("enabled account keeps its slot", pool.get("u-2").proxy_slot == "slot-2")
 
 pool.set_enabled("u-1", True)
 check(
-    "re-enabled account starts unbound",
-    pool.get("u-1").proxy_slot == "",
+    "re-enabled account is still on the same exit",
+    pool.get("u-1").proxy_slot == "slot-2",
     pool.get("u-1").proxy_slot,
+)
+check(
+    "and resolves it again",
+    pool.get("u-1").proxy == "http://slot:2",
+    pool.get("u-1").proxy,
 )
 
 print()
-print("[10] load migrates: disabled account holding a slot releases it")
+print("[10] load keeps a disabled account's binding (issue #89)")
 d3 = tempfile.mkdtemp(prefix="wb-slots-migrate-")
 S.set_proxy_slots(d3, [{"id": "slot-1", "name": "one", "url": "http://slot:1"}])
 mig = A.Account(
@@ -240,13 +244,13 @@ pool3 = A.AccountPool(d3, log=lambda m: None)
 pool3.load()
 pool3.apply_proxy_slots()
 m3 = pool3.get("u-mig")
-check("stale slot cleared on load", m3.proxy_slot == "", repr(m3.proxy_slot))
-check("disabled account uses no slot proxy", m3.proxy == "", repr(m3.proxy))
+check("binding survives the load", m3.proxy_slot == "slot-1", repr(m3.proxy_slot))
+check("and the runtime proxy comes from it", m3.proxy == "http://slot:1", repr(m3.proxy))
 reloaded3 = A.AccountPool(d3, log=lambda m: None)
 reloaded3.load()
 check(
-    "cleanup persisted to disk",
-    reloaded3.get("u-mig").proxy_slot == "",
+    "and is still on disk",
+    reloaded3.get("u-mig").proxy_slot == "slot-1",
     reloaded3.get("u-mig").proxy_slot,
 )
 
