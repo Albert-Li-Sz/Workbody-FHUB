@@ -38,6 +38,7 @@ import uuid
 import wb_accounts
 import wb_catalog
 import wb_settings
+import wb_webtools
 import wb_identity
 IS_WINDOWS = os.name == "nt"
 def launcher_hint(port):
@@ -3923,6 +3924,171 @@ def _unwrap_custom_input(args):
         return parsed
     return args
 
+# 反代自己代跑 web_search / web_fetch。
+#
+# 有些客戶端（例如 Codex App）會宣告 web_search 這種伺服器端工具，但上游
+# 沒有對應的執行器：直接把它丟給 chat endpoint，模型的回答跟完全沒給工具
+# 一樣。所以這裡由反代宣告一個同名 function、攔下呼叫、在本地跑完再把結果
+# 餵回模型。
+#
+# 這是為了配合這類客戶端才走的路徑，一般 API 客戶端不受影響；不想用就把
+# LOCAL_WEB_TOOLS 改成 False，行為就跟只轉發工具宣告時一致。
+LOCAL_WEB_TOOLS = True
+
+
+def sum_usage(total, part):
+    """把一輪的 token 用量累加起來。
+
+    代跑網路工具會多跑好幾次上游，那些 token 是真的花掉的，所以記帳要加總，
+    不能讓最後一輪蓋掉前面幾輪。
+    """
+    if not isinstance(part, dict):
+        return total
+    if not isinstance(total, dict):
+        total = {}
+    for key, value in part.items():
+        if isinstance(value, dict):
+            total[key] = sum_usage(total.get(key), value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            total[key] = (total.get(key) or 0) + value
+        elif key not in total:
+            total[key] = value
+    return total
+
+
+_CITATION_MD_RE = re.compile(r"\[([^\]\n]{1,200})\]\((https?://[^)\s]+)\)")
+
+
+def build_citations(text, sources):
+    """把模型實際引用到的來源轉成 url_citation annotations。
+
+    只標註真的有出現在工具輸出裡的網址 —— 模型自己編的連結不會被當成引用。
+    """
+    text = str(text or "")
+    if not text or not sources:
+        return []
+    by_url = {}
+    for s in sources or []:
+        if not isinstance(s, dict):
+            continue
+        url = str(s.get("url") or "").strip()
+        if not url:
+            continue
+        by_url.setdefault(url, s)
+        by_url.setdefault(url.rstrip("/"), s)
+
+    anns = []
+    seen = set()
+
+    def add(url, title, start, end):
+        key = (url, start, end)
+        if key in seen or start < 0 or end <= start:
+            return
+        seen.add(key)
+        anns.append({
+            "type": "url_citation",
+            "url": url,
+            "title": title or url,
+            "start_index": start,
+            "end_index": end,
+        })
+
+    md_spans = []
+    for m in _CITATION_MD_RE.finditer(text):
+        url = m.group(2)
+        src = by_url.get(url) or by_url.get(url.rstrip("/"))
+        if not src:
+            continue
+        md_spans.append((m.start(0), m.end(0)))
+        add(url, src.get("title") or m.group(1), m.start(0), m.end(0))
+
+    for m in re.finditer(r"https?://[^\s<>()\[\]]+", text):
+        if any(m.start(0) >= s and m.end(0) <= e for s, e in md_spans):
+            continue
+        url = m.group(0).rstrip(".,;:!?")
+        src = by_url.get(url) or by_url.get(url.rstrip("/"))
+        if not src:
+            continue
+        add(url, src.get("title"), m.start(0), m.start(0) + len(url))
+
+    anns.sort(key=lambda a: (a["start_index"], a["end_index"]))
+    return anns
+
+
+def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_start,
+                                drop_tools=False):
+    """執行反代自己代跑的網路工具，把結果餵回模型，回傳新的上游連線。
+
+    drop_tools=True 表示這是最後一輪：把網路工具從工具清單收回，模型沒有東西
+    可以再呼叫，只能用手上的結果把話講完。舊版在回合用盡時合成一個
+    resp_wrapup（status=completed、output=[]）收尾，那等於把失敗偽裝成正常
+    結束，客戶端看到的就是「講到一半斷掉」——issue #43。
+    """
+    convo = holder.get("convo_messages")
+    if convo is None:
+        convo = list(holder.get("base_messages") or [])
+        holder["convo_messages"] = convo
+
+    tool_calls = []
+    for i, c in enumerate(internal_calls):
+        tool_calls.append({
+            "id": "call_web_%d_%d" % (int(t_start * 1000) % 1000000, i),
+            "type": "function",
+            "function": {"name": c["name"], "arguments": c.get("arguments") or "{}"},
+        })
+    convo.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+
+    for tc in tool_calls:
+        nm = tc["function"]["name"]
+        result = wb_webtools.execute(nm, tc["function"]["arguments"])
+        found = wb_webtools.sources_from_result(result)
+        if found:
+            holder.setdefault("web_sources", []).extend(found)
+        log("web tool %s -> %d chars, %d citeable source(s)"
+            % (nm, len(result or ""), len(found)), level="INFO")
+        convo.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "name": nm,
+            "content": result,
+        })
+
+    body = dict(holder.get("base_body") or {})
+    if drop_tools:
+        body["tools"] = [t for t in (body.get("tools") or [])
+                         if not wb_webtools.is_internal_tool(tool_name_of(t))]
+        convo.append({
+            "role": "system",
+            "content": ("The web tools are no longer available. Answer the user now with "
+                        "what you already have. Do not say that you are searching again."),
+        })
+    body["messages"] = convo
+    body["stream"] = True
+    return open_upstream(body, session_key=session_key,
+                         target_realm=holder.get("realm"))
+
+
+def internal_calls_from_chat(chat_obj):
+    """列出一個已聚合的 chat completion 裡要由反代代跑的呼叫。"""
+    message = ((chat_obj.get("choices") or [{}])[0] or {}).get("message") or {}
+    out = []
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        if wb_webtools.is_internal_tool(name):
+            out.append({"name": name, "arguments": fn.get("arguments") or "{}"})
+    return out
+
+
+def tool_name_of(tool):
+    """Tool name, whichever of the two shapes the entry uses."""
+    if not isinstance(tool, dict):
+        return ""
+    if isinstance(tool.get("function"), dict):
+        return str((tool.get("function") or {}).get("name") or "")
+    return str(tool.get("name") or "")
+
+
 def _responses_input_to_messages(payload):
     """Turn the Responses input items into chat messages."""
     messages = []
@@ -4144,6 +4310,13 @@ def responses_to_chat(payload):
         flat_tools, ns_map = expand_namespace_tools(payload["tools"])
         chat["tools"] = _tools_for_chat(flat_tools)
         chat["_namespace_map"] = ns_map
+    # 客戶端宣告 web_search / web_fetch 時，把那份宣告換成我們的
+    # function（見 wb_webtools.install_tool_defs）。
+    if LOCAL_WEB_TOOLS:
+        wants = wb_webtools.client_wants_web(payload.get("tools"))
+        if wants["search"] or wants["fetch"]:
+            chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
+            chat["_web_tools"] = True
     if payload.get("tool_choice"):
         chat["tool_choice"] = payload["tool_choice"]
     if payload.get("parallel_tool_calls") is not None:
@@ -4165,7 +4338,7 @@ def _responses_usage(u):
         "output_tokens_details": {"reasoning_tokens": det.get("reasoning_tokens") or 0},
         "total_tokens": u.get("total_tokens") or 0,
     }
-def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, namespace_map=None):
+def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, namespace_map=None, sources=None):
     """Fold a Chat Completions object into a Responses API response object.
 
     custom_names is the set of tool names the client declared as freeform
@@ -4232,7 +4405,8 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
             "type": "message",
             "status": "completed",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": text, "annotations": []}] if text else [],
+            "content": [{"type": "output_text", "text": text,
+                         "annotations": build_citations(text, sources)}] if text else [],
         })
     finish = choice.get("finish_reason") or "stop"
     obj = {
@@ -4274,6 +4448,8 @@ def stream_responses_events(upstream, model, holder):
     dsml_tool_calls = []
     custom_names = set(holder.get("custom_names") or ())
     ns_map = holder.get("namespace_map") or {}
+    # 由反代代跑的網路工具呼叫，收集起來不轉發給客戶端
+    _internal_calls = {}
     # Echo the request capabilities the client actually sent, same as the
     # non-streaming path; these were hardcoded before.
     meta = holder.get("request_meta") or {}
@@ -4311,12 +4487,19 @@ def stream_responses_events(upstream, model, holder):
             "status": status,
             "summary": [{"type": "summary_text", "text": "".join(reason_parts)}],
         }
+    def _annotations():
+        """引用來源：只認工具真的回傳過的網址。"""
+        try:
+            return build_citations("".join(text_parts), holder.get("web_sources") or [])
+        except Exception:
+            return []
+
     def msg_item(status):
         item = {"id": msg_id, "type": "message", "status": status,
                 "role": "assistant", "content": []}
         if text_parts:
             item["content"] = [{"type": "output_text", "text": "".join(text_parts),
-                              "annotations": []}]
+                              "annotations": _annotations()}]
         return item
     def _finalize():
         # Close out the stream: reasoning item, structured tool calls,
@@ -4396,6 +4579,13 @@ def stream_responses_events(upstream, model, holder):
                 full_text = clean_text
         if dsml_calls and not tool_calls_map:
             for dc in dsml_calls:
+                # DSML 形狀的網路工具呼叫一樣由反代執行
+                if wb_webtools.is_internal_tool(dc.get("name")):
+                    entry = _internal_calls.setdefault(dc.get("id") or _new_id("call_"),
+                                                       {"name": dc.get("name"), "arguments": "{}"})
+                    entry["name"] = dc.get("name") or entry["name"]
+                    entry["arguments"] = dc.get("arguments") or entry.get("arguments") or "{}"
+                    continue
                 out_idx = len(outputs)
                 fc_item = {
                     "id": _new_id("fc_"),
@@ -4427,6 +4617,53 @@ def stream_responses_events(upstream, model, holder):
                     "output_index": out_idx,
                     "item": fc_item,
                 })
+        # 這一輪如果有代跑的網路工具呼叫，就把完成事件留給下一輪，
+        # 否則客戶端會以為整個回合已經結束（舊版是在回合用盡時補一個合成的
+        # resp_wrapup，那才是 issue #43 真正的病灶）。
+        if _internal_calls:
+            holder.setdefault("internal_calls", []).extend(
+                {"name": v["name"], "arguments": v["arguments"]}
+                for v in _internal_calls.values()
+            )
+            holder["suppress_completion"] = True
+            # 讓 App 畫出原生的「已搜尋網路」卡片：對每個代跑的呼叫送出
+            # web_search_call 項目與生命週期事件。
+            for _v in _internal_calls.values():
+                _nm = str(_v.get("name") or "")
+                try:
+                    _a = json.loads(_v.get("arguments") or "{}")
+                except Exception:
+                    _a = {}
+                if not isinstance(_a, dict):
+                    _a = {}
+                if _nm == wb_webtools.WEB_FETCH_NAME:
+                    _action = {"type": "open_page", "url": wb_webtools.url_arg(_a)}
+                else:
+                    _action = {"type": "search", "query": wb_webtools.query_args(_a)}
+                _ws_id = _new_id("ws_")
+                _ws_idx = len(outputs)
+                outputs.append(None)
+                yield ev("response.output_item.added", {
+                    "output_index": _ws_idx,
+                    "item": {"id": _ws_id, "type": "web_search_call",
+                             "status": "in_progress"},
+                })
+                yield ev("response.web_search_call.in_progress", {
+                    "output_index": _ws_idx, "item_id": _ws_id,
+                })
+                yield ev("response.web_search_call.searching", {
+                    "output_index": _ws_idx, "item_id": _ws_id,
+                })
+                _ws_item = {"id": _ws_id, "type": "web_search_call", "status": "completed"}
+                if _action.get("query") or _action.get("url"):
+                    _ws_item["action"] = _action
+                outputs[_ws_idx] = _ws_item
+                yield ev("response.output_item.done", {
+                    "output_index": _ws_idx, "item": _ws_item,
+                })
+                yield ev("response.web_search_call.completed", {
+                    "output_index": _ws_idx, "item_id": _ws_id,
+                })
         # 3. Emit message item only if text was emitted OR no other output item exists
         has_other_items = any(o for o in outputs if o)
         if msg_index is not None or full_text or not has_other_items:
@@ -4440,14 +4677,15 @@ def stream_responses_events(upstream, model, holder):
                 })
                 yield ev("response.content_part.added", {
                     "item_id": msg_id, "output_index": msg_index, "content_index": 0,
-                    "part": {"type": "output_text", "text": "", "annotations": []},
+                    "part": {"type": "output_text", "text": "", "annotations": _annotations()},
                 })
             yield ev("response.output_text.done", {
                 "item_id": msg_id, "output_index": msg_index, "content_index": 0, "text": full_text,
             })
             yield ev("response.content_part.done", {
                 "item_id": msg_id, "output_index": msg_index, "content_index": 0,
-                "part": {"type": "output_text", "text": full_text, "annotations": []},
+                "part": {"type": "output_text", "text": full_text,
+                         "annotations": _annotations()},
             })
             outputs[msg_index] = msg_item("completed")
             yield ev("response.output_item.done", {"output_index": msg_index, "item": outputs[msg_index]})
@@ -4470,10 +4708,14 @@ def stream_responses_events(upstream, model, holder):
         final = resp_obj(status)
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
-        yield ev("response.completed", {"response": final})
+        if not holder.get("suppress_completion"):
+            yield ev("response.completed", {"response": final})
 
-    yield ev("response.created", {"response": resp_obj("in_progress")})
-    yield ev("response.in_progress", {"response": resp_obj("in_progress")})
+    # 只有第一輪開場。第二輪以後再送一次 response.created，客戶端會
+    # 看到同一則回應被開了兩次。
+    if not holder.get("suppress_lifecycle"):
+        yield ev("response.created", {"response": resp_obj("in_progress")})
+        yield ev("response.in_progress", {"response": resp_obj("in_progress")})
     for raw in upstream:
         data = strip_data_prefix(raw.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
@@ -4511,6 +4753,14 @@ def stream_responses_events(upstream, model, holder):
                 fn_name = fn.get("name") or ""
                 fn_args = fn.get("arguments") or ""
                 call_id = tc.get("id") or ""
+                # web_search / web_fetch 由反代執行，不轉發給客戶端
+                if idx in _internal_calls or (fn_name and wb_webtools.is_internal_tool(fn_name)):
+                    entry = _internal_calls.setdefault(idx, {"name": fn_name, "arguments": ""})
+                    if fn_name:
+                        entry["name"] = fn_name
+                    if fn_args:
+                        entry["arguments"] += fn_args
+                    continue
                 if idx not in tool_calls_map:
                     out_idx = len(outputs)
                     outputs.append(None)
@@ -4592,7 +4842,7 @@ def stream_responses_events(upstream, model, holder):
                     })
                     yield ev("response.content_part.added", {
                         "item_id": msg_id, "output_index": msg_index, "content_index": 0,
-                        "part": {"type": "output_text", "text": "", "annotations": []},
+                        "part": {"type": "output_text", "text": "", "annotations": _annotations()},
                     })
                 # DSML tool call buffering: do not stream raw DSML tags to client
                 text_buffer += piece
@@ -6294,7 +6544,8 @@ class Handler(BaseHTTPRequestHandler):
                     upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                     base_body=chat_req, session_key=session_key, realm=req_realm)
             return self._responses_nonstream_response(
-                upstream, model, custom_names, request_meta, fp, account, t_start, ns_map)
+                upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
+                base_body=chat_req, session_key=session_key, realm=req_realm)
 
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None):
         self.send_response(200)
@@ -6309,14 +6560,39 @@ class Handler(BaseHTTPRequestHandler):
                   "namespace_map": namespace_map,
                   "base_body": base_body,
                   "base_messages": (base_body or {}).get("messages"),
+                  "session_key": session_key,
                   "realm": realm}
         first_ms = None
         try:
-            for frame in stream_responses_events(upstream, model, holder):
-                if first_ms is None:
-                    first_ms = int((time.time() - t_start) * 1000)
-                self.wfile.write(clean_responses_frame(frame))
-                self.wfile.flush()
+            # 一輪跑完如果模型要的是 web_search / web_fetch，就由反代
+            # 執行、把結果餵回去再跑一輪。客戶端從頭到尾只看到一則連續的回應。
+            rounds = 0
+            total_usage = None
+            while True:
+                holder.pop("internal_calls", None)
+                holder.pop("suppress_completion", None)
+                holder["suppress_lifecycle"] = rounds > 0
+                for frame in stream_responses_events(upstream, model, holder):
+                    if first_ms is None:
+                        first_ms = int((time.time() - t_start) * 1000)
+                    self.wfile.write(clean_responses_frame(frame))
+                    self.wfile.flush()
+                # 每一輪的 token 都是真的花掉的，記帳要加總
+                total_usage = sum_usage(total_usage, holder.get("usage"))
+                internal = holder.get("internal_calls") or []
+                if not internal:
+                    break
+                rounds += 1
+                # 用完就收回工具，讓模型自己收尾；這裡不合成任何事件。
+                give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+                upstream, account = follow_up_with_tool_results(
+                    internal, holder, model, session_key, t_start, drop_tools=give_up)
+            if total_usage:
+                holder["usage"] = total_usage
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
             record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
@@ -6339,6 +6615,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return
+        finally:
+            # 代跑多輪時 upstream 會被換掉，外層的 with 只認得最開始那一條，
+            # 最後一條要在這裡收掉。
+            try:
+                upstream.close()
+            except Exception:
+                pass
         wall = int((time.time() - t_start) * 1000)
         record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
@@ -6346,16 +6629,45 @@ class Handler(BaseHTTPRequestHandler):
                      fp=fp, account=account.uid)
         return
 
-    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None):
-        try:
-            chat_obj = aggregate_stream(upstream, model, None)
-        except Exception as exc:
-            record_error(model, 502, str(exc),
-                         elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=account.uid)
-            return self._error(502, f"upstream stream error: {exc}")
+    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None):
+        # 跟串流那條一樣：客戶端宣告 web_search / web_fetch 時由反代代跑。
+        # 中間那幾輪對客戶端不可見，最後才組成一個 Responses 物件回傳；不這樣
+        # 做的話 web_search 的 function_call 會直接漏給客戶端，客戶端只會回
+        # 一句 unsupported call。
+        sources = []
+        rounds = 0
+        while True:
+            try:
+                chat_obj = aggregate_stream(upstream, model, None)
+            except Exception as exc:
+                record_error(model, 502, str(exc),
+                             elapsed_ms=int((time.time() - t_start) * 1000),
+                             account=account.uid)
+                return self._error(502, f"upstream stream error: {exc}")
+            calls = internal_calls_from_chat(chat_obj)
+            if not calls:
+                break
+            rounds += 1
+            give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
+            try:
+                upstream.close()
+            except Exception:
+                pass
+            holder = {"base_messages": (base_body or {}).get("messages"),
+                      "base_body": base_body, "realm": realm,
+                      "web_sources": sources}
+            try:
+                upstream, account = follow_up_with_tool_results(
+                    calls, holder, model, session_key, t_start, drop_tools=give_up)
+            except Exception as exc:
+                record_error(model, 502, "web tool follow-up failed: %s" % exc,
+                             elapsed_ms=int((time.time() - t_start) * 1000),
+                             account=account.uid)
+                return self._error(502, "web tool follow-up failed: %s" % exc)
+            sources = holder.get("web_sources") or sources
         wall = int((time.time() - t_start) * 1000)
-        result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map)
+        result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
+                                  sources=sources)
         record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
                      account=account.uid)
         return self._json(200, result)

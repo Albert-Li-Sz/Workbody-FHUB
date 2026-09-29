@@ -105,15 +105,22 @@ check("namespaced tool reaches the chat body",
       "js" in by_name and by_name["js"]["type"] == "function")
 check("namespace map rides along for the return trip",
       chat.get("_namespace_map", {}).get("js") == "node_repl", chat.get("_namespace_map"))
-check("web_search declaration is passed through untouched",
-      any(t.get("type") == "web_search" for t in tools))
 # The gateway used to turn this declaration into a function of its own and run
-# it locally. It no longer does: the upstream has no server-side search tool
-# (measured — declaring one leaves the model answering "I can't browse"), so
-# the gateway forwards what the client sent instead of standing in for it.
-check("the gateway no longer injects its own web_search function",
-      not any((t.get("function") or {}).get("name") == "web_search" for t in tools),
+# it locally, then stopped standing in for it because the upstream has no
+# server-side search tool at all. The local build turns that back on (see
+# wb_webtools), so this case follows the switch rather than pinning one answer.
+if getattr(P, "LOCAL_WEB_TOOLS", False):
+    check("the gateway replaces the declaration with its own web_search function",
+          any(t.get("name") == "web_search" for t in tools)
+          and not any(t.get("type") == "web_search" for t in tools), tools)
+else:
+    check("web_search declaration is passed through untouched",
+          any(t.get("type") == "web_search" for t in tools))
+check("only one web_search reaches the upstream body",
+      sum(1 for t in tools
+          if t.get("type") == "web_search" or t.get("name") == "web_search") <= 1,
       tools)
+
 body = P.build_upstream_body(dict(chat))
 up = {t.get("function", {}).get("name"): t for t in body["tools"] if isinstance(t, dict)}
 check("upstream body wraps the flattened tools as chat functions",
