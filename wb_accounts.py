@@ -13,18 +13,24 @@ import uuid
 from wb_fingerprint import derive_id, generate_request_id
 import wb_identity
 import wb_settings
+import wb_webagent
 
 # ---------------------------------------------------------------------------
-# 网页版通道（issue #75 / #59）
+# 网页版通道（issue #75 / #59 / #90）
 #
-# 网页版 app 的「对话」不是 chat/completions，而是 console/as 下的 agent 会话：
-# 创建会话时带上 prompt，后端就按该 prompt 起一次任务。抓包确认这条链路只用
-# Authorization: Bearer <accessToken> 与 X-User-Id 两个凭据头，没有桌面端的
-# X-IDE-* 指纹，所以网关手里同一份账号凭据可以直接用（实测 GET 列表与 POST
-# batch-get 都返回业务响应而不是 401），不需要额外的网页登录。
+# 网页版 app 的「对话」不是 chat/completions，而是 console/as 下的 agent 会话。
+# 这条链路只用 Authorization: Bearer <accessToken> 与 X-User-Id 两个凭据头，
+# 没有桌面端的 X-IDE-* 指纹，所以网关手里同一份账号凭据可以直接用。
 #
-# 每日活跃奖励只认网页端对话：桌面身分发 chat/completions 不计数（issue #75、
-# #59 两份实测）。因此国际版打卡在桌面端对话之外，再走一次这条网页通道。
+# 关键的一步（issue #90 实测）：建会话只是**排队**。agent 要等客户端接上这条
+# 会话的沙箱（GET .../{id}/session 返回的 link + token）并请求这一轮才会跑，
+# 否则会话永远停在 CREATING、没有任何输出，也就不算一次有效对话。网页端的顺序
+# 是 建会话 → 取 session → ACP over HTTP+SSE 的 initialize / session/load /
+# session/prompt（实现见 wb_webagent）。
+#
+# 每日活跃奖励认的是「跑完的 agent 会话」：桌面身分发 chat/completions 不计数
+# （issue #75、#59 实测），只建会话不接沙箱同样不计数（#90 实测）。因此国际版
+# 打卡在桌面端对话之外，再走一次这条网页通道，并且把它跑到 completed。
 # ---------------------------------------------------------------------------
 WEB_ORIGIN = "https://www.workbuddy.ai"
 WEB_CONVERSATIONS_URL = WEB_ORIGIN + "/console/as/conversations/"
@@ -32,6 +38,8 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
+#: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
+WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
 
 
 def _retryable(exc):
@@ -593,15 +601,21 @@ class Account(object):
             "User-Agent": WEB_USER_AGENT,
         }
 
-    def daily_chat_web(self):
-        """网页通道的每日活跃会话：在 console/as 下建一个带 prompt 的会话。
+    def daily_chat_web(self, prompt=None):
+        """网页通道的每日活跃会话（issue #75 / #59 / #90）。
 
-        返回 {"ok": True, "conversation": <id>} 或 {"ok": False, "error": ...}。
+        只建会话是不够的：agent 要等客户端接上沙箱并请求这一轮才会跑，否则会话
+        永远停在 CREATING、没有任何输出，也就不算一次有效对话（#90 实测）。这里
+        按网页端的顺序走完：建会话 → 取沙箱 link+token → ACP 的 initialize /
+        session/load / session/prompt（见 wb_webagent）→ 轮询到 completed。
+
+        返回 {"ok": True, "conversation": id, "status": "completed", "chunks": n,
+        "elapsed_ms": n}，失败时 {"ok": False, "error": ...}（尽量带上会话 id）。
         """
         if self.realm != "intl":
             return {"ok": False, "error": "web daily chat is only for international accounts"}
         body = {
-            "prompt": DAILY_CHAT_WEB_PROMPT,
+            "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
             "model": DAILY_CHAT_MODEL,
             # 网页端建会话时固定带上这两项（抓包所得），保持请求形态一致。
             "conversationOrigin": "workbuddy-app",
@@ -628,13 +642,53 @@ class Account(object):
         if payload.get("code") not in (0, None) or not conversation:
             return {"ok": False, "error": "code=%s msg=%s"
                     % (payload.get("code"), payload.get("msg"))}
-        return {"ok": True, "conversation": conversation}
+
+        # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
+        try:
+            session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
+        except Exception as exc:
+            return {"ok": False, "conversation": conversation,
+                    "error": "session 查询失败: %s" % exc}
+        link = session.get("link") or session.get("endpoint") or ""
+        token = session.get("token") or ""
+        session_id = session.get("sessionId") or session.get("session_id") or conversation
+        cwd = session.get("cwd") or "/workspace"
+        if not link or not token:
+            return {"ok": False, "conversation": conversation,
+                    "error": "沙箱未就绪（没有 link/token）"}
+
+        result = wb_webagent.run_turn(
+            link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
+            WEB_USER_AGENT,
+            poll_status=lambda: self._web_conversation_status(conversation),
+            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy)
+        result["conversation"] = conversation
+        if result.get("ok"):
+            result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
+                result.get("chunks") or 0, result.get("elapsed_ms") or 0)
+        return result
+
+    def _web_conversation_get(self, conversation, suffix=""):
+        """读一条网页端会话（suffix 为空拿会话本身，"/session" 拿沙箱信息）。"""
+        url = WEB_CONVERSATIONS_URL + urllib.parse.quote(str(conversation)) + suffix
+        req = urllib.request.Request(url, headers=self.web_headers(), method="GET")
+        with urlopen(req, timeout=30, proxy=self.proxy) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace") or "{}")
+
+    def _web_conversation_status(self, conversation):
+        """这条会话现在什么状态（completed 就是这一轮真的跑完了）。"""
+        try:
+            payload = self._web_conversation_get(conversation)
+        except Exception:
+            return ""
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return str((data or {}).get("status") or "")
 
     def daily_chat(self, web=None):
         """国际版每日活跃对话（官方每日活跃 30/50 积分）。
 
         两步：桌面端身分的轻量对话（一直以来的做法），以及网页通道的会话
-        （issue #75/#59：实测只有网页端对话会被算作活跃）。web=None 时按
+        （issue #75/#59/#90：算数的是「跑完的 agent 会话」）。web=None 时按
         settings.json 里的 daily_chat_web 决定，True/False 可显式指定。
         """
         if self.realm != "intl":
@@ -668,9 +722,13 @@ class Account(object):
             if web:
                 res = self.daily_chat_web()
                 result["web"] = res
-                result["msg"] = ("每日活跃对话成功完成（网页通道已建会话 %s）"
-                                 % res.get("conversation")) if res.get("ok") else (
-                                 "每日活跃对话成功完成（网页通道失败：%s）" % res.get("error"))
+                if res.get("ok"):
+                    result["msg"] = ("每日活跃对话成功完成（网页通道 %s：%d 段输出，%d ms）"
+                                     % (res.get("status") or "completed",
+                                        res.get("chunks") or 0, res.get("elapsed_ms") or 0))
+                else:
+                    result["msg"] = ("每日活跃对话成功完成（网页通道失败：%s）"
+                                     % res.get("error"))
             return result
         except urllib.error.HTTPError as exc:
             try:

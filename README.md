@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.8-2496ED?style=flat-square" alt="Version 1.6.8"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.9-2496ED?style=flat-square" alt="Version 1.6.9"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -17,7 +17,7 @@
 - **设备指纹隔离 (`derive_id`)**：以账号 UID 稳定派生机器码与会话标识，防多号关联风控；
 - **OAuth 免客户端登录**：看板点链接完成授权即自动入库；
 - **国内版自动化**：每日签到、成长任务与积分任务自动接取点亮领奖、猫猫日常旅行与连续打卡；
-- **国际版每日活跃打卡**：自动向国际版官方通道发送轻量对话，全自动领满官方每日活跃 30/50 积分奖励；
+- **国际版每日活跃打卡**：自动建网页端会话并接上沙箱把这一轮真正跑完（ACP over HTTP+SSE），全自动领满官方每日活跃 30/50 积分奖励；
 - **后台定时调度器**：09:00/21:00 国内签到旅行与国际版活跃打卡 · 22:00 保活 · 01:00 夜猫；
 - **双协议支持**：Chat Completions 与 Responses API（Codex / Claude Code）；
 - **Web 看板**：指标卡片、模型性能与用量大表、实时请求流水一屏可查。
@@ -235,6 +235,15 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### v1.6.9
+
+- **修好网页通道打卡：会话会被真正驱动到完成**（issue #90，感谢 [@Saracino34](https://github.com/Saracino34) 的准确定位；issue #75）：v1.6.4 只建了会话，而建会话只是**排队**——agent 要等客户端接上这条会话的沙箱并请求这一轮才会跑，所以网关建的那些会话全部停在 `CREATING`、没有任何输出，第二天自然不加积分（报告人 4/4 复现：手动发的会话十几秒 `completed`，网关建的一条都没动过）。现在按网页端的顺序走完：建会话 → `GET /console/as/conversations/{id}/session` 取沙箱 `link` + `token` → ACP（JSON-RPC over HTTP，服务端事件走 SSE）`initialize` → `session/load` → `session/prompt` → 轮询到 `completed`。实现放在新的 `wb_webagent.py`，只用标准库。
+  - 打卡结果里带上会话状态与输出段数（如「网页通道 completed：12 段输出，15420 ms」），跑没跑成一眼可见，不用等第二天看积分；失败时错误里带会话 id。
+  - 一轮最多等 120 秒（`WB_WEB_TURN_TIMEOUT` 可调）；实测一条「Hi」18.6 秒跑完、12 段输出。
+  - 顺带更正 v1.6.4 的一条判断：`GET /v2/activity/banner` 返回的 `{"code":12302,"msg":"activity is offline"}` 只是 banner 模块自己的状态，不能当作「活动停发」的证据。
+- **本地网络工具（`web_search` / `web_fetch`）改成默认关闭的看板开关**（[PR #87](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/87)，感谢 [@Cekxri](https://github.com/Cekxri)）：默认「直通」——工具声明原样透传，客户端自己声明的搜索工具照常拿到调用（v1.5.3 之后的既有行为，升级不受影响）；要在看板「设置 → 本地网络工具」打开，网关才会把声明换成自己的同名函数、在本地执行并喂回模型。关闭时连同名调用的拦截也一并关掉，客户端自己的 `web_search` 不会被吞。
+- 新增 `tests/_test_web_agent.py`（6 项，钉住驱动顺序与结果上报）；`tests/_test_daily_chat.py` 扩到 10 项、`tests/_test_local_web_tools.py` 扩到 68 项；整套 29 个测试文件全绿。
 
 ### v1.6.8
 

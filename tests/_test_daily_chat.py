@@ -48,15 +48,22 @@ class WebChannelTests(unittest.TestCase):
         return wb_accounts.Account({"uid": self.UID, "realm": realm,
                                     "accessToken": "dummy-token", "lastDailyChat": None})
 
-    def stub(self, payload=None):
-        """Record every outbound request and answer with one canned payload."""
+    def stub(self, payload=None, session=None):
         calls = []
-        body = json.dumps(payload if payload is not None
-                          else {"code": 0, "msg": "OK", "data": {"id": "2102411494602919936"}})
+        create = payload if payload is not None else {
+            "code": 0, "msg": "OK", "data": {"id": "2102411494602919936"}}
+        if session is None:
+            session = {
+                "code": 0, "msg": "OK",
+                "data": {"link": "https://box.example/acp", "token": "sandbox-token",
+                         "sessionId": "2102411494602919936", "cwd": "/workspace"}}
 
         class Response(object):
+            def __init__(self, payload):
+                self.payload = payload
+
             def read(self, *_args):
-                return body.encode("utf-8")
+                return json.dumps(self.payload).encode("utf-8")
 
             def __enter__(self):
                 return self
@@ -66,14 +73,38 @@ class WebChannelTests(unittest.TestCase):
 
         def fake(req, **_kwargs):
             calls.append(req)
-            return Response()
+            if req.full_url.endswith("/session"):
+                return Response(session)
+            if req.full_url.endswith("/conversations/"):
+                return Response(create)
+            return Response({"code": 0, "msg": "OK",
+                            "data": {"status": "completed"}})
 
         return calls, fake
+
+    def stub_turn(self, result=None):
+        """Replace the ACP drive with a recorder; returns the recorded calls."""
+        seen = []
+        real = wb_accounts.wb_webagent.run_turn
+
+        def fake(link, token, session_id, cwd, prompt, user_agent, **kwargs):
+            seen.append({"link": link, "token": token, "session_id": session_id,
+                         "cwd": cwd, "prompt": prompt,
+                         "status": kwargs.get("poll_status")})
+            out = {"ok": True, "status": "completed", "events": 5, "chunks": 2,
+                   "elapsed_ms": 1234, "error": ""}
+            out.update(result or {})
+            return out
+
+        wb_accounts.wb_webagent.run_turn = fake
+        self.addCleanup(setattr, wb_accounts.wb_webagent, "run_turn", real)
+        return seen
 
     def test_web_conversation_request_shape(self):
         """POST /console/as/conversations/ with the web identity, no X-IDE-*."""
         acc = self.account()
         calls, fake = self.stub()
+        turns = self.stub_turn()
         old = wb_accounts.urlopen
         wb_accounts.urlopen = fake
         try:
@@ -95,6 +126,17 @@ class WebChannelTests(unittest.TestCase):
         self.assertTrue(body.get("prompt"))
         self.assertEqual(body.get("model"), wb_accounts.DAILY_CHAT_MODEL)
         self.assertEqual(body.get("conversationOrigin"), "workbuddy-app")
+        # 建会话之后必须接沙箱、把这一轮跑起来，否则会话永远停在 CREATING。
+        self.assertTrue(any(r.full_url.endswith("/session") for r in calls),
+                        [r.full_url for r in calls])
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]["link"], "https://box.example/acp")
+        self.assertEqual(turns[0]["token"], "sandbox-token")
+        self.assertEqual(turns[0]["session_id"], "2102411494602919936")
+        self.assertEqual(turns[0]["cwd"], "/workspace")
+        self.assertTrue(turns[0]["prompt"])
+        self.assertEqual(res.get("status"), "completed")
+        self.assertEqual(res.get("chunks"), 2)
 
     def test_web_conversation_reports_a_business_error(self):
         acc = self.account()
@@ -116,6 +158,7 @@ class WebChannelTests(unittest.TestCase):
     def test_daily_chat_runs_the_web_step_when_asked(self):
         acc = self.account()
         calls, fake = self.stub()
+        self.stub_turn()
         old = wb_accounts.urlopen
         wb_accounts.urlopen = fake
         try:
@@ -127,6 +170,34 @@ class WebChannelTests(unittest.TestCase):
         self.assertIn("网页通道", res.get("msg", ""))
         self.assertTrue(any(r.full_url.endswith("/console/as/conversations/") for r in calls),
                         [r.full_url for r in calls])
+
+    def test_a_turn_that_never_finishes_is_reported(self):
+        acc = self.account()
+        calls, fake = self.stub()
+        self.stub_turn({"ok": False, "status": "working", "chunks": 0,
+                        "error": "会话在 120s 内没有跑完（状态=working）"})
+        old = wb_accounts.urlopen
+        wb_accounts.urlopen = fake
+        try:
+            res = acc.daily_chat_web()
+        finally:
+            wb_accounts.urlopen = old
+        self.assertFalse(res.get("ok"), res)
+        self.assertEqual(res.get("conversation"), "2102411494602919936")
+        self.assertIn("没有跑完", res.get("error", ""))
+
+    def test_a_missing_sandbox_is_reported(self):
+        acc = self.account()
+        calls, fake = self.stub(session={"code": 0, "msg": "OK", "data": {}})
+        self.stub_turn()
+        old = wb_accounts.urlopen
+        wb_accounts.urlopen = fake
+        try:
+            res = acc.daily_chat_web()
+        finally:
+            wb_accounts.urlopen = old
+        self.assertFalse(res.get("ok"), res)
+        self.assertIn("沙箱", res.get("error", ""))
 
     def test_daily_chat_skips_the_web_step_when_off(self):
         acc = self.account()
