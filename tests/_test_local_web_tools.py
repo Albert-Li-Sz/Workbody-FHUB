@@ -20,6 +20,7 @@ rather than assumed. No network access required.
 import json
 import os
 import sys
+import tempfile
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -190,6 +191,9 @@ chat_body = {
     "model": "deepseek-v4.1-flash",
     "messages": [{"role": "user", "content": "tell me about cats"}],
     "tools": [W.web_search_tool_def()],
+    # responses_to_chat marks a request whose definitions the gateway swapped
+    # for its own; interception is tied to that mark (proxy.web_tools_active).
+    "_web_tools": True,
     "stream": True,
 }
 handler = FakeHandler()
@@ -361,6 +365,73 @@ check("the citations ride on the non-stream message too", bool(anns), anns)
 check("the tool result was fed back before the second call",
       any(m.get("role") == "tool" for m in (seen["bodies"][0].get("messages") or [])),
       seen["bodies"][0].get("messages"))
+
+print()
+print("[9] with the switch off the client's own call is forwarded, not run")
+
+passthrough = []
+
+
+def passthrough_open(body, session_key=None, target_realm=None):
+    passthrough.append(body)
+    return FakeUpstream(sse(ANSWER_CHUNKS)), FakeAccount()
+
+
+handler3 = FakeHandler()
+ran = []
+with mock.patch.multiple(proxy,
+                         open_upstream=passthrough_open,
+                         record_usage=lambda *a, **k: None,
+                         record_error=lambda *a, **k: None), \
+        mock.patch.object(W, "execute", lambda name, args: ran.append(name) or "no"), \
+        mock.patch.object(proxy.wb_settings, "local_web_tools", lambda accounts_dir: False):
+    handler3._responses_stream_response(
+        FakeUpstream(sse(TOOL_CHUNKS)), "deepseek-v4.1-flash", set(), {}, "fp",
+        FakeAccount(), 0.0, None,
+        base_body={"model": "m", "messages": [{"role": "user", "content": "hi"}],
+                   "tools": [W.web_search_tool_def()], "stream": True},
+        session_key="sess", realm="intl")
+
+body3 = b"".join(handler3.written).decode("utf-8", "replace")
+check("the client receives its own web_search call", '"name": "web_search"' in body3, body3[-300:])
+check("the gateway ran no tool", ran == [], ran)
+check("no extra upstream round was opened", passthrough == [], len(passthrough))
+check("the stream still completes", "event: response.completed" in body3, body3[-200:])
+
+print()
+print("[10] the switch: settings, injection, and no private marker upstream")
+
+_tmpdir = tempfile.mkdtemp(prefix="wb-webtools-")
+check("the switch is off on a fresh install",
+      proxy.wb_settings.local_web_tools(_tmpdir) is False)
+check("the setting round-trips",
+      proxy.wb_settings.set_local_web_tools(_tmpdir, True) is True
+      and proxy.wb_settings.local_web_tools(_tmpdir) is True
+      and proxy.wb_settings.set_local_web_tools(_tmpdir, False) is False
+      and proxy.wb_settings.local_web_tools(_tmpdir) is False)
+
+with mock.patch.object(proxy.wb_settings, "local_web_tools", lambda accounts_dir: False):
+    chat_off = proxy.responses_to_chat({"model": "m", "input": "hi",
+                                        "tools": [{"type": "web_search"}]})
+check("with the switch off nothing is injected",
+      "_web_tools" not in chat_off
+      and any(t.get("type") == "web_search" for t in (chat_off.get("tools") or [])),
+      chat_off)
+check("and a client's own call is not collected",
+      proxy.internal_calls_from_chat(CHAT_CALL) == [])
+
+with mock.patch.object(proxy.wb_settings, "local_web_tools", lambda accounts_dir: True):
+    chat_on = proxy.responses_to_chat({"model": "m", "input": "hi",
+                                       "tools": [{"type": "web_search"}]})
+check("with the switch on the declaration is replaced and marked",
+      chat_on.get("_web_tools") is True
+      and any(t.get("name") == "web_search" for t in (chat_on.get("tools") or [])),
+      chat_on)
+check("with the switch on calls are collected",
+      len(proxy.internal_calls_from_chat(CHAT_CALL, web_tools=True)) == 1)
+check("private markers never reach the upstream body",
+      not any(str(k).startswith("_") for k in proxy.build_upstream_body(
+          dict(chat_on, _namespace_map={"js": "node_repl"}, _web_tools=True))))
 
 print()
 print("PASS=%d FAIL=%d" % (PASS, FAIL))

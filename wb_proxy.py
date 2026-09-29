@@ -1549,6 +1549,7 @@ def runtime_settings_view():
         "daily_token_limit": wb_settings.daily_token_limit(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
+        "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
@@ -2984,6 +2985,12 @@ def build_upstream_body(payload):
     if not messages or (messages[0].get("role") != "system"):
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
     body = dict(payload)
+    # Private request markers ride along on the chat body for the Responses
+    # path (the namespace map, the local-web-tools flag). They are not part of
+    # the upstream protocol, so drop them here rather than trusting the
+    # upstream to ignore unknown keys.
+    for _marker in [k for k in body if str(k).startswith("_")]:
+        body.pop(_marker, None)
     # dict(payload) 會把原始模型名一起帶過去，所以別名要在這裡覆蓋回去
     body["model"] = model
     body["messages"] = messages
@@ -3924,16 +3931,39 @@ def _unwrap_custom_input(args):
         return parsed
     return args
 
-# 反代自己代跑 web_search / web_fetch。
+# The gateway can run web_search / web_fetch itself; the panel switch decides.
 #
-# 有些客戶端（例如 Codex App）會宣告 web_search 這種伺服器端工具，但上游
-# 沒有對應的執行器：直接把它丟給 chat endpoint，模型的回答跟完全沒給工具
-# 一樣。所以這裡由反代宣告一個同名 function、攔下呼叫、在本地跑完再把結果
-# 餵回模型。
+# Some clients (Codex App and similar harnesses) declare web_search as a
+# server-side tool, but the upstream has no executor for it: forwarding the
+# declaration leaves the model answering as if no tool had been offered. With
+# the switch on, the gateway swaps the declaration for a function of its own,
+# swallows the calls and runs them locally (wb_webtools), then feeds the
+# results back.
 #
-# 這是為了配合這類客戶端才走的路徑，一般 API 客戶端不受影響；不想用就把
-# LOCAL_WEB_TOOLS 改成 False，行為就跟只轉發工具宣告時一致。
-LOCAL_WEB_TOOLS = True
+# Off by default: the declaration is forwarded untouched and a client that
+# declares its own search tool receives the call - the behaviour since v1.5.3.
+# Turning it on means the gateway itself fetches URLs a model asks for, so the
+# egress policy is the operator's call.
+def local_web_tools_enabled():
+    """Panel switch: does this gateway run web_search / web_fetch itself?
+
+    Read per request, so flipping the panel takes effect on the next one
+    without a restart.
+    """
+    try:
+        return wb_settings.local_web_tools(ACCOUNTS_DIR) is True
+    except Exception:
+        return False
+
+
+def web_tools_active(body):
+    """True when this request's tools were swapped for the gateway's own.
+
+    Interception only applies to a request whose definitions the gateway
+    injected: with the switch off, a client's own same-named function must be
+    forwarded instead of being swallowed here.
+    """
+    return isinstance(body, dict) and body.get("_web_tools") is True
 
 
 def sum_usage(total, part):
@@ -4068,10 +4098,17 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
                          target_realm=holder.get("realm"))
 
 
-def internal_calls_from_chat(chat_obj):
-    """列出一個已聚合的 chat completion 裡要由反代代跑的呼叫。"""
+def internal_calls_from_chat(chat_obj, web_tools=False):
+    """Calls in an aggregated chat completion the gateway runs itself.
+
+    Only a request whose definitions the gateway injected can carry such a
+    call; with the switch off a client's own same-named function stays the
+    client's, so this answers empty.
+    """
     message = ((chat_obj.get("choices") or [{}])[0] or {}).get("message") or {}
     out = []
+    if not web_tools:
+        return out
     for tc in message.get("tool_calls") or []:
         fn = tc.get("function") or {}
         name = fn.get("name") or ""
@@ -4312,7 +4349,8 @@ def responses_to_chat(payload):
         chat["_namespace_map"] = ns_map
     # 客戶端宣告 web_search / web_fetch 時，把那份宣告換成我們的
     # function（見 wb_webtools.install_tool_defs）。
-    if LOCAL_WEB_TOOLS:
+    # 看板开关关闭时原样透传，客户端自己的同名工具不受影响。
+    if local_web_tools_enabled():
         wants = wb_webtools.client_wants_web(payload.get("tools"))
         if wants["search"] or wants["fetch"]:
             chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
@@ -4450,6 +4488,9 @@ def stream_responses_events(upstream, model, holder):
     ns_map = holder.get("namespace_map") or {}
     # 由反代代跑的網路工具呼叫，收集起來不轉發給客戶端
     _internal_calls = {}
+    # Only reach for same-named calls when this request's definitions were the
+    # gateway's own (see web_tools_active); otherwise they belong to the client.
+    _own_web_tools = web_tools_active(holder.get("base_body"))
     # Echo the request capabilities the client actually sent, same as the
     # non-streaming path; these were hardcoded before.
     meta = holder.get("request_meta") or {}
@@ -4580,7 +4621,7 @@ def stream_responses_events(upstream, model, holder):
         if dsml_calls and not tool_calls_map:
             for dc in dsml_calls:
                 # DSML 形狀的網路工具呼叫一樣由反代執行
-                if wb_webtools.is_internal_tool(dc.get("name")):
+                if _own_web_tools and wb_webtools.is_internal_tool(dc.get("name")):
                     entry = _internal_calls.setdefault(dc.get("id") or _new_id("call_"),
                                                        {"name": dc.get("name"), "arguments": "{}"})
                     entry["name"] = dc.get("name") or entry["name"]
@@ -4754,7 +4795,9 @@ def stream_responses_events(upstream, model, holder):
                 fn_args = fn.get("arguments") or ""
                 call_id = tc.get("id") or ""
                 # web_search / web_fetch 由反代執行，不轉發給客戶端
-                if idx in _internal_calls or (fn_name and wb_webtools.is_internal_tool(fn_name)):
+                if idx in _internal_calls or (
+                        _own_web_tools and fn_name
+                        and wb_webtools.is_internal_tool(fn_name)):
                     entry = _internal_calls.setdefault(idx, {"name": fn_name, "arguments": ""})
                     if fn_name:
                         entry["name"] = fn_name
@@ -5862,6 +5905,13 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_daily_chat_web(ACCOUNTS_DIR, raw)
             reply["daily_chat_web"] = raw
+        if "local_web_tools" in payload:
+            raw = payload.get("local_web_tools")
+            if not isinstance(raw, bool):
+                return self._error(400, "local_web_tools must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_local_web_tools(ACCOUNTS_DIR, raw)
+            reply["local_web_tools"] = raw
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()
@@ -6636,6 +6686,8 @@ class Handler(BaseHTTPRequestHandler):
         # 一句 unsupported call。
         sources = []
         rounds = 0
+        # 開關關閉時不攔同名呼叫：那是客戶端自己的工具。
+        web_tools = web_tools_active(base_body)
         while True:
             try:
                 chat_obj = aggregate_stream(upstream, model, None)
@@ -6644,7 +6696,7 @@ class Handler(BaseHTTPRequestHandler):
                              elapsed_ms=int((time.time() - t_start) * 1000),
                              account=account.uid)
                 return self._error(502, f"upstream stream error: {exc}")
-            calls = internal_calls_from_chat(chat_obj)
+            calls = internal_calls_from_chat(chat_obj, web_tools=web_tools)
             if not calls:
                 break
             rounds += 1

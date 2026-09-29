@@ -836,6 +836,27 @@ a:hover{text-decoration:underline}
       </section>
 
       <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">本地网络工具 (web_search / web_fetch) <em id="setLocalWebToolsState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              部分客户端（如 Codex App）会宣告 web_search / web_fetch 这类服务端工具，而上游没有对应的执行器：声明送上去，模型看到工具却没有执行器，客户端最后只拿到一句 unsupported call。开启后由本网关代跑——把声明换成自己的同名函数，在本地执行（搜索走 DuckDuckGo，抓页面抓这个 URL）再把结果喂回模型。默认关闭，关闭时声明原样透传，客户端自己声明的搜索工具照常拿到调用。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：开启后网关会主动出网抓取模型给出的 URL（只挡字面私网地址），且每轮代跑都会多跑一次上游、多消耗该账号的额度；国内网络下 DuckDuckGo 可能连不上，那时模型拿到的是错误文本。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setLocalWebTools" type="checkbox" style="width:16px;height:16px">
+              由网关代跑
+            </label>
+            <button onclick="saveLocalWebTools(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
         <h2>运行信息</h2>
       <table>
         <tbody>
@@ -2628,6 +2649,14 @@ async function loadSettings(showToast){
         dailyWebState.textContent = dailyWeb ? '(已启用)' : '(仅桌面端对话)';
         dailyWebState.style.color = dailyWeb ? 'var(--accent2)' : 'var(--dim)';
       }
+      const localWeb = data.local_web_tools === true;
+      const localWebInput = document.getElementById('setLocalWebTools');
+      if(localWebInput) localWebInput.checked = localWeb;
+      const localWebState = document.getElementById('setLocalWebToolsState');
+      if(localWebState){
+        localWebState.textContent = localWeb ? '(已启用)' : '(直通)';
+        localWebState.style.color = localWeb ? 'var(--accent2)' : 'var(--dim)';
+      }
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
     API_KEY_ROWS = (data.api_keys || []).map(k => ({
@@ -2735,6 +2764,21 @@ async function saveDailyChatWeb(btn){
   try {
     await postJSON('/settings/save', {daily_chat_web: value});
     toast(value ? '已启用：国际版打卡走网页通道' : '已关闭：国际版打卡只发桌面端对话', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveLocalWebTools(btn){
+  const el = document.getElementById('setLocalWebTools');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {local_web_tools: value});
+    toast(value ? '已启用：由网关代跑 web_search / web_fetch' : '已关闭：工具声明原样透传', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');

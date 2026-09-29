@@ -107,19 +107,32 @@ check("namespace map rides along for the return trip",
       chat.get("_namespace_map", {}).get("js") == "node_repl", chat.get("_namespace_map"))
 # The gateway used to turn this declaration into a function of its own and run
 # it locally, then stopped standing in for it because the upstream has no
-# server-side search tool at all. The local build turns that back on (see
-# wb_webtools), so this case follows the switch rather than pinning one answer.
-if getattr(P, "LOCAL_WEB_TOOLS", False):
-    check("the gateway replaces the declaration with its own web_search function",
-          any(t.get("name") == "web_search" for t in tools)
-          and not any(t.get("type") == "web_search" for t in tools), tools)
-else:
-    check("web_search declaration is passed through untouched",
-          any(t.get("type") == "web_search" for t in tools))
-check("only one web_search reaches the upstream body",
-      sum(1 for t in tools
-          if t.get("type") == "web_search" or t.get("name") == "web_search") <= 1,
-      tools)
+ # server-side search tool at all; standing in for it again is opt-in through
+ # the panel switch (wb_settings.local_web_tools), so this case follows it.
+_orig_local_web = P.wb_settings.local_web_tools
+P.wb_settings.local_web_tools = lambda accounts_dir: False
+try:
+    chat_off = P.responses_to_chat({"model": "m", "input": "hi",
+                                   "tools": [CUSTOM_TOOL, WEB_TOOL, FUNC_TOOL] + NAMESPACES})
+finally:
+    P.wb_settings.local_web_tools = _orig_local_web
+tools_off = chat_off["tools"]
+check("with the switch off the declaration is passed through untouched",
+      any(t.get("type") == "web_search" for t in tools_off), tools_off)
+P.wb_settings.local_web_tools = lambda accounts_dir: True
+try:
+    chat_on = P.responses_to_chat({"model": "m", "input": "hi",
+                                  "tools": [CUSTOM_TOOL, WEB_TOOL, FUNC_TOOL] + NAMESPACES})
+finally:
+    P.wb_settings.local_web_tools = _orig_local_web
+tools_on = chat_on["tools"]
+check("with the switch on it is replaced by the gateway's own function",
+      any(t.get("name") == "web_search" for t in tools_on)
+      and not any(t.get("type") == "web_search" for t in tools_on), tools_on)
+check("only one web_search reaches the chat body",
+      sum(1 for t in tools_on
+          if t.get("type") == "web_search" or t.get("name") == "web_search") == 1,
+      tools_on)
 
 body = P.build_upstream_body(dict(chat))
 up = {t.get("function", {}).get("name"): t for t in body["tools"] if isinstance(t, dict)}

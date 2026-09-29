@@ -434,6 +434,28 @@ def set_daily_chat_web(accounts_dir, enabled):
         data["daily_chat_web"] = enabled
         save(accounts_dir, data)
     return enabled
+def local_web_tools(accounts_dir):
+    """Whether the gateway runs web_search / web_fetch calls itself.
+
+    Off unless the operator turns it on. Forwarding the client's declaration
+    untouched is what this gateway has done since v1.5.3, and it is what an
+    install that never touched the switch keeps doing: the upstream has no
+    server-side search tool, so a client declaring one runs it in its own
+    process. Turning the switch on swaps the declaration for the gateway's own
+    function and executes the calls locally (wb_webtools), which also means the
+    gateway itself fetches the URLs a model asks for - hence opt-in only.
+    """
+    return load(accounts_dir).get("local_web_tools") is True
+
+
+def set_local_web_tools(accounts_dir, enabled):
+    """Persist the local web-tools switch. Returns the stored boolean."""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["local_web_tools"] = enabled
+        save(accounts_dir, data)
+    return enabled
 
 
 _SLOT_ID_RE = re.compile(r"^slot-(\d+)$")
