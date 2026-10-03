@@ -1006,7 +1006,7 @@ a:hover{text-decoration:underline}
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
-            <h2 style="margin:0">429 自动切换出站身分 <em id="setAutoSwitchState"></em></h2>
+            <h2 style="margin:0">429 自动切换出站身份 <em id="setAutoSwitchState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额通道，开启后 429 会少一些。默认关闭。
             </div>
@@ -2104,7 +2104,7 @@ function accountRow(a){
     +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新凭证</button>'
     +   '</div>'
     +   '<div class="acct-actions-row">'
-    +     '<div class="id-btn-group" title="出站身分：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)">'
+    +     '<div class="id-btn-group" title="出站身份：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)">'
     +       '<button class="id-btn' + ((!a.product || a.product === 'workbuddy') ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;workbuddy&quot;, this)">WB</button>'
     +       '<button class="id-btn' + (a.product === 'vscode' ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;vscode&quot;, this)">VSC</button>'
     +       '<button class="id-btn' + (a.product === 'cli' ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;cli&quot;, this)">CLI</button>'
@@ -2153,7 +2153,7 @@ function renderAccounts(){
     + '<th style="text-align:right;width:80px">缓存</th>'
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
-    + '<div class="legend"><span>出站身分：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额通道。</span></div>'
+    + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额通道。</span></div>'
     + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个</span></div>';
 }
 
@@ -2213,7 +2213,7 @@ async function setAccountProduct(uid, prod, btn){
     'cli': '官方 CodeBuddy CLI (CLI)'
   };
   const label = names[prod] || prod;
-  if(!confirm('将该账号的出站身分切换为 ' + label + '？\n\n不同身分对应不同的出站指纹、端点和配额通道。')) return;
+  if(!confirm('将该账号的出站身份切换为 ' + label + '？\n\n不同身分对应不同的出站指纹、端点和配额通道。')) return;
   if(btn){ btn.disabled = true; }
   try {
     const r = await postJSON('/accounts/product', {uid: uid, product: prod});
@@ -3500,7 +3500,7 @@ async function saveAutoSwitchProduct(btn){
   if(btn) btn.disabled = true;
   try {
     await postJSON('/settings/save', {auto_switch_product: value});
-    toast(value ? '已启用：429 时自动切换出站身分' : '已关闭自动切换出站身分', 'ok');
+    toast(value ? '已启用：429 时自动切换出站身份' : '已关闭自动切换出站身份', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
