@@ -2956,9 +2956,10 @@ def key_model_message(entry, model):
     """Explain a per-key model restriction the same way the global ban does."""
     name = (entry or {}).get("name") or "未命名"
     allowed = "、".join((entry or {}).get("models") or []) or "-"
+    asked = str(model or "").strip() or "(未指定模型)"
     return ("API Key「%s」的模型限制不允許 %s。該 Key 目前允許：%s。"
             "請在看板「設置」頁修改這個 Key 的模型限制，或改用允許該模型的 Key。"
-            % (name, model, allowed))
+            % (name, asked, allowed))
 
 
 def build_upstream_body(payload):
