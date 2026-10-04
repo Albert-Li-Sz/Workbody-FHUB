@@ -462,7 +462,13 @@ _SLOT_ID_RE = re.compile(r"^slot-(\d+)$")
 
 
 def _clean_slot_entry(entry, fallback_id=None):
-    """Normalize one stored slot; returns None when unusable."""
+    """Normalize one stored slot; returns None when unusable.
+
+    The exit fields are written by a probe and stay empty until one runs. An
+    empty name means "label this slot by its exit", which is what the panel
+    shows; it is never silently replaced by the id here, or the operator could
+    not tell an auto-named slot from a renamed one.
+    """
     if not isinstance(entry, dict):
         return None
     url = str(entry.get("url") or "").strip()
@@ -471,11 +477,22 @@ def _clean_slot_entry(entry, fallback_id=None):
     slot_id = str(entry.get("id") or "").strip()
     if not slot_id:
         slot_id = fallback_id or ""
+    try:
+        probed_at = int(entry.get("probed_at") or 0)
+    except (TypeError, ValueError):
+        probed_at = 0
     return {
         "id": slot_id,
-        "name": str(entry.get("name") or "").strip() or slot_id,
+        "name": str(entry.get("name") or "").strip(),
         "url": url,
         "enabled": entry.get("enabled", True) is not False,
+        "ip": str(entry.get("ip") or "").strip(),
+        "country": str(entry.get("country") or "").strip(),
+        "country_code": str(entry.get("country_code") or "").strip().upper(),
+        "ip_type": str(entry.get("ip_type") or "").strip().lower(),
+        "isp": str(entry.get("isp") or "").strip(),
+        "asn": str(entry.get("asn") or "").strip(),
+        "probed_at": probed_at,
     }
 
 
@@ -553,6 +570,40 @@ def set_proxy_slots(accounts_dir, slots):
         data["proxy_slot_seq"] = seq
         save(accounts_dir, data)
         return cleaned
+
+
+def update_proxy_slot(accounts_dir, slot_id, fields, defaults=None):
+    """Merge `fields` into one stored slot; returns the merged copy, or None.
+
+    Both the read and the write happen under the store lock. A plain
+    read-modify-write from the caller would race with a panel save and write
+    back a list that no longer matches what is on disk, silently reverting
+    whatever the other writer changed.
+
+    `defaults` are applied only to fields that are still empty at write time,
+    so a value the operator typed while the caller was working is never
+    overwritten by a derived one.
+    """
+    slot_id = str(slot_id or "").strip()
+    if not slot_id:
+        return None
+    with _lock:
+        out, found = [], None
+        for entry in proxy_slots(accounts_dir):
+            if entry["id"] == slot_id and found is None:
+                entry = dict(entry)
+                entry.update(fields)
+                for key, value in (defaults or {}).items():
+                    if not entry.get(key):
+                        entry[key] = value
+                found = entry
+            out.append(entry)
+        if found is None:
+            return None
+        data = load(accounts_dir)
+        data["proxy_slots"] = out
+        save(accounts_dir, data)
+        return found
 
 
 def drop_missing_bindings(pool, slots):
