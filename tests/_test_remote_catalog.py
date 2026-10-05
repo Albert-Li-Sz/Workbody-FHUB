@@ -161,6 +161,45 @@ class RemoteCatalogTests(unittest.TestCase):
         self.assertIn("grok-4.7", ids)   # the bundled snapshot still fills names
         self.assertNotIn("internal-only-model", ids)  # endpoint keeps the table filter
 
+    def test_live_reasoning_efforts_win_over_the_bundled_table(self):
+        """The endpoint's reasoning block is the source of truth.
+
+        deepseek-v4.1-flash used to be pinned to low/high/max in code, which
+        silently overwrote whatever the live catalogue declared (the pin dates
+        from before the gateway called /v3/config at all).
+        """
+        meta = dict(INTL_META)
+        meta["deepseek-v4.1-flash"] = {
+            "credits": "x0.00",
+            "reasoning": {"supportedEfforts": ["low", "medium", "high"],
+                          "defaultEffort": "medium"},
+        }
+        P.fetch_remote_product_config = (
+            lambda realm: (INTL_IDS, meta) if realm == "intl" else None)
+        entries = dict(P.fetch_models("intl"))
+        item = P.model_entry("deepseek-v4.1-flash",
+                             entries["deepseek-v4.1-flash"])
+        self.assertEqual(item["reasoning_efforts"], ["low", "medium", "high"])
+        self.assertEqual(item["reasoning_default_effort"], "medium")
+
+    def test_bundled_efforts_fill_in_when_the_live_entry_has_none(self):
+        """A silent live entry falls back to the snapshot, and says so once."""
+        logged = []
+        original_log = P.log
+        P.log = lambda message, **kw: logged.append(message)
+        try:
+            P.fetch_remote_product_config = (
+                lambda realm: (INTL_IDS, dict(INTL_META)) if realm == "intl" else None)
+            P._catalog_fallback_log.pop("intl", None)
+            entries = dict(P.fetch_models("intl"))
+        finally:
+            P.log = original_log
+        item = P.model_entry("deepseek-v4.1-flash",
+                             entries["deepseek-v4.1-flash"])
+        self.assertEqual(item["reasoning_efforts"], ["low", "high", "max"])
+        self.assertEqual(item["reasoning_default_effort"], "high")
+        self.assertTrue(any("bundled table" in m for m in logged), logged)
+
     def test_parse_reads_the_desktop_cache_shape(self):
         """The cache file is the same document without the "data" envelope."""
         ids, _ = P.parse_remote_catalog(
