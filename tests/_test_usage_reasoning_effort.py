@@ -20,6 +20,7 @@ os.environ["ACCOUNTS_DIR"] = os.path.join(_TMP, "accounts")
 os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
+import wb_accounts
 import wb_proxy as P
 
 PASS = FAIL = 0
@@ -68,6 +69,76 @@ check("recent_usage still returns the other fields",
 old = [r for r in got["rows"] if r.get("model") == "hy3"][0]
 check("a row written without the field stays without it",
       "reasoning_effort" not in old, old)
+
+# The body builder reads both client spellings and only fills in the model
+# default when the client asked for nothing, so a camelCase request keeps
+# "reasoningEffort" and never gains a snake-case key. Reading only the snake
+# spelling would report None for a request that really ran at "max".
+camel = P.build_upstream_body({"model": "deepseek-v4.1-flash",
+                               "messages": [{"role": "user", "content": "hi"}],
+                               "reasoningEffort": "max"})
+check("a camelCase request keeps the camelCase key",
+      "reasoning_effort" not in camel, camel.get("reasoning_effort"))
+check("the effective effort is read from the camelCase spelling",
+      P.upstream_effort_of(camel) == "max", P.upstream_effort_of(camel))
+snake = P.build_upstream_body({"model": "deepseek-v4.1-flash",
+                               "messages": [{"role": "user", "content": "hi"}],
+                               "reasoning_effort": "low"})
+check("the snake-case spelling still wins when the client sends it",
+      P.upstream_effort_of(snake) == "low", P.upstream_effort_of(snake))
+quiet = P.build_upstream_body({"model": "deepseek-v4.1-flash",
+                               "messages": [{"role": "user", "content": "hi"}]})
+check("a request that asks for nothing gets the model default",
+      P.upstream_effort_of(quiet) == (P.model_default_effort("deepseek-v4.1-flash") or "high"),
+      P.upstream_effort_of(quiet))
+
+
+class _StubPool(object):
+    """The parts of the account pool open_upstream() touches."""
+
+    def __init__(self, accounts):
+        self.accounts = accounts
+
+    def count_ready(self, realm, model=None):
+        return sum(a.ready(model=model) for a in self.accounts)
+
+    def pick_for_session(self, realm, session_key=None, exclude=(), model=None):
+        return next((a for a in self.accounts if a.uid not in exclude
+                     and a.realm == realm and a.ready(model=model)), None)
+
+    def apply_daily_token_limit(self, value=None, usage=None):
+        return value or 0
+
+    def apply_daily_credit_limit(self, value=None, credits=None, free_models=None):
+        return value or 0
+
+    def apply_model_daily_token_limit(self, value=None, per_model=None):
+        return value or 0
+
+
+class _FakeResponse(object):
+    def close(self):
+        pass
+
+
+# End to end over the real open_upstream(): the effort it hands back is the one
+# record_usage() writes, so a camelCase client gets its chip too.
+account = wb_accounts.Account({"uid": "uid-effort", "accessToken": "t", "realm": "intl"})
+old_pool, old_urlopen = P.POOL, wb_accounts.urlopen
+P.POOL = _StubPool([account])
+wb_accounts.urlopen = lambda req, timeout=None, proxy=None: _FakeResponse()
+try:
+    _resp, _acct, effort = P.open_upstream(
+        {"model": "deepseek-v4.1-flash",
+         "messages": [{"role": "user", "content": "hi"}],
+         "reasoningEffort": "max"}, target_realm="intl")
+finally:
+    P.POOL = old_pool
+    wb_accounts.urlopen = old_urlopen
+check("open_upstream hands back the camelCase effort", effort == "max", effort)
+P.record_usage("deepseek-v4.1-flash", USAGE, stream=False, elapsed_ms=900, effort=effort)
+check("and that value lands on the usage row",
+      rows()[-1].get("reasoning_effort") == "max", rows()[-1].get("reasoning_effort"))
 
 print("")
 print("  PASS=%d FAIL=%d" % (PASS, FAIL))

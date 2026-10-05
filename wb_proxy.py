@@ -3367,6 +3367,20 @@ def background_request_reason(payload):
     return ""
 
 
+def upstream_effort_of(body):
+    """The reasoning effort a request runs at, under either client spelling.
+
+    build_upstream_body() reads both "reasoning_effort" and "reasoningEffort",
+    and only fills in the model default when the client asked for nothing - so a
+    camelCase request keeps the camelCase key and never gains a snake-case one.
+    Anything that reports the effective effort has to look twice for the same
+    reason, or it reports None for a request that really ran at "max".
+    """
+    if not isinstance(body, dict):
+        return None
+    return body.get("reasoning_effort") or body.get("reasoningEffort")
+
+
 def background_request_message(reason):
     return ("這是客戶端自己發的背景請求（%s），本機代理已擋下，"
             "避免在沒有實際操作時消耗上游額度。"
@@ -3782,7 +3796,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
             # model and the request, and the callers record it on the usage row.
-            return resp, account, upstream_body.get("reasoning_effort")
+            return resp, account, upstream_effort_of(upstream_body)
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
@@ -7299,14 +7313,14 @@ class Handler(BaseHTTPRequestHandler):
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
         forwarded = build_upstream_body(payload)
-        given = payload.get("reasoning_effort") or payload.get("reasoning") \
+        given = upstream_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
         log(
             "chat: model=%s client_effort=%r -> upstream_effort=%r stream=%s msgs=%d"
             % (
                 payload.get("model"),
                 given,
-                forwarded.get("reasoning_effort"),
+                upstream_effort_of(forwarded),
                 bool(payload.get("stream")),
                 len(forwarded.get("messages") or []),
             )
