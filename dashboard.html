@@ -1332,16 +1332,21 @@ function renderAvailableModels(){
     return;
   }
   tb.innerHTML = MODELS_DATA.map(m => {
-    // 1. 倍率与折扣
+    // 1. 倍率与折扣 —— 一律以 /v1/models 取回的 credits 为准（活目录优先、
+    //    内置快照兜底）。以前这里还按模型 id 写死了 hy3 / hy4-preview-f /
+    //    国际版 deepseek-v4.1-flash 三个"限时免费"，与 credits 值是 OR 关系，
+    //    上游一旦调价面板会继续宣传免费；cn 的夜间注记在 credits 缺失时还会
+    //    兜底显示写死的 0.79x。现在取不到就不显示数字。
     let credBadge = '-';
-    const c = (m.credits || '').toString().toLowerCase().replace('x', '');
-    if(c === '0.00' || c === '0' || m.id === 'hy3' || m.id === 'hy4-preview-f' || (m.id === 'deepseek-v4.1-flash' && window.VIEW_REALM === 'intl')){
+    const credText = (m.credits == null ? '' : String(m.credits)).trim();
+    const c = credText.toLowerCase().replace('x', '');
+    if(c === '0.00' || c === '0'){
       credBadge = '<span class="badge ok" style="background:rgba(38,187,130,.15);color:#26bb82">限时免费 0.00x</span>';
-    } else if((m.id === 'glm-5.2' || m.id === 'deepseek-v4-pro') && window.VIEW_REALM === 'cn'){
-      const raw = m.credits ? (m.credits.startsWith('x') ? m.credits.slice(1) + 'x' : m.credits) : '0.79x';
-      credBadge = '<span class="badge s">' + raw + ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span></span>';
-    } else if(m.credits){
-      credBadge = '<span class="badge s">' + esc(m.credits.startsWith('x') ? m.credits.slice(1) + 'x' : m.credits) + '</span>';
+    } else if(credText){
+      const raw = credText.startsWith('x') ? credText.slice(1) + 'x' : credText;
+      const night = ((m.id === 'glm-5.2' || m.id === 'deepseek-v4-pro') && window.VIEW_REALM === 'cn')
+        ? ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span>' : '';
+      credBadge = '<span class="badge s">' + esc(raw) + night + '</span>';
     }
 
     // 2. 模型能力 (Vision, Tool calls)
