@@ -3367,18 +3367,50 @@ def background_request_reason(payload):
     return ""
 
 
-def upstream_effort_of(body):
-    """The reasoning effort a request runs at, under either client spelling.
+def client_effort_of(body):
+    """The effort the request itself carries, under either client spelling.
 
     build_upstream_body() reads both "reasoning_effort" and "reasoningEffort",
-    and only fills in the model default when the client asked for nothing - so a
-    camelCase request keeps the camelCase key and never gains a snake-case one.
-    Anything that reports the effective effort has to look twice for the same
-    reason, or it reports None for a request that really ran at "max".
+    and only fills in the model default for the models it injects for - so a
+    camelCase request keeps the camelCase key, and a request to a model the
+    catalog pins to one level carries no effort at all.
     """
     if not isinstance(body, dict):
         return None
     return body.get("reasoning_effort") or body.get("reasoningEffort")
+
+
+def upstream_effort_of(body, model=None):
+    """The reasoning effort a request actually runs at, or None when unknown.
+
+    Resolved the way the upstream will apply it:
+
+      - a model the catalog pins to one level (reasoning.effort, no
+        supportedEfforts) always runs there: the picker offers no choice for it,
+        so a value the request carries anyway does not change the answer;
+      - a request that switched thinking off, or asked for "none", ran without
+        reasoning and nothing below overrides that;
+      - otherwise the client's own value wins, under either spelling;
+      - otherwise the model's declared defaultEffort applies.
+
+    Reading the body alone is not enough for the last two: the gateway only
+    writes an effort into the body for the models it injects for, so a plain
+    request to a pinned model would otherwise be reported as "no effort".
+    """
+    given = client_effort_of(body)
+    if model:
+        fixed = model_fixed_effort(model)
+        if fixed:
+            return fixed
+    thinking = (body or {}).get("thinking") if isinstance(body, dict) else None
+    if isinstance(thinking, dict) and \
+            str(thinking.get("type") or "").strip().lower() == "disabled":
+        return "none"
+    if str(given or "").strip().lower() == "none":
+        return "none"
+    if given:
+        return given
+    return model_default_effort(model) if model else None
 
 
 def background_request_message(reason):
@@ -3472,12 +3504,12 @@ def build_upstream_body(payload):
     return body
 
 
-def model_default_effort(model):
-    """The reasoning effort the catalog declares for a model, or None.
+def model_reasoning_meta(model):
+    """The catalog's reasoning block for a model, or {}.
 
-    Read from the same merged catalog that /v1/models advertises, so the effort
-    filled into an outbound request cannot disagree with what the model list
-    promised the client. Failures fall back to None (caller uses its default).
+    Read from the same merged catalog that /v1/models advertises, so what a
+    request reports cannot disagree with what the model list promised the
+    client. Failures fall back to {} (callers use their own default).
 
     Deliberately side-effect free: it reads the already-populated model cache
     and the shipped static tables only. Calling fetch_models() here would let a
@@ -3485,7 +3517,7 @@ def model_default_effort(model):
     handling, turning one chat call into a network fetch.
     """
     if not model:
-        return None
+        return {}
     try:
         realm = detect_model_realm(model) or CURRENT_REALM
         entries = (_models_cache.get(realm) or {}).get("data")
@@ -3494,15 +3526,29 @@ def model_default_effort(model):
             table = getattr(wb_catalog, name, None) or wb_catalog.STATIC_MODELS
             entries = [(m.get("id"), m) for m in table if isinstance(m, dict)]
         for mid, meta in entries:
-            if mid != model:
-                continue
-            effort = ((meta or {}).get("reasoning") or {}).get("defaultEffort")
-            if isinstance(effort, str) and effort.strip():
-                return effort.strip()
-            return None
+            if mid == model:
+                return (meta or {}).get("reasoning") or {}
     except Exception as exc:
-        log("default effort lookup failed for '%s': %s" % (model, exc))
-    return None
+        log("reasoning lookup failed for '%s': %s" % (model, exc))
+    return {}
+
+
+def model_default_effort(model):
+    """The effort the catalog applies when the client asks for none, or None."""
+    effort = model_reasoning_meta(model).get("defaultEffort")
+    return effort.strip() if isinstance(effort, str) and effort.strip() else None
+
+
+def model_fixed_effort(model):
+    """The effort the catalog pins a model to, or None when it is selectable.
+
+    reasoning.effort without supportedEfforts means the model always runs at
+    that level: /v1/models advertises it as reasoning_fixed_effort and the
+    picker offers no choice for it, so an effort the request carries anyway does
+    not change what ran.
+    """
+    effort = model_reasoning_meta(model).get("effort")
+    return effort.strip() if isinstance(effort, str) and effort.strip() else None
 
 
 def prompt_cache_key_enabled():
@@ -3796,7 +3842,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
             # model and the request, and the callers record it on the usage row.
-            return resp, account, upstream_effort_of(upstream_body)
+            return resp, account, upstream_effort_of(upstream_body, model)
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
@@ -7313,14 +7359,14 @@ class Handler(BaseHTTPRequestHandler):
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
         forwarded = build_upstream_body(payload)
-        given = upstream_effort_of(payload) or payload.get("reasoning") \
+        given = client_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
         log(
             "chat: model=%s client_effort=%r -> upstream_effort=%r stream=%s msgs=%d"
             % (
                 payload.get("model"),
                 given,
-                upstream_effort_of(forwarded),
+                upstream_effort_of(forwarded, payload.get("model")),
                 bool(payload.get("stream")),
                 len(forwarded.get("messages") or []),
             )

@@ -124,21 +124,78 @@ class _FakeResponse(object):
 # End to end over the real open_upstream(): the effort it hands back is the one
 # record_usage() writes, so a camelCase client gets its chip too.
 account = wb_accounts.Account({"uid": "uid-effort", "accessToken": "t", "realm": "intl"})
-old_pool, old_urlopen = P.POOL, wb_accounts.urlopen
-P.POOL = _StubPool([account])
-wb_accounts.urlopen = lambda req, timeout=None, proxy=None: _FakeResponse()
-try:
-    _resp, _acct, effort = P.open_upstream(
-        {"model": "deepseek-v4.1-flash",
-         "messages": [{"role": "user", "content": "hi"}],
-         "reasoningEffort": "max"}, target_realm="intl")
-finally:
-    P.POOL = old_pool
-    wb_accounts.urlopen = old_urlopen
+
+
+def open_with(payload):
+    """Run the real open_upstream() against a stubbed pool and transport."""
+    old_pool, old_urlopen = P.POOL, wb_accounts.urlopen
+    P.POOL = _StubPool([account])
+    wb_accounts.urlopen = lambda req, timeout=None, proxy=None: _FakeResponse()
+    try:
+        _resp, _acct, effort = P.open_upstream(payload, target_realm="intl")
+        return effort
+    finally:
+        P.POOL = old_pool
+        wb_accounts.urlopen = old_urlopen
+
+
+def chat(model, **extra):
+    payload = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+    payload.update(extra)
+    return payload
+
+
+# End to end over the real open_upstream(): the effort it hands back is the one
+# record_usage() writes, so a camelCase client gets its chip too.
+effort = open_with(chat("deepseek-v4.1-flash", reasoningEffort="max"))
 check("open_upstream hands back the camelCase effort", effort == "max", effort)
 P.record_usage("deepseek-v4.1-flash", USAGE, stream=False, elapsed_ms=900, effort=effort)
 check("and that value lands on the usage row",
       rows()[-1].get("reasoning_effort") == "max", rows()[-1].get("reasoning_effort"))
+
+# A model the catalog pins to one level runs there whether or not the client
+# says anything - and the gateway writes nothing into the body for it, so the
+# body alone reports no effort at all.
+check("the catalog pins gemini-3.5-flash", P.model_fixed_effort("gemini-3.5-flash") == "medium",
+      P.model_fixed_effort("gemini-3.5-flash"))
+check("and it declares no default",
+      P.model_default_effort("gemini-3.5-flash") is None,
+      P.model_default_effort("gemini-3.5-flash"))
+plain = P.build_upstream_body(chat("gemini-3.5-flash"))
+check("a plain request to it carries no effort in the body",
+      P.client_effort_of(plain) is None, P.client_effort_of(plain))
+effort = open_with(chat("gemini-3.5-flash"))
+check("open_upstream still reports the pinned level", effort == "medium", effort)
+P.record_usage("gemini-3.5-flash", USAGE, stream=False, elapsed_ms=900, effort=effort)
+check("so the pinned level reaches the usage row",
+      rows()[-1].get("reasoning_effort") == "medium", rows()[-1].get("reasoning_effort"))
+check("kimi-k3 is pinned the same way", open_with(chat("kimi-k3")) == "medium",
+      open_with(chat("kimi-k3")))
+check("a pinned model ignores a level the request carries anyway",
+      open_with(chat("gemini-3.5-flash", reasoning_effort="max")) == "medium",
+      open_with(chat("gemini-3.5-flash", reasoning_effort="max")))
+
+# A selectable model with no client value runs at its declared default, and the
+# client's own value wins when it sends one.
+check("gpt-6-astra declares a default", P.model_default_effort("gpt-6-astra") == "high",
+      P.model_default_effort("gpt-6-astra"))
+check("a selectable model falls back to that default",
+      open_with(chat("gpt-6-astra")) == "high", open_with(chat("gpt-6-astra")))
+check("the client's own value still wins",
+      open_with(chat("gpt-6-astra", reasoning_effort="low")) == "low",
+      open_with(chat("gpt-6-astra", reasoning_effort="low")))
+
+# Switching thinking off is an answer, not a gap: it must not be filled in with
+# the model's default.
+check("a request that disables thinking reports none",
+      open_with(chat("gpt-6-astra", thinking={"type": "disabled"})) == "none",
+      open_with(chat("gpt-6-astra", thinking={"type": "disabled"})))
+check("an explicit none reports none",
+      open_with(chat("gpt-6-astra", reasoning_effort="none")) == "none",
+      open_with(chat("gpt-6-astra", reasoning_effort="none")))
+check("a model with no reasoning metadata stays unknown",
+      P.upstream_effort_of(chat("hy3"), "hy3") in (None, "low", "high"),
+      P.upstream_effort_of(chat("hy3"), "hy3"))
 
 print("")
 print("  PASS=%d FAIL=%d" % (PASS, FAIL))
