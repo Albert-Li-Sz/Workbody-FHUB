@@ -124,7 +124,13 @@ check('a bare x0 still reads as free', cell.includes('限时免费'), cell);
 // m.credits.startsWith() unguarded, so a numeric credits threw and the table
 // came out empty.
 cell = creditsCell({id: 'hy3', credits: 0.5});
-check('a numeric credits renders instead of throwing', cell.includes('0.5'), cell);
+check('a numeric credits renders instead of throwing', cell.includes('0.5x'), cell);
 check('a numeric credits is not advertised as free', !cell.includes('限时免费'), cell);
+// Every shape lands in the same multiplier format.
+cell = creditsCell({id: 'hy3', credits: '0.50'});
+check('a value without the x prefix is shown in the same format',
+      cell.includes('0.50x'), cell);
+cell = creditsCell({id: 'hy3', credits: 'X1.33'});
+check('an upper-case prefix is normalized too', cell.includes('1.33x'), cell);
 
 console.log('model credits assertions passed (' + checks + ' checks)');

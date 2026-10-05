@@ -1343,7 +1343,8 @@ function renderAvailableModels(){
     if(c === '0.00' || c === '0'){
       credBadge = '<span class="badge ok" style="background:rgba(38,187,130,.15);color:#26bb82">限时免费 0.00x</span>';
     } else if(credText){
-      const raw = credText.startsWith('x') ? credText.slice(1) + 'x' : credText;
+      // 统一成倍率写法：'x0.79' / '0.79' / 数字 0.5 都显示成 '0.79x' / '0.5x'。
+      const raw = credText.replace(/^x/i, '') + 'x';
       const night = ((m.id === 'glm-5.2' || m.id === 'deepseek-v4-pro') && window.VIEW_REALM === 'cn')
         ? ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span>' : '';
       credBadge = '<span class="badge s">' + esc(raw) + night + '</span>';
