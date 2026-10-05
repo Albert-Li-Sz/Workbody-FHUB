@@ -176,14 +176,18 @@ def key_allows_model(entry, model):
     """True when `entry` places no model restriction, or `model` matches it.
 
     A key with an empty list stays unrestricted, so nothing changes for
-    installs that never touch this field.
+    installs that never touch this field. A restricted key that names no model
+    is refused instead of waved through: nothing in the request says it is
+    asking for something the key may use, and forwarding it only reaches the
+    upstream carrying an empty model, spending an attempt on a call that cannot
+    succeed.
     """
     patterns = _clean_model_patterns((entry or {}).get("models"))
     if not patterns:
         return True
     name = str(model or "").strip().lower()
     if not name:
-        return True
+        return False
     return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 

@@ -9,6 +9,10 @@ background requests straight at the catalogue from outside the model picker.
 These cases pin the storage shape, the matching rules and the enforcement
 point, plus the upgrade path: every key written before this field existed has
 to read back as unrestricted. No network access required.
+
+A limited key that names no model is refused rather than waved through: the
+request cannot be shown to be asking for something the key may use, and
+forwarding it would only reach the upstream with an empty model.
 """
 
 import os
@@ -102,6 +106,12 @@ check("an exact name does not cover its suffixes",
       not S.key_allows_model({"models": ["gpt-6-astra"]}, "gpt-6-astra-high"))
 check("a launcher entry stays unrestricted",
       S.key_allows_model({"models": [], "source": "launcher"}, "gpt-5.6-terra"))
+check("a limited key that names no model is refused",
+      not S.key_allows_model(limited, ""))
+check("a limited key that omits the model is refused too",
+      not S.key_allows_model(limited, None))
+check("an unrestricted key is unaffected by a missing model",
+      S.key_allows_model(unlimited, None))
 
 print()
 print("[4] the handler refuses the request instead of forwarding it")
@@ -119,6 +129,11 @@ check("the explanation names the key", "DeepSeek only" in blocked, blocked)
 check("the explanation names the model", "gpt-5.6-terra" in blocked, blocked)
 check("the explanation lists what is allowed", "deepseek/*" in blocked, blocked)
 check("no key entry means no restriction", anonymous._key_model_error("gpt-5.6-terra") == "")
+modelless = restricted._key_model_error("")
+check("a limited key sending no model is refused", bool(modelless), modelless)
+check("the explanation says no model was named", "未指定模型" in modelless, modelless)
+check("an unrestricted key sending no model still passes",
+      unrestricted._key_model_error("") == "")
 
 print()
 print("[5] /settings/save keeps a stored limit when the field is absent")
