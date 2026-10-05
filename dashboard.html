@@ -2470,6 +2470,12 @@ async function refreshInner(gen){
   };
   const countEl = document.getElementById('recentCount');
   if(countEl) countEl.textContent = '(第 ' + RECENT_PAGE + ' 页 / 共 ' + fmt(total) + ' 条)';
+  // 推理强度：这次请求实际跑在哪个档位（网关写入 usage 行时的 reasoning_effort）。
+  // 只有该字段存在才显示——老行与没有档位的模型都没有它。挂在"模型"格里复用
+  // 模型库的 .badge-effort 样式，不新增第 15 列（表格已经 14 列了）。
+  const effortChip = r => r.reasoning_effort
+    ? ' <span class="badge-effort" title="本次请求实际使用的推理强度">' + esc(r.reasoning_effort) + '</span>'
+    : '';
   // 账号列显示昵称：uid -> 昵称取自 /usage 的 accounts_map（当前账号池）。
   // 已删除/不存在的账号回退到 uid 前 8 位，避免留空。
   const acctName = (uid) => {
@@ -2481,7 +2487,7 @@ async function refreshInner(gen){
     '<table class="data-cards"><thead><tr><th>时间</th><th>模型</th><th>账号</th><th>模式</th><th>结果</th><th>耗时</th><th>首字</th><th>速度</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总 token</th><th>积分</th></tr></thead><tbody>'
     + rows.map(r => '<tr>'
         + '<td class="mono" data-label="时间">' + esc((r.iso||'').replace('T',' ').slice(5)) + '</td>'
-        + '<td class="mono" data-label="模型">' + esc(r.model) + '</td>'
+        + '<td class="mono" data-label="模型">' + esc(r.model) + effortChip(r) + '</td>'
         + '<td class="mono" style="font-size:11px;color:var(--dim)" data-label="账号" title="' + esc(r.account||'') + '">' + esc(acctName(r.account)) + '</td>'
         + '<td data-label="模式"><span class="badge ' + (r.stream?'s':'') + '">' + (r.stream?'流式':'非流式') + '</span></td>'
         + '<td data-label="结果">' + outcomeBadge(r) + '</td>'
