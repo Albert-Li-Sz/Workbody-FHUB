@@ -37,6 +37,7 @@ import urllib.request
 import uuid
 import wb_accounts
 import wb_catalog
+import wb_ipintel
 import wb_settings
 import wb_webtools
 import wb_identity
@@ -1405,23 +1406,49 @@ def probe_proxy_exit(proxy_url, timeout=12):
         return "", str(exc)[:160]
 
 
+def probe_proxy_intel(proxy_url, timeout=12):
+    """Probe one proxy: its exit IP, and where and what that exit is.
+
+    Both steps live here so the discovery list, the per-slot test and the stored
+    slot all describe an exit the same way. `latency_ms` covers the proxy probe
+    only - the lookup goes out directly and would otherwise inflate it.
+    """
+    started = time.time()
+    exit_ip, error = probe_proxy_exit(proxy_url, timeout=timeout)
+    latency_ms = int((time.time() - started) * 1000)
+    intel = wb_ipintel.lookup(exit_ip) if exit_ip else wb_ipintel.empty()
+    return {
+        "ok": not error,
+        "exit_ip": exit_ip,
+        "latency_ms": latency_ms,
+        "error": error,
+        "country": intel["country"],
+        "country_code": intel["country_code"],
+        "ip_type": intel["ip_type"],
+        "isp": intel["isp"],
+        "asn": intel["asn"],
+    }
+
+
 def discover_proxy_slots():
     """Probe the configured mihomo host/ports and report reachable exits."""
     out = []
     for port in _proxy_port_range():
         url = "http://%s:%d" % (PROXY_DISCOVER_HOST, port)
-        started = time.time()
-        exit_ip, error = probe_proxy_exit(url)
-        out.append(
-            {
-                "url": url,
-                "reachable": not error,
-                "exit_ip": exit_ip,
-                "latency_ms": int((time.time() - started) * 1000),
-                "error": error,
-            }
-        )
+        probe = probe_proxy_intel(url)
+        probe["url"] = url
+        probe["reachable"] = probe["ok"]
+        out.append(probe)
     return out
+
+
+def slot_label(entry):
+    """What to call a slot: the operator's name, else its exit, else its id."""
+    name = str((entry or {}).get("name") or "").strip()
+    if name:
+        return name
+    auto = wb_ipintel.slot_name(entry.get("country"), entry.get("ip_type"))
+    return auto or str((entry or {}).get("id") or "")
 
 
 def proxy_slots_view():
@@ -1436,6 +1463,7 @@ def proxy_slots_view():
     for entry in wb_settings.proxy_slots(ACCOUNTS_DIR):
         item = dict(entry)
         item["bound"] = counts.get(entry["id"], 0)
+        item["label"] = slot_label(entry)
         out.append(item)
     return out
 
@@ -6391,17 +6419,12 @@ class Handler(BaseHTTPRequestHandler):
             for item in raw:
                 if not isinstance(item, dict):
                     continue
-                url = str(item.get("url") or "").strip()
-                if not url:
-                    continue
-                cleaned.append(
-                    {
-                        "id": str(item.get("id") or "").strip(),
-                        "name": str(item.get("name") or "").strip(),
-                        "url": url,
-                        "enabled": item.get("enabled", True) is not False,
-                    }
-                )
+                # Normalized by the same helper the store uses, so the probed
+                # exit fields the panel echoes back survive a save instead of
+                # being dropped by a second, hand-written field list here.
+                entry = wb_settings._clean_slot_entry(item)
+                if entry is not None:
+                    cleaned.append(entry)
             saved = wb_settings.set_proxy_slots(ACCOUNTS_DIR, cleaned)
             if POOL:
                 # A slot may have been removed: unbind anyone still naming it
@@ -6418,18 +6441,34 @@ class Handler(BaseHTTPRequestHandler):
             slot = wb_settings.find_proxy_slot(ACCOUNTS_DIR, slot_id)
             if slot is None:
                 return self._error(404, "no such proxy slot")
-            started = time.time()
-            exit_ip, error = probe_proxy_exit(slot["url"])
-            return self._json(
-                200,
-                {
-                    "ok": not error,
-                    "id": slot_id,
-                    "exit_ip": exit_ip,
-                    "latency_ms": int((time.time() - started) * 1000),
-                    "error": error,
-                },
-            )
+            probe = probe_proxy_intel(slot["url"])
+            reply = dict(probe)
+            reply["id"] = slot_id
+            reply["slot"] = None
+            if probe["ok"]:
+                # Remember what the exit turned out to be, so the panel shows it
+                # without probing again, and name an unnamed slot after it. A
+                # failed probe learns nothing, so it changes nothing either.
+                updated = wb_settings.update_proxy_slot(
+                    ACCOUNTS_DIR,
+                    slot_id,
+                    {
+                        "ip": probe["exit_ip"],
+                        "country": probe["country"],
+                        "country_code": probe["country_code"],
+                        "ip_type": probe["ip_type"],
+                        "isp": probe["isp"],
+                        "asn": probe["asn"],
+                        "probed_at": int(time.time()),
+                    },
+                    # Only fills a name that is still blank at write time: a
+                    # name the operator typed while the probe ran wins.
+                    defaults={"name": wb_ipintel.slot_name(probe["country"],
+                                                           probe["ip_type"])},
+                )
+                reply["slot"] = updated
+                reply["name"] = (updated or {}).get("name", "")
+            return self._json(200, reply)
         if path == "/proxy/discover":
             return self._json(200, {"candidates": discover_proxy_slots()})
         return self._error(404, "not found", "invalid_request_error")
