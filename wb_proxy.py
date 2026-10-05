@@ -1417,11 +1417,18 @@ def probe_proxy_intel(proxy_url, timeout=12):
     exit_ip, error = probe_proxy_exit(proxy_url, timeout=timeout)
     latency_ms = int((time.time() - started) * 1000)
     intel = wb_ipintel.lookup(exit_ip) if exit_ip else wb_ipintel.empty()
+    # Two steps, two outcomes. `ok` covers the proxy probe only: the lookup is a
+    # separate third-party call that fails on its own (blocked, timeout, 429, a
+    # reply without a status). Callers that already know an exit need to tell
+    # "the lookup did not answer" from "the lookup answered with nothing", or a
+    # blip at the geo service would erase what the last good probe learned.
+    intel_ok = any(str(intel.get(field) or "").strip() for field in wb_ipintel.FIELDS)
     return {
         "ok": not error,
         "exit_ip": exit_ip,
         "latency_ms": latency_ms,
         "error": error,
+        "intel_ok": intel_ok,
         "country": intel["country"],
         "country_code": intel["country_code"],
         "ip_type": intel["ip_type"],
@@ -6447,24 +6454,35 @@ class Handler(BaseHTTPRequestHandler):
             reply["slot"] = None
             if probe["ok"]:
                 # Remember what the exit turned out to be, so the panel shows it
-                # without probing again, and name an unnamed slot after it. A
-                # failed probe learns nothing, so it changes nothing either.
-                updated = wb_settings.update_proxy_slot(
-                    ACCOUNTS_DIR,
-                    slot_id,
-                    {
-                        "ip": probe["exit_ip"],
+                # without probing again. `ok` covers the IP probe only: when the
+                # geo lookup came back with nothing, the exit info already stored
+                # is kept rather than overwritten with blanks - a blip at the
+                # lookup must not lose what the last good probe learned.
+                updated_fields = {
+                    "ip": probe["exit_ip"],
+                    "probed_at": int(time.time()),
+                }
+                if probe.get("intel_ok"):
+                    updated_fields.update({
                         "country": probe["country"],
                         "country_code": probe["country_code"],
                         "ip_type": probe["ip_type"],
                         "isp": probe["isp"],
                         "asn": probe["asn"],
-                        "probed_at": int(time.time()),
-                    },
-                    # Only fills a name that is still blank at write time: a
-                    # name the operator typed while the probe ran wins.
-                    defaults={"name": wb_ipintel.slot_name(probe["country"],
-                                                           probe["ip_type"])},
+                    })
+                else:
+                    log("proxy slots: %s probed %s but the geo lookup returned "
+                        "nothing; keeping the exit info already stored"
+                        % (slot_id, probe["exit_ip"] or "-"))
+                # The name is deliberately left alone. An empty name is how the
+                # store marks a slot as auto-named ("label this slot by its
+                # exit"), and slot_label() derives that label from the country
+                # and kind it shows - writing the derived text into the name
+                # would freeze it to the exit it happened to have at the time.
+                updated = wb_settings.update_proxy_slot(
+                    ACCOUNTS_DIR,
+                    slot_id,
+                    updated_fields,
                 )
                 reply["slot"] = updated
                 reply["name"] = (updated or {}).get("name", "")
