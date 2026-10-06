@@ -203,6 +203,7 @@ class FakeRequest(object):
 
 PROBE = {
     "ok": True, "exit_ip": "1.2.3.4", "latency_ms": 42, "error": "",
+    "intel_ok": True,
     "country": "美国", "country_code": "US", "ip_type": "residential",
     "isp": "Comcast", "asn": "AS7922 Comcast",
 }
@@ -227,10 +228,14 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d2, POOL=None):
     check("and its country and kind",
           stored["country"] == "美国" and stored["ip_type"] == "residential", stored)
     check("and the announcing network", stored["asn"].startswith("AS7922"), stored)
-    check("an unnamed slot is named after its exit",
-          stored["name"] == "美国 住宅", stored)
+    # An empty name is the store's marker for "label this slot by its exit":
+    # slot_label() derives it from the country and kind every time, so the label
+    # follows the exit instead of freezing to the one the probe happened to see.
+    check("an unnamed slot keeps its blank name", stored["name"] == "", stored)
+    check("while its label comes from the exit",
+          proxy.slot_label(stored) == "美国 住宅", proxy.slot_label(stored))
     check("the reply carries the stored slot back",
-          (reply["slot"] or {}).get("name") == "美国 住宅", reply)
+          (reply["slot"] or {}).get("name") == "" and reply["name"] == "", reply)
 
     failing = dict(PROBE, ok=False, exit_ip="", error="connection refused")
     with mock.patch.object(proxy, "probe_proxy_intel",
@@ -243,6 +248,38 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d2, POOL=None):
           reply["ok"] is False and reply["error"] == "connection refused", reply)
     check("and learns nothing, so it changes nothing",
           after["ip"] == "1.2.3.4" and after["country"] == "美国", after)
+
+    # The IP probe answered but the geo lookup did not: the two steps are
+    # separate calls, and the exit we already knew must survive the second one.
+    no_geo = dict(PROBE, exit_ip="5.6.7.8", intel_ok=False, country="",
+                  country_code="", ip_type="", isp="", asn="")
+    with mock.patch.object(proxy, "probe_proxy_intel",
+                           lambda url, timeout=12: dict(no_geo)):
+        status, reply = FakeRequest()._handle_proxy_slots(
+            "/proxy/slots/test", {"id": "slot-1"})
+
+    after = S.proxy_slots(d2)[0]
+    check("a lookup that answered nothing still updates the ip",
+          after["ip"] == "5.6.7.8", after)
+    check("but the exit info already stored is kept",
+          after["country"] == "美国" and after["country_code"] == "US"
+          and after["ip_type"] == "residential"
+          and after["asn"].startswith("AS7922"), after)
+    check("and the reply says the lookup came back empty",
+          reply.get("intel_ok") is False, reply)
+
+    # The exit moved: with the name still blank the label follows the new exit.
+    moved = dict(PROBE, exit_ip="9.9.9.9", country="日本", country_code="JP",
+                 ip_type="datacenter", isp="IIJ", asn="AS2497 IIJ")
+    with mock.patch.object(proxy, "probe_proxy_intel",
+                           lambda url, timeout=12: dict(moved)):
+        FakeRequest()._handle_proxy_slots("/proxy/slots/test", {"id": "slot-1"})
+
+    moved_entry = S.proxy_slots(d2)[0]
+    check("a slot that moved is labelled by the new exit",
+          proxy.slot_label(moved_entry) == "日本 机房",
+          proxy.slot_label(moved_entry))
+    check("and its name is still blank", moved_entry["name"] == "", moved_entry)
 
     status, saved = FakeRequest()._handle_proxy_slots("/proxy/slots/save", {
         "slots": [{

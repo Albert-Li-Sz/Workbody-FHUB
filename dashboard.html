@@ -4059,9 +4059,11 @@ function importDiscovered(){
   if(!picked.length){ toast('没有勾选任何出口', 'warn'); return; }
   picked.forEach(c => {
     if(PROXY_SLOTS.some(s => s.url === c.url)) return;
-    // 导入时就把探测到的出口信息一起带上，名称默认「国家 类型」，之后可改。
+    // 导入时就把探测到的出口信息一起带上。名称留空：空名称 = 「按出口自动命名」，
+    // 标签由 country/ip_type 每次现算，所以出口换了名字跟着换；写进 name 就成了
+    // 用户名称，会被 slot_label() 永久优先，出口变了也还显示旧的国家。
     PROXY_SLOTS.push({
-      id: '', name: autoSlotName(c), url: c.url, enabled: true, bound: 0,
+      id: '', name: '', url: c.url, enabled: true, bound: 0,
       ip: c.exit_ip || '', country: c.country || '', country_code: c.country_code || '',
       ip_type: c.ip_type || '', isp: c.isp || '', asn: c.asn || '',
       probed_at: Math.floor(Date.now() / 1000),
