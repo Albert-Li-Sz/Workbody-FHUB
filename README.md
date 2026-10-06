@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.10-2496ED?style=flat-square" alt="Version 1.6.10"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.11-2496ED?style=flat-square" alt="Version 1.6.11"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -287,7 +287,10 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ## 六、版本更新记录 (Changelog)
 
-### 未发布 (Unreleased)
+### v1.6.11
+
+- **修复 Codex Responses 缺省 max_output_tokens 导致 32k 截断**（issue #121）：当客户端未显式传入输出上限时，网关自动根据模型目录中宣告的 `maxOutputTokens`（如 `deepseek-v4.1-flash` 为 128,000）进行兜底补全，避免长推理因触发上游默认 32k 限额而中断无正文。
+- **修复面板新增 API Key 时已有 Key 模型限制被清空**（issue #92）：补齐 `/settings` 接口返回的 API Key 列表中的 `models` 字段，防止前端重新打包保存时将未带限制的数组传回导致误清空。
 
 - **新增「每日积分限额」：账号当日积分花超后只服务免费模型**（默认 `0` 关闭，面板可设阈值）：账号当日消费的积分（按上游 `credit` 累计）达到阈值后，需要花费积分的模型自动切到其他账号，目录中标记为 `x0.00` 的免费模型照常服务——例如 `gpt-6-astra` 花满 50 积分后，免费期的 `deepseek-v4.1-flash` 不受影响。免费/付费判定以**各出口自己的模型目录**为准（同一 id 在不同出口可以一个免费一个收费），未知模型按付费处理（保守）。本地时间 0 点自动解封；单账号独立计数。账号行显示「积分限额」徽章，池子卡片显示「N 个达积分限额」，全部账号达额时返回 `429`（文案说明免费模型仍可用）。
 - **新增「按模型每日 Token 限额」**（默认 `0` 不限）：账号在单个模型上当日消耗的 token 达到阈值后，只把**该模型**切到其他账号，同一账号的其他模型不受影响——例如 `hy4-preview` 用满 2 亿后该模型被跳过，`deepseek-v4.1-flash` 仍可用。账号行显示 `模型 · N tok 达限` 标记；本地时间 0 点自动解封；单账号独立计数。
@@ -300,7 +303,6 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **修好「立即取价」按钮的 404**（顺带）：`POST /pricing/refresh` 此前从未注册进 `do_POST`（`is_account_route` 不覆盖 `/pricing`），面板点「立即取价」实际收到 404；现在与 `/pricing/mapping` 一起走面板会话鉴权的新分支。新增文本级回归测试钉住这两条路由必须在 `do_POST` 里出现。
 - 新增 `tests/_test_pricing_auto.py`（40 项）：并集输入、按需补价（含并发幂等与写路径计价）、变体后缀继承与否决项（`kimi-k2-instruct-taiji`、`kimi-k2.8-preview`、5 个别名保持未定价）、缺口分类与候选、面板映射端点与开关。整套增至 32 个套件（27 Python + 5 JS），全绿。
 - **悬停即可看清一条请求的价是怎么来的**：最近请求最后一列的金额加了自绘气泡，给出三档原始单价（缓存命中/未命中输入、输出，USD 每百万 token）、汇率与折算说明、匹配来源的证据链（`direct` / `override` / `variant`，`variant` 还会写出基准名与剥掉的后缀）、命中的条件档位与该档单价、策略 id 与首次取到时刻、补算标记；没有定价的行仍只说「暂无定价数据」，不编 0。`/usage/recent` 每行直接带上 `cost_rates` / `cost_unit` / `cost_currency` / `cost_usd_cny` / `cost_or_id` / `cost_via` / `cost_inherited_from` / `cost_override_from` / `cost_band_note` / `cost_via_derived`，不为展示再开接口。**没有动计价口径**：`policy_id` 的算法一字未改，全量 15176 行逐行 `source` 与改动前 0 条失配，历史策略 id 逐条不变，已固化成测试。早于 `via` 字段写下的策略行按当前映射表推断并标注是推断（`via_derived=true`），指不到就不认。新增 `tests/_test_pricing_tooltip.py` 与 `tests/_test_pricing_tooltip.js`（夹具取自 2026-10-02 的线上现场），整套增至 34 个套件（28 Python + 6 JS），全绿。
-### v1.6.11
 
 - **「扫描桌面客户端账号」重新可用：桌面端加密凭据现在能在网关里直接解密**（入口此前因加密改造被隐藏）：桌面客户端从 2026-09-24 起把 `accessToken` / `refreshToken`（国内版还连带 `nickname` / `phoneNumber`）改成 `$wbEncrypted` 信封存储，扫描只能读到信封文本，导入后聊天、刷新凭证、查积分一律 401，当时只能把入口摘掉、让用户改走 OAuth。现在按客户端 `packages/at-rest-crypto` 的同一套方案就地解密（`key = sha256(atRestSecretKey)`、`keyId = sha256(key)[:16]`、AAD 为 `WB-AAD\0` + 版本 + `LP(WBEF1/WBEV1)` + `LP("sym-v1")` + `u32(suite)` + `LP(keyId)` + 帧代码 + 两个 0），入口放回来了。
   - 解码密钥只存在于客户端原生模块的运行内存里、磁盘上没有明文，所以网关从**正在运行的** `WorkBuddy.exe` 主进程内存里把它找回来（`OpenProcess(PROCESS_VM_READ)` + `VirtualQueryEx` + `ReadProcessMemory`，全程只读，不向目标进程写任何东西）；找到后用 keyblob 的 `protectorKeyId` 与一次 GCM 解封双重校验，校验不过就当没找到。密钥只留在网关进程内存中，不落盘、不进日志，网关重启后重新回收一次。
@@ -315,7 +317,6 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
   - 新增 `tests/_test_desktop_realm.py`（19 项）：三个国内出口 × 域名/issuer 组合、过期的 `realm` 字段、显式 `realm` 覆盖、导出再导入不漂移。
 - 看板：工具栏入口放回；扫描结果新增「已加密 / 待解码」状态，遇到加密凭据会提示先点「回收密钥」（后端在同一接口上新增 `{"recoverKey": true}` / `{"forgetKey": true}` 两个动作，沿用面板鉴权），拿不到密钥时（客户端没开、非 Windows、权限不足）直接把原因显示出来，并引导回 OAuth。
   - 新增 `tests/_test_desktop_atrest.py`（26 项：FIPS-197 的 AES-256 分组向量、信封往返 / 篡改 / 错钥 / 帧隔离、keyblob 自检、路径限制，以及拉起一个靶子进程真跑一遍内存回收、确认密钥不落盘），整套 31 个测试文件全绿。
-### v1.6.11
 
 - **新增：积分与套餐权益包全维度明细查看与到期管理**：
   - 参考 CodeBuddy 官方直连计费接口（`/billing/meter/get-user-resource-summary`、`get-user-resource-free-packages`、`get-user-resource-paid-packages` 与 `checkin-activity-status`），实现各账号积分与权益包的秒级同步与完整解析；
