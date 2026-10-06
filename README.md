@@ -98,10 +98,15 @@
 在终端中执行以下命令，脚本将全自动检测环境、创建配置并完成拉取启动：
 
 ```bash
+# 官方源（可直连 GitHub 环境）：
 curl -fsSL https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | bash
+
+# 国内网络 / NAS 加速（遇到 Connection reset 等连接报错时使用）：
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | sudo bash
 ```
 
-- **后续升级**：再次运行相同的这一行命令即可无感平滑升级，账号配置与用量数据绝不丢失。
+- **权限提示**：NAS（如飞牛 fnOS）普通用户若无直接操作 Docker 的权限，请在管道后追加 `sudo bash`；
+- **后续升级**：再次运行相同的命令即可无感平滑升级，账号配置与用量数据绝不丢失。
 
 #### 方式二：NAS / Web 面板单文件 Compose 部署（飞牛 fnOS / 群晖 / 1Panel 等）
 
