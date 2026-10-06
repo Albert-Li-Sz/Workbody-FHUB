@@ -1,7 +1,5 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
-> ⏸️ **暂停更新（预计 10 天）**：从 **2026-09-29** 起暂停发布新版本，预计 **10 天**后恢复；期间 issue 与 PR 照常收，但合并与回复会慢一些。已发布的版本不受影响，照常可用；恢复更新后会删掉这段说明。
-
 <p align="center">
   <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.10-2496ED?style=flat-square" alt="Version 1.6.10"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
