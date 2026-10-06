@@ -16,6 +16,7 @@ import re
 import secrets
 import threading
 import time
+import wb_storage
 
 DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
@@ -50,6 +51,13 @@ def _digest(password, salt_hex, rounds=PBKDF2_ROUNDS):
 def load(accounts_dir):
     """Return the persisted settings, or an empty dict on a fresh install."""
     path = settings_path(accounts_dir)
+    # Harden existing installations too. A permission failure must propagate,
+    # rather than being mistaken for empty settings and disabling API-key auth.
+    try:
+        wb_storage.restrict_file(path)
+        wb_storage.restrict_directory(accounts_dir)
+    except FileNotFoundError:
+        return {}
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -65,13 +73,8 @@ def load(accounts_dir):
 def save(accounts_dir, data):
     """Atomic write so a crash cannot leave a half-written settings file."""
     with _lock:
-        os.makedirs(accounts_dir, exist_ok=True)
         path = settings_path(accounts_dir)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-        return path
+        return wb_storage.write_private_json(path, data)
 
 
 def panel_password_is_default(accounts_dir):

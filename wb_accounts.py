@@ -14,6 +14,7 @@ from wb_fingerprint import derive_id, generate_request_id
 import wb_atrest
 import wb_identity
 import wb_settings
+import wb_storage
 import wb_webagent
 
 # ---------------------------------------------------------------------------
@@ -430,7 +431,6 @@ class Account(object):
         }
 
     def save(self, directory):
-        os.makedirs(directory, exist_ok=True)
         safe_uid = re.sub(r"[^A-Za-z0-9_-]", "_", str(self.uid or "")).strip("_ ")
         name = (safe_uid or uuid.uuid4().hex) + ".json"
         path = os.path.abspath(os.path.join(directory, name))
@@ -441,17 +441,7 @@ class Account(object):
         # the file the other was still writing and the loser's os.replace()
         # then failed with ENOENT.
         with self._save_lock:
-            tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
-            try:
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump(self.to_dict(), fh, ensure_ascii=False, indent=2)
-                os.replace(tmp, path)
-            except Exception:
-                try:
-                    os.unlink(tmp)
-                except Exception:
-                    pass
-                raise
+            wb_storage.write_private_json(path, self.to_dict())
         self.path = path
         return path
 
@@ -1302,10 +1292,12 @@ class AccountPool(object):
         with self._lock:
             self.accounts = []
             if not os.path.isdir(self.dir): return self.accounts
+            wb_storage.restrict_directory(self.dir)
             for name in sorted(os.listdir(self.dir)):
                 if not name.endswith(".json"): continue
                 path = os.path.join(self.dir, name)
                 try:
+                    wb_storage.restrict_file(path)
                     with open(path, encoding="utf-8") as fh:
                         account = Account(json.load(fh), path)
                 except Exception as exc:

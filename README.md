@@ -50,6 +50,10 @@
 
 首次启动若无账号，打开看板点 **「+ 添加账号 (OAuth)」** 完成授权即自动入库。macOS 启动脚本会自动挑选可用的 Python 3.9+（`/usr/bin/python3`、Homebrew 或包内 `python/bin/python3`），未安装可用 `xcode-select --install` / `brew install python`。
 
+请求头和请求体默认分别有 **30 秒接收时限**，可通过环境变量 `WB_HTTP_READ_TIMEOUT` 调整（正数，单位秒）；持续少量发送数据不会延长时限，上游等待和正常流式生成不受这个接收时限影响。提前拒绝且请求体未读完时，网关会立即返回错误并用 `Connection: close` 关闭连接，客户端应重新连接；完整请求仍支持连接复用。对话并发限制也包含请求体上传阶段。
+
+Unix 系统上的账号目录权限为 `0700`，凭证和 Key 设置文件权限为 `0600`；临时文件从创建起即限制访问，启动或读取旧文件时会收紧旧权限。Windows 的访问权限仍由系统 ACL 管理。
+
 > zip 解压后若提示权限不足，先执行一次：
 > `chmod +x start-wb-proxy.sh start-wb-proxy.command start-wb-proxy-lan.sh start-wb-proxy-lan.command allow-firewall.command`
 
