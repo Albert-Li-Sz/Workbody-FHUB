@@ -213,7 +213,9 @@ check("a key with no binding is still listed, it can serve this exit",
       "k-follow" in [k["key"] for k in only_cn["keys"]])
 
 # An older panel that never asks about keys must keep getting a valid payload.
-legacy_view = {k: v for k, v in data.items() if k != "keys"}
+# `usd_cny` arrived later with the cost column; it is additive, so the legacy
+# shape is everything except the two newer axes.
+legacy_view = {k: v for k, v in data.items() if k not in ("keys", "usd_cny")}
 check("dropping the new axis leaves the old payload intact",
       set(legacy_view) == {"window", "realm", "summary", "accounts", "models"})
 
