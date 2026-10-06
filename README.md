@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.11-2496ED?style=flat-square" alt="Version 1.6.11"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.12-2496ED?style=flat-square" alt="Version 1.6.12"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -317,6 +317,15 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### v1.6.12
+
+- **Docker 部署与更新生态全面升级**（PR #125）：
+  - **一键部署与更新脚本 (`quick-deploy.sh`)**：终端仅需执行一行命令 `curl -fsSL https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | bash`。首次运行自动检测环境并拉取启动；后续再次执行同一命令即可完成自动平滑升级，账号配置与历史用量绝不丢失；
+  - **NAS / 面板单文件 Compose 模板（免源码克隆）**：官方 `docker-compose.yml` 剔除 `build: .` 依赖，飞牛 fnOS、群晖、1Panel 等用户无需 `git clone`，直接复制粘贴 YAML 即可建站并支持面板一键更新；开发者本地构建单独拆分为 `docker-compose.build.yml`；
+  - **支持双镜像仓库推送（GHCR + Docker Hub）**：工作流新增对 Docker Hub（`ardeyouxipianyi/workbuddy2api-hub`）的自动同步推送，消除前缀缺省报错困扰，兼顾国内 Docker 镜像加速器拉取；
+  - **Watchtower 全自动静默更新**：提供开箱即用的 Watchtower 配置与命令，支持后台无感自动升级。
+
 
 ### v1.6.11
 
