@@ -2033,6 +2033,7 @@ def runtime_settings_view():
             "id": entry.get("id") or "",
             "name": entry.get("name") or "",
             "realm": entry.get("realm") or "",
+            "models": list(entry.get("models") or []),
             "enabled": entry.get("enabled", True) is not False,
             "masked": (raw[:4] + "*" * 6 + raw[-4:]) if len(raw) > 8 else "*" * len(raw),
             "source": entry.get("source") or "panel",

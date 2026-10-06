@@ -185,5 +185,50 @@ check("a row saved without the field is unrestricted too",
       S.api_keys(d4)[0]["models"] == [], S.api_keys(d4))
 
 print()
+print("[7] runtime_settings_view exposes models and round-trips when adding a new key (issue #92)")
+
+d5 = tempfile.mkdtemp(prefix="wb-keymodels-view-")
+S.set_api_keys(d5, [{"id": "k1", "name": "first", "key": "key-first-secret",
+                     "realm": "intl", "models": ["deepseek*"]}])
+with mock.patch.multiple(proxy, ACCOUNTS_DIR=d5, POOL=None, SCHEDULER=None):
+    view = proxy.runtime_settings_view()
+    keys_in_view = view.get("api_keys") or []
+    check("runtime_settings_view returns the key list", len(keys_in_view) == 1, keys_in_view)
+    check("runtime_settings_view includes models", keys_in_view[0].get("models") == ["deepseek*"], keys_in_view[0])
+
+    # Simulates panel round-trip: the panel reads data.api_keys from /settings,
+    # maps them to editable rows, adds a new row, and calls saveApiKeys().
+    mapped_rows = []
+    for k in keys_in_view:
+        mapped_rows.append({
+            "id": k.get("id") or "",
+            "name": k.get("name") or "",
+            "realm": k.get("realm") or "",
+            "models": list(k.get("models") or []),
+            "enabled": k.get("enabled") is not False,
+            "key": "",  # Blank means keep stored secret
+        })
+    # Append a newly created key
+    mapped_rows.append({
+        "id": "",
+        "name": "second",
+        "realm": "cn",
+        "models": ["gpt*"],
+        "enabled": True,
+        "key": "key-second-secret",
+    })
+    req_add = FakeRequest(payload={"api_keys": mapped_rows})
+    proxy.Handler._handle_settings_save(req_add)
+    saved = S.api_keys(d5)
+    by_name = {entry["name"]: entry for entry in saved}
+    check("both keys exist after save", len(saved) == 2, saved)
+    check("the existing key preserves its model restriction",
+          by_name.get("first", {}).get("models") == ["deepseek*"],
+          by_name.get("first"))
+    check("the newly added key gets its own restriction",
+          by_name.get("second", {}).get("models") == ["gpt*"],
+          by_name.get("second"))
+
+print()
 print("PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
