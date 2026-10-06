@@ -387,7 +387,7 @@ def row_outcome(row):
         return o
     return "failed" if row.get("error") else "completed"
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_ms=None, fp=None,
-                account=None, outcome="completed", key=None):
+                account=None, outcome="completed", key=None, effort=None):
     """Record one finished request as exactly one JSONL row.
 
     A request without a usage block still gets a row (flagged usage_missing):
@@ -403,6 +403,11 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     a thread-local: one keep-alive thread serves many requests, so an implicit
     channel would attribute spend to the wrong key silently, while a missed
     call site only shows up as an extra "no key" row.
+
+    effort is the reasoning effort the request actually ran at, as resolved by
+    build_upstream_body(). It is written only when the model has one: a model
+    without reasoning controls has nothing to report, and rows written before
+    this field existed cannot be told apart from it anyway.
     """
     fields = _extract_usage(usage) or {}
     usage_missing = not fields
@@ -434,6 +439,10 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     # so the table can be de-duplicated and swept. A row written before the
     # table existed has no reference and falls back to the timeline.
     row["cost_policy"] = wb_pricing.current_policy_id(model)
+    # Only when the request had one: the panel shows a chip for rows that carry
+    # the field, and a model without reasoning controls has nothing to report.
+    if effort:
+        row["reasoning_effort"] = effort
     # Derived per-request rates (None-safe).
     if gen_ms and gen_ms > 0:
         row["tokens_per_sec"] = round(fields.get("completion_tokens", 0) / (gen_ms / 1000.0), 2)
@@ -3457,6 +3466,52 @@ def background_request_reason(payload):
     return ""
 
 
+def client_effort_of(body):
+    """The effort the request itself carries, under either client spelling.
+
+    build_upstream_body() reads both "reasoning_effort" and "reasoningEffort",
+    and only fills in the model default for the models it injects for - so a
+    camelCase request keeps the camelCase key, and a request to a model the
+    catalog pins to one level carries no effort at all.
+    """
+    if not isinstance(body, dict):
+        return None
+    return body.get("reasoning_effort") or body.get("reasoningEffort")
+
+
+def upstream_effort_of(body, model=None):
+    """The reasoning effort a request actually runs at, or None when unknown.
+
+    Resolved the way the upstream will apply it:
+
+      - a model the catalog pins to one level (reasoning.effort, no
+        supportedEfforts) always runs there: the picker offers no choice for it,
+        so a value the request carries anyway does not change the answer;
+      - a request that switched thinking off, or asked for "none", ran without
+        reasoning and nothing below overrides that;
+      - otherwise the client's own value wins, under either spelling;
+      - otherwise the model's declared defaultEffort applies.
+
+    Reading the body alone is not enough for the last two: the gateway only
+    writes an effort into the body for the models it injects for, so a plain
+    request to a pinned model would otherwise be reported as "no effort".
+    """
+    given = client_effort_of(body)
+    if model:
+        fixed = model_fixed_effort(model)
+        if fixed:
+            return fixed
+    thinking = (body or {}).get("thinking") if isinstance(body, dict) else None
+    if isinstance(thinking, dict) and \
+            str(thinking.get("type") or "").strip().lower() == "disabled":
+        return "none"
+    if str(given or "").strip().lower() == "none":
+        return "none"
+    if given:
+        return given
+    return model_default_effort(model) if model else None
+
+
 def background_request_message(reason):
     return ("這是客戶端自己發的背景請求（%s），本機代理已擋下，"
             "避免在沒有實際操作時消耗上游額度。"
@@ -3548,12 +3603,12 @@ def build_upstream_body(payload):
     return body
 
 
-def model_default_effort(model):
-    """The reasoning effort the catalog declares for a model, or None.
+def model_reasoning_meta(model):
+    """The catalog's reasoning block for a model, or {}.
 
-    Read from the same merged catalog that /v1/models advertises, so the effort
-    filled into an outbound request cannot disagree with what the model list
-    promised the client. Failures fall back to None (caller uses its default).
+    Read from the same merged catalog that /v1/models advertises, so what a
+    request reports cannot disagree with what the model list promised the
+    client. Failures fall back to {} (callers use their own default).
 
     Deliberately side-effect free: it reads the already-populated model cache
     and the shipped static tables only. Calling fetch_models() here would let a
@@ -3561,7 +3616,7 @@ def model_default_effort(model):
     handling, turning one chat call into a network fetch.
     """
     if not model:
-        return None
+        return {}
     try:
         realm = detect_model_realm(model) or CURRENT_REALM
         entries = (_models_cache.get(realm) or {}).get("data")
@@ -3570,15 +3625,29 @@ def model_default_effort(model):
             table = getattr(wb_catalog, name, None) or wb_catalog.STATIC_MODELS
             entries = [(m.get("id"), m) for m in table if isinstance(m, dict)]
         for mid, meta in entries:
-            if mid != model:
-                continue
-            effort = ((meta or {}).get("reasoning") or {}).get("defaultEffort")
-            if isinstance(effort, str) and effort.strip():
-                return effort.strip()
-            return None
+            if mid == model:
+                return (meta or {}).get("reasoning") or {}
     except Exception as exc:
-        log("default effort lookup failed for '%s': %s" % (model, exc))
-    return None
+        log("reasoning lookup failed for '%s': %s" % (model, exc))
+    return {}
+
+
+def model_default_effort(model):
+    """The effort the catalog applies when the client asks for none, or None."""
+    effort = model_reasoning_meta(model).get("defaultEffort")
+    return effort.strip() if isinstance(effort, str) and effort.strip() else None
+
+
+def model_fixed_effort(model):
+    """The effort the catalog pins a model to, or None when it is selectable.
+
+    reasoning.effort without supportedEfforts means the model always runs at
+    that level: /v1/models advertises it as reasoning_fixed_effort and the
+    picker offers no choice for it, so an effort the request carries anyway does
+    not change what ran.
+    """
+    effort = model_reasoning_meta(model).get("effort")
+    return effort.strip() if isinstance(effort, str) and effort.strip() else None
 
 
 def prompt_cache_key_enabled():
@@ -3869,7 +3938,10 @@ def open_upstream(payload, session_key=None, target_realm=None):
             resp = wb_accounts.urlopen(req, timeout=600, proxy=account.proxy)
             account.clear_error(model=model)
             reset_switch_counter(account, model)
-            return resp, account
+            # The third element is the reasoning effort this request ran at: the
+            # body is rebuilt per attempt, but the effort is a property of the
+            # model and the request, and the callers record it on the usage row.
+            return resp, account, upstream_effort_of(upstream_body, model)
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
@@ -7283,7 +7355,8 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(chat_req.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
-            upstream, account = open_upstream(chat_req, session_key=session_key, target_realm=req_realm)
+            upstream, account, effort = open_upstream(
+                chat_req, session_key=session_key, target_realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -7318,12 +7391,14 @@ class Handler(BaseHTTPRequestHandler):
             if want_stream:
                 return self._responses_stream_response(
                     upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
-                    base_body=chat_req, session_key=session_key, realm=req_realm)
+                    base_body=chat_req, session_key=session_key, realm=req_realm,
+                    effort=effort)
             return self._responses_nonstream_response(
                 upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
-                base_body=chat_req, session_key=session_key, realm=req_realm)
+                base_body=chat_req, session_key=session_key, realm=req_realm,
+                effort=effort)
 
-    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None):
+    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -7365,7 +7440,7 @@ class Handler(BaseHTTPRequestHandler):
                     upstream.close()
                 except Exception:
                     pass
-                upstream, account = follow_up_with_tool_results(
+                upstream, account, _ = follow_up_with_tool_results(
                     internal, holder, model, session_key, t_start, drop_tools=give_up)
             if total_usage:
                 holder["usage"] = total_usage
@@ -7375,7 +7450,7 @@ class Handler(BaseHTTPRequestHandler):
                          ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
                          fp=fp, account=account.uid,
-                         outcome="client_aborted", key=self._key_id())
+                         outcome="client_aborted", key=self._key_id(), effort=effort)
             return
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
@@ -7402,10 +7477,10 @@ class Handler(BaseHTTPRequestHandler):
         record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid, key=self._key_id())
+                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         return
 
-    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None):
+    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
         # 跟串流那條一樣：客戶端宣告 web_search / web_fetch 時由反代代跑。
         # 中間那幾輪對客戶端不可見，最後才組成一個 Responses 物件回傳；不這樣
         # 做的話 web_search 的 function_call 會直接漏給客戶端，客戶端只會回
@@ -7435,7 +7510,7 @@ class Handler(BaseHTTPRequestHandler):
                       "base_body": base_body, "realm": realm,
                       "web_sources": sources}
             try:
-                upstream, account = follow_up_with_tool_results(
+                upstream, account, _ = follow_up_with_tool_results(
                     calls, holder, model, session_key, t_start, drop_tools=give_up)
             except Exception as exc:
                 record_error(model, 502, "web tool follow-up failed: %s" % exc,
@@ -7447,7 +7522,7 @@ class Handler(BaseHTTPRequestHandler):
         result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
                                   sources=sources)
         record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
-                     account=account.uid, key=self._key_id())
+                     account=account.uid, key=self._key_id(), effort=effort)
         return self._json(200, result)
 
     def do_POST(self):
@@ -7530,14 +7605,14 @@ class Handler(BaseHTTPRequestHandler):
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
         forwarded = build_upstream_body(payload)
-        given = payload.get("reasoning_effort") or payload.get("reasoning") \
+        given = client_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
         log(
             "chat: model=%s client_effort=%r -> upstream_effort=%r stream=%s msgs=%d"
             % (
                 payload.get("model"),
                 given,
-                forwarded.get("reasoning_effort"),
+                upstream_effort_of(forwarded, payload.get("model")),
                 bool(payload.get("stream")),
                 len(forwarded.get("messages") or []),
             )
@@ -7558,7 +7633,8 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(payload.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
-            upstream, account = open_upstream(payload, session_key=session_key, target_realm=req_realm)
+            upstream, account, effort = open_upstream(
+                payload, session_key=session_key, target_realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -7593,11 +7669,11 @@ class Handler(BaseHTTPRequestHandler):
         with upstream:
             if want_stream:
                 return self._chat_stream_response(
-                    upstream, model, fp, account, t_start)
+                    upstream, model, fp, account, t_start, effort=effort)
             return self._chat_nonstream_response(
-                upstream, model, fp, account, t_start)
+                upstream, model, fp, account, t_start, effort=effort)
 
-    def _chat_stream_response(self, upstream, model, fp, account, t_start):
+    def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -7643,7 +7719,7 @@ class Handler(BaseHTTPRequestHandler):
                              elapsed_ms=wall, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms) if first_ms is not None else None,
                              fp=fp, account=account.uid,
-                             outcome="client_aborted", key=self._key_id())
+                             outcome="client_aborted", key=self._key_id(), effort=effort)
                 return
             except Exception as exc:
                 # Upstream quit mid-stream (timeout, incomplete read, ...).
@@ -7681,10 +7757,10 @@ class Handler(BaseHTTPRequestHandler):
             record_usage(model, last_usage, stream=True,
                          elapsed_ms=wall, ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
-                         fp=fp, account=account.uid, key=self._key_id())
+                         fp=fp, account=account.uid, key=self._key_id(), effort=effort)
             return
 
-    def _chat_nonstream_response(self, upstream, model, fp, account, t_start):
+    def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None):
         try:
             result = aggregate_stream(upstream, model, None)
         except Exception as exc:
@@ -7698,7 +7774,7 @@ class Handler(BaseHTTPRequestHandler):
         record_usage(model, result.get("usage"), stream=False,
                      elapsed_ms=wall, ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid, key=self._key_id())
+                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         return self._json(200, result)
 
 def main():
