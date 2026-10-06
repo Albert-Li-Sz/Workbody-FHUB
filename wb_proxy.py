@@ -3585,6 +3585,10 @@ def build_upstream_body(payload):
     translate_max_completion_tokens(body)
     normalize_tool_choice(body)
     normalize_tools(body)
+    if "max_tokens" not in body:
+        default_max = model_default_max_output_tokens(model)
+        if default_max:
+            body["max_tokens"] = default_max
     # Thinking injection for DeepSeek models.
     #
     # thinking.type=enabled on its own does not switch the reasoning trace on:
@@ -3610,13 +3614,10 @@ def build_upstream_body(payload):
     return body
 
 
-def model_reasoning_meta(model):
-    """The catalog's reasoning block for a model, or {}.
+def model_catalog_meta(model):
+    """The catalog metadata dict for a model, or {}.
 
-    Read from the same merged catalog that /v1/models advertises, so what a
-    request reports cannot disagree with what the model list promised the
-    client. Failures fall back to {} (callers use their own default).
-
+    Read from the same merged catalog that /v1/models advertises.
     Deliberately side-effect free: it reads the already-populated model cache
     and the shipped static tables only. Calling fetch_models() here would let a
     cold cache trigger an upstream discovery round-trip from inside request
@@ -3631,12 +3632,31 @@ def model_reasoning_meta(model):
             name = "STATIC_CN_MODELS" if realm == "cn" else "STATIC_INTL_MODELS"
             table = getattr(wb_catalog, name, None) or wb_catalog.STATIC_MODELS
             entries = [(m.get("id"), m) for m in table if isinstance(m, dict)]
+        m_lower = str(model).strip().lower()
         for mid, meta in entries:
-            if mid == model:
-                return (meta or {}).get("reasoning") or {}
+            if str(mid).strip().lower() == m_lower:
+                return meta or {}
     except Exception as exc:
-        log("reasoning lookup failed for '%s': %s" % (model, exc))
+        log("catalog meta lookup failed for '%s': %s" % (model, exc))
     return {}
+
+
+def model_reasoning_meta(model):
+    """The catalog's reasoning block for a model, or {}."""
+    return model_catalog_meta(model).get("reasoning") or {}
+
+
+def model_default_max_output_tokens(model):
+    """The max output tokens the catalog declares for a model, or None."""
+    val = model_catalog_meta(model).get("maxOutputTokens")
+    if val is not None:
+        try:
+            val = int(val)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    return None
 
 
 def model_default_effort(model):
@@ -4949,6 +4969,10 @@ def responses_to_chat(payload):
             chat[key] = payload[key]
     if payload.get("max_output_tokens") is not None:
         chat["max_tokens"] = payload["max_output_tokens"]
+    else:
+        default_max = model_default_max_output_tokens(payload.get("model"))
+        if default_max:
+            chat["max_tokens"] = default_max
     effort = None
     reasoning = payload.get("reasoning")
     if isinstance(reasoning, dict):
