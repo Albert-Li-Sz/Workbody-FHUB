@@ -88,6 +88,42 @@ class RemoteCatalogTests(unittest.TestCase):
         (P.fetch_remote_product_config, P.read_product_config_models,
          P.fetch_endpoint_models, P.product_config_path) = self._orig
 
+    def test_credits_follow_the_endpoint_and_fall_back_for_a_pinned_model(self):
+        """What the multiplier badge can follow, and what it cannot.
+
+        The badge renders whatever /v1/models reports, so the question is where
+        that value comes from. A model the endpoint still lists follows the
+        endpoint; a model it no longer lists - the cn free hy4-preview-f, pinned
+        by the curated table since #85 - keeps the bundled value, which by
+        definition cannot follow a price change until the endpoint lists it
+        again. Both halves, plus the model_entry() hop the panel reads.
+        """
+        # 1. The endpoint declares a new price for a curated model: it wins.
+        meta = dict(INTL_META)
+        meta["hy4-preview-f"] = {"credits": "x0.29"}
+        P.fetch_remote_product_config = (
+            lambda realm: (INTL_IDS, meta) if realm == "intl" else None)
+        entries = dict(P.fetch_models("intl"))
+        self.assertEqual(entries["hy4-preview-f"]["credits"], "x0.29")
+        self.assertEqual(
+            P.model_entry("hy4-preview-f", entries["hy4-preview-f"])["credits"],
+            "x0.29")
+
+        # 2. The endpoint stops listing it: the bundled value survives, and that
+        #    is exactly what the panel then shows.
+        ids = [m for m in INTL_IDS if m != "hy4-preview-f"]
+        meta = dict(INTL_META)
+        meta.pop("hy4-preview-f", None)
+        P.fetch_remote_product_config = (
+            lambda realm: (ids, meta) if realm == "intl" else None)
+        P._models_cache["intl"] = {"at": 0.0, "data": None}
+        entries = dict(P.fetch_models("intl"))
+        self.assertIn("hy4-preview-f", entries)
+        self.assertEqual(entries["hy4-preview-f"]["credits"], "x0.00")
+        self.assertEqual(
+            P.model_entry("hy4-preview-f", entries["hy4-preview-f"])["credits"],
+            "x0.00")
+
     def test_parse_keeps_order_and_metadata(self):
         ids, meta = P.parse_remote_catalog(payload(INTL_IDS, INTL_META))
         self.assertEqual(ids, INTL_IDS)
