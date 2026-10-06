@@ -24,18 +24,33 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     - name: Log in to Docker Hub
-      if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+      env:
+        DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      if: env.DOCKERHUB_USER != '' && env.DOCKERHUB_TOKEN != ''
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Determine Docker images
+      id: images
+      env:
+        DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      run: |
+        TARGETS="ghcr.io/${{ github.repository }}"
+        if [ -n "$DOCKERHUB_USER" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+          TARGETS="$TARGETS
+        ${{ github.repository }}"
+        fi
+        echo "list<<EOF" >> $GITHUB_OUTPUT
+        echo "$TARGETS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
     - name: Extract Docker metadata
       uses: docker/metadata-action@v5
       id: meta
       with:
-        images: |
-          ghcr.io/${{ github.repository }}
-          ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' && github.repository || '' }}
+        images: ${{ steps.images.outputs.list }}
         tags: |
           type=raw,value=${{ github.event.release.tag_name }}
           type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
