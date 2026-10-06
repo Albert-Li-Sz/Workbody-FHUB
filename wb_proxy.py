@@ -2302,6 +2302,27 @@ def merge_catalog(primary, realm=None, extras=False):
     return out
 _catalog_lock = threading.Lock()
 
+_catalog_fallback_log = {}
+def note_bundled_reasoning(realm, live, entries):
+    """Say once when a model's reasoning controls come from the bundled table.
+
+    The live catalogue is the source of truth and the snapshot is only the
+    fallback, so values the snapshot alone carries can be no fresher than the
+    snapshot. One line per change is enough to notice that.
+    """
+    live_meta = dict(live or [])
+    missing = sorted(mid for mid, meta in entries
+                     if (meta.get("reasoning") or {})
+                     and not ((live_meta.get(mid) or {}).get("reasoning")))
+    if not missing:
+        _catalog_fallback_log.pop(realm, None)
+        return
+    if _catalog_fallback_log.get(realm) == frozenset(missing):
+        return
+    _catalog_fallback_log[realm] = frozenset(missing)
+    shown = ", ".join(missing[:6]) + (" ..." if len(missing) > 6 else "")
+    log("catalog    : no reasoning block in the live catalogue for %d model(s); "
+        "using the bundled table: %s" % (len(missing), shown))
 def fetch_models(realm=None):
     r = realm or CURRENT_REALM
     with _lock:
@@ -2323,6 +2344,7 @@ def fetch_models(realm=None):
             live = [(m, {}) for m in fetch_endpoint_models()]
             extras = False
         entries = merge_catalog(live, realm=r, extras=extras)
+        note_bundled_reasoning(r, live, entries)
         with _lock:
             _models_cache[r] = {"at": time.time(), "data": entries}
         return entries
@@ -2408,11 +2430,6 @@ def model_entry(mid, meta):
         item["reasoning_default_effort"] = reasoning["defaultEffort"]
     if reasoning.get("canDisableThinking") is not None:
         item["reasoning_can_disable"] = reasoning["canDisableThinking"]
-    # DeepSeek 4.1 official supports low / high / max
-    if mid == "deepseek-v4.1-flash":
-        item["reasoning_efforts"] = ["low", "high", "max"]
-        item["reasoning_default_effort"] = "high"
-        item.pop("reasoning_fixed_effort", None)
     if meta.get("onlyReasoning") is not None:
         item["always_reasoning"] = bool(meta.get("onlyReasoning"))
     # ---- misc ----
