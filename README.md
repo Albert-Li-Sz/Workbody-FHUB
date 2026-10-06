@@ -1,7 +1,7 @@
 # WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.12-2496ED?style=flat-square" alt="Version 1.6.12"></a>
+  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.13-2496ED?style=flat-square" alt="Version 1.6.13"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -322,6 +322,12 @@ export OPENAI_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、版本更新记录 (Changelog)
+
+### v1.6.13
+
+- **修复看板右上角颜色主题菜单按钮无法打开**（[PR #127](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/127)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：修正 IIFE 作用域中 `toggleThemeMenu` 与 `selectTheme` 的全局导出时机，修复点击按钮报 `ReferenceError` 导致下拉菜单无法弹出的问题，现可正常手动选择「浅色 / 深色 / 跟随系统」；新增 `tests/_test_dashboard_theme.js` DOM 级可达性与交互回归测试；
+- **Docker 一键安装脚本补充国内网络加速与权限说明**（issue #126）：README 补充国内网络环境下通过 GitHub 代理加速拉取命令与 NAS 非 root 账户下的 `sudo bash` 说明。
+
 
 ### v1.6.12
 
