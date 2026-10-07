@@ -1,0 +1,23 @@
+{
+  "repository": "albert-li-sz/workbody-fhub",
+  "anonymous": true,
+  "tags": {
+    "1.0.1": "sha256:aae688609b751e92b4d6105f9318c6ee56a56eb8dfb0b51594c0535b2f89e290",
+    "v1.0.1": "sha256:aae688609b751e92b4d6105f9318c6ee56a56eb8dfb0b51594c0535b2f89e290",
+    "latest": "sha256:aae688609b751e92b4d6105f9318c6ee56a56eb8dfb0b51594c0535b2f89e290"
+  },
+  "platforms": {
+    "linux/amd64": {
+      "digest": "sha256:3ccc0aa50eb82d47d98ba37ebe6e1f2f55d8ac3ca2513c4fe8a55a7b69f56be2",
+      "revision": "66ec2d6087de78bf106de44419cb466b3f2e32c1",
+      "version": "1.0.1",
+      "licenses": "Apache-2.0 AND MIT"
+    },
+    "linux/arm64": {
+      "digest": "sha256:d5c3084f94da302fed6f5c2e5ac40edf31b60e92eea1e52da71cc725f7a1d41a",
+      "revision": "66ec2d6087de78bf106de44419cb466b3f2e32c1",
+      "version": "1.0.1",
+      "licenses": "Apache-2.0 AND MIT"
+    }
+  }
+}

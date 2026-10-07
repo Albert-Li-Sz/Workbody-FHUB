@@ -1,0 +1,27 @@
+{
+  "image": "workbody-fhub:1.0.1",
+  "version": "1.0.1",
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "image_index_digest": "sha256:6071bc8c2aacd35500a66632cd95e8bca3e5cbccad77fe1044e52a4c0799e1ca",
+  "archive": "workbody-fhub-1.0.1.tar.gz",
+  "archive_bytes": 47084409,
+  "sha256": "1dc533d7d636b83bb7f7ba393a972e992a8494336626730e35f4337c0555b7cf",
+  "source_commit": "66ec2d6087de78bf106de44419cb466b3f2e32c1",
+  "platform_archives": [
+    {
+      "archive": "workbody-fhub-1.0.1-linux-amd64.tar.gz",
+      "platform": "linux/amd64",
+      "archive_bytes": 23361100,
+      "sha256": "1696ac64d126fe942445c7420af3ec92df9394baa72b1b3623856fad59f5873b"
+    },
+    {
+      "archive": "workbody-fhub-1.0.1-linux-arm64.tar.gz",
+      "platform": "linux/arm64",
+      "archive_bytes": 24139749,
+      "sha256": "57f79763e23bd6b5c3882ee69f4f4aa0e46f362bbcfecbafad9334ba49418d0a"
+    }
+  ]
+}

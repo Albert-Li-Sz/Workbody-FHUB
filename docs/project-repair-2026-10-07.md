@@ -50,7 +50,24 @@ node scripts/audit_project_ui.js
 python3 scripts/verify_image.py workbody-fhub:1.0.1 --non-root
 ```
 
-发布验证记录将在远程 CI 和云镜像核验完成后补充。双架构 Docker 导入包通过 GitHub Release 分发；本地测试通过本身不代表远程发布或生产服务已经更新。
+[1.0.1 Release](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/tag/v1.0.1) 已发布。应用源码对应 `66ec2d6087de78bf106de44419cb466b3f2e32c1`；主分支后续提交补充发布验证工具和证据，不修改这个发布标签。
+
+- [修复提交 CI](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/runs/37612591910)、[发布标签 CI](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/runs/37612920526)、[发布检查工具 CI](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/runs/37614769363) 均通过 Linux Python 3.9、3.12 和 Windows Python 3.12；标签版本一致性检查也通过。
+- [云端镜像复核与 latest 更新](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/runs/37614798761) 通过两种架构、普通 UID、每种架构 7 个回归套件和 31 个源码/声明文件哈希检查。[云端结果](project-repair-2026-10-07-cloud-ci.json)和[本机拉取结果](project-repair-2026-10-07-cloud-image.json)分别保留。
+- [匿名注册表检查](project-repair-2026-10-07-cloud-registry.json)确认无需登录即可读取镜像；`1.0.1`、`v1.0.1`、`latest` 都指向 `sha256:aae688609b751e92b4d6105f9318c6ee56a56eb8dfb0b51594c0535b2f89e290`，两种架构的版本及源码标签均正确。
+- Release 提供双架构 Docker 导入包和 amd64/arm64 独立导入包；[归档大小及 SHA-256](project-repair-2026-10-07-artifacts.json)已核对上传资产。双架构包适用于 containerd 多平台镜像存储，传统 Docker 镜像存储应选对应架构的独立包。附件另含测试、成品与云端验证证据，完整校验和由 Release 工作流生成。
+
+首次发布流程在普通 UID 启动检查上连续两次超时，本机同一镜像验证通过。原验证脚本只循环等待约 10 秒，日志也缺少架构和权限诊断。现将启动窗口改为有上限的 60 秒，并补充不含凭据的诊断；故意使用错误端口的控制实验确认超时有界、能报告 UID 和私有目录权限。新流程按既有发布标签核验已经上传的镜像，全部通过后才更新 `latest`；原失败流水线作为历史记录保留，没有绕过成品检查或重写发布标签。当前 ARM64 普通 UID 整段烟测在云端约需 20 秒。
+
+默认部署更新：
+
+```bash
+git pull
+docker compose pull
+docker compose up -d
+```
+
+若 `.env` 中显式配置了 `WORKBODY_IMAGE`，更新前将它改为目标版本 `ghcr.io/albert-li-sz/workbody-fhub:1.0.1`。
 
 ## 保留的改进建议与验证边界
 
