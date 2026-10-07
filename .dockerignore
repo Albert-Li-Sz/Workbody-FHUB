@@ -20,6 +20,7 @@ usage/
 tests/
 docs/
 scripts/
+tools/
 .github/
 dist/
 *.tar

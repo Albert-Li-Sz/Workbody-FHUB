@@ -240,6 +240,11 @@ def dump(path, lines):
     print("wrote", path, len(body), "bytes")
 
 
-base = pathlib.Path(__file__).parent
-dump(base / "start-wb-proxy-lan.bat", LAN)
-dump(base / "start-wb-proxy.bat", PLAIN)
+def main():
+    base = pathlib.Path(__file__).resolve().parents[1]
+    dump(base / "start-wb-proxy-lan.bat", LAN)
+    dump(base / "start-wb-proxy.bat", PLAIN)
+
+
+if __name__ == "__main__":
+    main()

@@ -680,7 +680,7 @@ class Account(object):
                 out.add(mid)
         return out
 
-    def ready(self, model=None):
+    def ready(self, model=None, allow_refresh=True):
         if not self.enabled or not self.access_token:
             return False
         if self.throttle_wait(model=model) > 0:
@@ -711,6 +711,8 @@ class Account(object):
         remaining = exp - time.time()
         if remaining > 120:
             return True
+        if not allow_refresh:
+            return remaining > 0
         if remaining > 0:
             # Refresh is a last resort and its result decides availability.
             # Returning True unconditionally here kept handing out an account
@@ -2089,10 +2091,11 @@ class AccountPool(object):
                 account.save(self.dir)
         self.apply_proxy_slots()
 
-    def count_ready(self, realm=None, model=None):
+    def count_ready(self, realm=None, model=None, allow_refresh=True):
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
-        return sum(1 for a in snapshot if a.enabled and a.access_token and a.ready(model=model))
+        return sum(1 for a in snapshot if a.enabled and a.access_token
+                   and a.ready(model=model, allow_refresh=allow_refresh))
 
     def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None):
         exclude = exclude or set()

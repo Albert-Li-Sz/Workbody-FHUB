@@ -1,0 +1,11 @@
+{
+  "scope": "actual dashboard functions in Node VM with mocked HTTP/DOM",
+  "observations": {
+    "client_error": "current password is wrong",
+    "valid_session_cleared_on_wrong_current_password": false,
+    "invalid_session_cleared": true,
+    "url_password_login_triggered": false,
+    "url_password_removed": true
+  },
+  "findings": []
+}

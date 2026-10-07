@@ -52,32 +52,24 @@ def log_files(usage_dir, main_name="usage.jsonl"):
     return files
 
 
-def _iter_rows(path, max_bytes=8 * 1024 * 1024):
+def _iter_rows(path, max_bytes=None):
+    """Stream complete rows; an explicit byte window is opt-in only."""
     try:
-        size = os.path.getsize(path)
-    except OSError:
-        return
-    try:
-        if size > max_bytes:
-            with open(path, "rb") as fh:
-                fh.seek(max(0, size - max_bytes))
+        with open(path, "rb") as fh:
+            if max_bytes is not None and os.path.getsize(path) > max_bytes:
+                fh.seek(max(0, os.path.getsize(path) - max_bytes))
                 fh.readline()
-                data = fh.read().decode("utf-8", "replace")
-        else:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                data = fh.read()
+            for line in fh:
+                if not line.endswith(b"\n"):
+                    continue
+                try:
+                    row = json.loads(line.decode("utf-8", "replace"))
+                except (ValueError, UnicodeError):
+                    continue
+                if isinstance(row, dict):
+                    yield row
     except OSError:
         return
-    for line in data.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(row, dict):
-            yield row
 
 
 def _files_stamp(usage_dir, main_name):
@@ -233,10 +225,13 @@ def compact_main(path, max_mb, retention_days, now=None, log=None):
             else:
                 keep.append(line)
         size = sum(len(line.encode("utf-8")) for line in keep)
-        while keep and size > max_bytes:
-            dropped = keep.pop(0)
+        cut = 0
+        while cut < len(keep) and size > max_bytes:
+            dropped = keep[cut]
+            cut += 1
             size -= len(dropped.encode("utf-8"))
             archived.append(dropped)
+        keep = keep[cut:]
         if not archived:
             return False
         usage_dir = os.path.dirname(path)

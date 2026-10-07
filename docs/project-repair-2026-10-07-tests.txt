@@ -1,0 +1,86 @@
+  [PASS] _test_account_proxy.py                 PASS=19 FAIL=0
+  [PASS] _test_account_proxy_calls.py           SUMMARY: PASS=7 FAIL=0
+  [PASS] _test_account_transfer.py              OK
+  [PASS] _test_action_dispatch.js               action dispatch assertions passed (10 checks)
+  [PASS] _test_analytics_by_key.js              PASS=30 FAIL=0
+  [PASS] _test_analytics_by_key.py                SUMMARY: PASS=37 FAIL=0
+  [PASS] _test_anthropic_http.py                PASS=32 FAIL=0
+  [PASS] _test_anthropic_messages.py            PASS=41 FAIL=0
+  [PASS] _test_api_key_ids.py                   PASS=15 FAIL=0
+  [PASS] _test_background_requests.py           PASS=24 FAIL=0
+  [PASS] _test_cockpit_import.py                OK
+  [PASS] _test_connection_reuse.py              OK
+  [PASS] _test_custom_tools.py                  SUMMARY: PASS=35 FAIL=0
+  [PASS] _test_daily_chat.py                    OK
+  [PASS] _test_daily_credit_limit.py            OK
+  [PASS] _test_daily_token_limit.py             OK
+  [PASS] _test_dashboard_handlers.js            dashboard handler and key editor assertions passed (105 actions, 105 handlers)
+  [PASS] _test_dashboard_refresh.js             dashboard refresh coalescing assertions passed
+  [PASS] _test_dashboard_theme.js               dashboard theme assertions passed (2 exported handlers, 90 inline handlers swept
+  [PASS] _test_ddg_search.py                    OK
+  [PASS] _test_desktop_atrest.py                OK (skipped=5)
+  [PASS] _test_desktop_chains.py                OK
+  [PASS] _test_desktop_realm.py                 OK
+  [PASS] _test_global_actions.py                OK
+  [PASS] _test_health_auth.py                   OK
+  [PASS] _test_key_model_limits.py              PASS=45 FAIL=0
+  [PASS] _test_local_web_tools.py               PASS=72 FAIL=0
+  [PASS] _test_log_ring.py                      OK
+  [PASS] _test_matrix_filters.js                PASS=19 FAIL=0
+  [PASS] _test_max_output_tokens.py             OK
+  [PASS] _test_model_channels.js                WorkBuddy channel isolation, retired selection and request race assertions passe
+  [PASS] _test_model_channels.py                OK
+  [PASS] _test_model_cooldowns.js               model cooldown dashboard assertions passed
+  [PASS] _test_model_cooldowns.py               OK
+  [PASS] _test_model_credits.js                 model credits assertions passed (23 checks)
+  [PASS] _test_model_probes.js                  model probe dashboard assertions passed
+  [PASS] _test_modelsdev.py                     OK
+  [PASS] _test_mp_tasks.py                      OK
+  [PASS] _test_namespace_tools.py               PASS=27 FAIL=0
+  [PASS] _test_output_probes.py                 OK
+  [PASS] _test_panel_bootstrap.py               OK
+  [PASS] _test_pool_governance.py               OK
+  [PASS] _test_pricing.py                       OK
+  [PASS] _test_pricing_auto.py                  OK
+  [PASS] _test_pricing_refresh.py               OK
+  [PASS] _test_pricing_tooltip.js               pricing tooltip: all checks passed
+  [PASS] _test_pricing_tooltip.py               OK (skipped=1)
+  [PASS] _test_private_storage.py               OK
+  [PASS] _test_product_persistence.py           PASS=17 FAIL=0
+  [PASS] _test_profile_sync.py                  OK
+  [PASS] _test_project_repairs.js               project audit frontend regressions passed
+  [PASS] _test_project_repairs.py               OK
+  [PASS] _test_prompt_modes.py                  OK
+  [PASS] _test_proxy_slot_intel.py              PASS=67 FAIL=0
+  [PASS] _test_proxy_slot_lifecycle.py          SUMMARY: PASS=14 FAIL=0
+  [PASS] _test_proxy_slots.py                   PASS=53 FAIL=0
+  [PASS] _test_realm_view.js                    realm view assertions passed
+  [PASS] _test_reasoning_backfill.py            PASS=26 FAIL=0
+  [PASS] _test_recent_effort.js                 recent-requests effort assertions passed (6 checks)
+  [PASS] _test_redis_mirror.py                  OK
+  [PASS] _test_release_engineering.py           OK
+  [PASS] _test_remote_catalog.py                OK
+  [PASS] _test_removed_exit.py                  OK
+  [PASS] _test_request_archive.py               OK
+  [PASS] _test_reserve_credits.py               OK
+  [PASS] _test_sanitize_fingerprint.py          OK
+  [PASS] _test_scheduler_config.py              OK
+  [PASS] _test_security_headers.py              OK
+  [PASS] _test_session_headers.py               OK
+  [PASS] _test_settings_merge.py                OK
+  [PASS] _test_slot_editor.js                   slot editor assertions passed
+  [PASS] _test_streak_bonus.py                  OK
+  [PASS] _test_task_queue.py                    OK
+  [PASS] _test_tasks_cache.py                   OK
+  [PASS] _test_tool_choice_none.py              SUMMARY: PASS=19 FAIL=0
+  [PASS] _test_ui_audit_fixes.py                OK
+  [PASS] _test_upstream_repairs.py              PASS=73 FAIL=0
+  [PASS] _test_upstream_timeouts.py             OK
+  [PASS] _test_usage_range.py                   PASS=50 FAIL=0
+  [PASS] _test_usage_reasoning_effort.py        OK
+  [PASS] _test_usage_timeseries.py              OK
+  [PASS] _test_web_agent.py                     OK
+  [PASS] _test_web_security.py                  OK
+  [PASS] _test_web_tool_flow.py                 OK
+
+  84 passed, 0 failed, 0 skipped  (/Users/albert_li/data/Code/WorkBody/workbuddy2api-hub)

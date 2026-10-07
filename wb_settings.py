@@ -12,6 +12,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -44,6 +45,12 @@ SETTINGS_CACHE_TTL = 5.0
 # 3-4 times per request; the cache removes the repeated open+parse while the
 # stamp check still notices an edit made outside save() (audit #6).
 _settings_cache = {}
+_settings_last_good = {}
+_settings_read_errors = {}
+
+
+class SettingsError(RuntimeError):
+    """Existing settings cannot be read and no trusted snapshot is available."""
 
 
 def settings_path(accounts_dir):
@@ -72,34 +79,44 @@ def load(accounts_dir):
     immediately (audit #6).
     """
     path = settings_path(accounts_dir)
-    # Harden existing installations too. A permission failure must propagate,
-    # rather than being mistaken for empty settings and disabling API-key auth.
-    try:
-        wb_storage.restrict_file(path)
-        wb_storage.restrict_directory(accounts_dir)
-    except FileNotFoundError:
-        return {}
     key = os.path.abspath(path)
-    stamp = _settings_stamp(path)
-    now = time.time()
     with _lock:
+        stamp = _settings_stamp(path)
+        now = time.time()
+        # Permission hardening is required even for a cached snapshot.
+        try:
+            wb_storage.restrict_file(path)
+            wb_storage.restrict_directory(accounts_dir)
+        except FileNotFoundError:
+            if key not in _settings_last_good:
+                return {}
         hit = _settings_cache.get(key)
         if (hit and now - hit[0] < SETTINGS_CACHE_TTL
                 and hit[1] == stamp):
             return copy.deepcopy(hit[2])
-    data = {}
-    try:
-        with open(path, encoding="utf-8") as fh:
-            parsed = json.load(fh)
-        if isinstance(parsed, dict):
-            data = parsed
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-    with _lock:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                raise ValueError("settings must be a JSON object")
+            if "api_keys" in data and (not isinstance(data["api_keys"], list)
+                                       or any(not isinstance(item, dict) for item in data["api_keys"])):
+                raise ValueError("api_keys must be an array of objects")
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, FileNotFoundError) and key not in _settings_last_good:
+                return {}
+            if key not in _settings_last_good:
+                raise SettingsError("settings.json is unreadable; restore a valid settings file") from exc
+            if key not in _settings_read_errors or _settings_read_errors[key] != stamp:
+                logging.getLogger(__name__).warning(
+                    "settings.json is unreadable; retaining the last valid settings")
+            _settings_read_errors[key] = stamp
+            data = copy.deepcopy(_settings_last_good[key])
+        else:
+            _settings_last_good[key] = copy.deepcopy(data)
+            _settings_read_errors.pop(key, None)
         _settings_cache[key] = (now, stamp, data)
-    return copy.deepcopy(data)
+        return copy.deepcopy(data)
 
 
 def save(accounts_dir, data):
@@ -108,7 +125,14 @@ def save(accounts_dir, data):
         path = settings_path(accounts_dir)
         wb_storage.write_private_json(path, data)
         _settings_cache.pop(os.path.abspath(path), None)
+        _settings_last_good[os.path.abspath(path)] = copy.deepcopy(data)
+        _settings_read_errors.pop(os.path.abspath(path), None)
         return path
+
+
+def using_settings_snapshot(accounts_dir):
+    with _lock:
+        return os.path.abspath(settings_path(accounts_dir)) in _settings_read_errors
 
 
 LOGGING_DEFAULTS = {
@@ -211,9 +235,15 @@ def verify_panel_password(accounts_dir, password):
     return hmac.compare_digest(given, stored)
 
 
-def set_panel_password(accounts_dir, password):
+def validate_panel_password(password):
     if not isinstance(password, str) or not password or password == DEFAULT_PANEL_PASSWORD:
         raise ValueError("set a non-empty panel password other than the retired default admin")
+    if len(password) < 4:
+        raise ValueError("new password must be at least 4 characters")
+
+
+def set_panel_password(accounts_dir, password):
+    validate_panel_password(password)
     with _lock:
         data = load(accounts_dir)
         salt = secrets.token_hex(16)

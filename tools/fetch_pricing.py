@@ -12,10 +12,10 @@
 时生效的那一版计价。本脚本用于首次内置快照、以及离线生成/更新内置价。
 
 用法：
-    python _fetch_pricing.py            # 抓取并写入 pricing/pricing.json
-    python _fetch_pricing.py --dry-run  # 只打印，不写文件
-    python _fetch_pricing.py --embed    # 同时回写 wb_pricing.py 的内嵌副本
-    python _fetch_pricing.py --extra-ids-file ids.txt
+    python tools/fetch_pricing.py            # 抓取并写入 pricing/pricing.json
+    python tools/fetch_pricing.py --dry-run   # 只打印，不写文件
+    python tools/fetch_pricing.py --embed     # 同时回写 wb_pricing.py 的内嵌副本
+    python tools/fetch_pricing.py --extra-ids-file ids.txt
                                         # 额外覆盖文件里的模型（每行一个），
                                         # 网关运行时用 live 目录做同样的事
 
@@ -27,7 +27,7 @@ import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 import wb_pricing

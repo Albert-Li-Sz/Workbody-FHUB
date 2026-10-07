@@ -1,14 +1,21 @@
 """Verify both Docker platforms with synthetic state and no external network."""
+import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE = sys.argv[1] if len(sys.argv) > 1 else "workbody-fhub:1.0.0"
+sys.path.insert(0, str(ROOT))
+from wb_version import VERSION
+IMAGE = "workbody-fhub:" + VERSION
+REVISION = None
 
 
 def run(args, data=None):
@@ -19,11 +26,62 @@ def run(args, data=None):
     return result.stdout
 
 
-def smoke(platform):
+def source_bytes(name):
+    if REVISION:
+        return subprocess.check_output(["git", "show", REVISION + ":" + name], cwd=ROOT)
+    return (ROOT / name).read_bytes()
+
+
+def expected_source():
+    if REVISION:
+        names = run(["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", REVISION]).splitlines()
+    else:
+        names = [item.name for item in ROOT.glob("wb_*.py")]
+    names = [name for name in names if "/" not in name and name.startswith("wb_") and name.endswith(".py")]
+    names += ["dashboard.html", "README.md", "LICENSE", "LICENSE.upstream"]
+    hashes = {name: hashlib.sha256(source_bytes(name)).hexdigest() for name in names}
+    if "wb_version.py" in names:
+        version = re.search(r'^VERSION\s*=\s*"([^"]+)"', source_bytes("wb_version.py").decode(), re.M).group(1)
+    else:
+        version = re.search(r'"version"\s*:\s*"([^"]+)"', source_bytes("wb_proxy.py").decode()).group(1)
+    return hashes, version
+
+
+@contextmanager
+def fixture_tree():
+    """Use the requested release's tests as well as its source hashes."""
+    if not REVISION:
+        yield ROOT
+        return
+    with tempfile.TemporaryDirectory(prefix="workbody-image-fixtures-") as directory:
+        root = Path(directory)
+        archive_path = root / "fixtures.tar"
+        run(["git", "-C", str(ROOT), "archive", "--format=tar", "--output", str(archive_path),
+             REVISION, "tests", "scripts"])
+        with tarfile.open(archive_path) as archive:
+            for member in archive:
+                parts = Path(member.name).parts
+                if not parts or parts[0] not in ("tests", "scripts") or ".." in parts:
+                    raise RuntimeError("invalid fixture archive member")
+                target = root / member.name
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                elif member.isfile():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.extractfile(member) as source:
+                        target.write_bytes(source.read())
+                else:
+                    raise RuntimeError("fixture archive must contain ordinary files")
+        yield root
+
+
+def smoke(platform, non_root=False):
     name = "workbody-fhub-smoke-" + uuid.uuid4().hex[:10]
     try:
+        options = (["--user", "1000:1000", "--tmpfs", "/app/accounts:uid=1000,gid=1000,mode=0700",
+                    "--tmpfs", "/app/usage:uid=1000,gid=1000,mode=0700"] if non_root else [])
         run(["docker", "run", "--rm", "-d", "--platform", platform, "--network", "none",
-             "--name", name, IMAGE])
+             "--name", name] + options + [IMAGE])
         ready = '''import time, urllib.request
 for attempt in range(100):
     try:
@@ -40,14 +98,16 @@ print('ready')
         match = re.search(r"PANEL BOOTSTRAP PASSWORD: ([A-Za-z0-9_-]+)", logs)
         if not match:
             raise RuntimeError("no random bootstrap password was generated")
-        hashes = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-                  for path in [*ROOT.glob("wb_*.py"), ROOT / "dashboard.html", ROOT / "README.md", ROOT / "LICENSE", ROOT / "LICENSE.upstream"]}
+        hashes, expected_version = expected_source()
         verify = '''import hashlib, json, os, pathlib, platform, sys, urllib.request, urllib.error
 password = PASSWORD_PLACEHOLDER
 expected_hashes = HASHES_PLACEHOLDER
 expected_machine = MACHINE_PLACEHOLDER
+expected_version = VERSION_PLACEHOLDER
+expected_uid = UID_PLACEHOLDER
 assert platform.machine() == expected_machine
-assert sys.version_info[:2] == (3, 11)
+assert sys.version_info[:2] >= (3, 9)
+assert os.getuid() == expected_uid
 for name, digest in expected_hashes.items():
     assert hashlib.sha256(pathlib.Path('/app', name).read_bytes()).hexdigest() == digest, name
 base = 'http://127.0.0.1:8788'
@@ -67,7 +127,7 @@ assert status == 200
 status, settings = request('/settings', headers={'X-Panel-Token': login['token']})
 assert status == 200 and settings['auth_required'] is True
 assert settings['panel_password_is_default'] is False
-assert settings['version'] == '1.0.0'
+assert settings['version'] == expected_version
 stored = pathlib.Path('/app/accounts/settings.json')
 assert stored.stat().st_mode & 0o777 == 0o600
 assert not pathlib.Path('/app/wb_opencode.py').exists()
@@ -78,30 +138,52 @@ print(json.dumps({'health': 200, 'anonymous_api': 401, 'admin_login': 401,
                   'bootstrap_login': 200, 'authenticated_settings': 200,
                   'version': settings['version'], 'settings_mode': '0600',
                   'machine': platform.machine(), 'python': platform.python_version(),
-                  'source_files_verified': len(expected_hashes)}))
+                  'uid': os.getuid(), 'source_files_verified': len(expected_hashes)}))
 '''.replace("PASSWORD_PLACEHOLDER", repr(match.group(1))).replace(
             "HASHES_PLACEHOLDER", repr(hashes)).replace(
-            "MACHINE_PLACEHOLDER", repr("x86_64" if platform == "linux/amd64" else "aarch64"))
+            "MACHINE_PLACEHOLDER", repr("x86_64" if platform == "linux/amd64" else "aarch64")).replace(
+            "VERSION_PLACEHOLDER", repr(expected_version)).replace("UID_PLACEHOLDER", repr(1000 if non_root else 0))
         return json.loads(run(["docker", "exec", "-i", name, "python", "-"], verify))
     finally:
         subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
 
 
 def regressions(platform):
-    suites = ["ddg_search", "web_security", "web_tool_flow", "panel_bootstrap", "removed_exit", "health_auth"]
-    command = " && ".join("python tests/_test_%s.py" % suite for suite in suites)
-    run(["docker", "run", "--rm", "--platform", platform, "--network", "none",
-         "--mount", "type=bind,source=%s,target=/app/tests,readonly" % (ROOT / "tests"),
-         "--mount", "type=bind,source=%s,target=/app/scripts,readonly" % (ROOT / "scripts"),
-         "--entrypoint", "sh", IMAGE, "-c", command])
+    suites = ["ddg_search", "web_security", "web_tool_flow", "panel_bootstrap", "removed_exit", "health_auth", "project_repairs"]
+    with fixture_tree() as fixtures:
+        suites = [suite for suite in suites if (fixtures / "tests" / ("_test_%s.py" % suite)).exists()]
+        if not suites:
+            raise RuntimeError("no image regression suites found")
+        command = " && ".join("python tests/_test_%s.py" % suite for suite in suites)
+        run(["docker", "run", "--rm", "--platform", platform, "--network", "none",
+             "--mount", "type=bind,source=%s,target=/app/tests,readonly" % (fixtures / "tests"),
+             "--mount", "type=bind,source=%s,target=/app/scripts,readonly" % (fixtures / "scripts"),
+             "--entrypoint", "sh", IMAGE, "-c", command])
     return suites
 
 
 def main():
-    results = {"image": IMAGE, "network": "none", "accounts": "synthetic anonymous Docker volumes",
+    global IMAGE, REVISION
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("image", nargs="?", default=IMAGE)
+    parser.add_argument("--revision", help="release revision for source hashes; defaults to the working tree")
+    parser.add_argument("--platform", action="append", choices=["linux/amd64", "linux/arm64"])
+    parser.add_argument("--pull", action="store_true", help="pull the requested platform before verification")
+    parser.add_argument("--non-root", action="store_true", help="also verify UID/GID 1000 with private temporary data")
+    args = parser.parse_args()
+    IMAGE = args.image
+    if args.revision:
+        if args.revision.startswith("-"):
+            parser.error("invalid revision")
+        REVISION = run(["git", "-C", str(ROOT), "rev-parse", "--verify", args.revision + "^{commit}"]).strip()
+    results = {"image": IMAGE, "source": REVISION or "working tree", "network": "none", "accounts": "synthetic temporary Docker data",
                "platforms": {}}
-    for platform in ("linux/amd64", "linux/arm64"):
+    for platform in args.platform or ("linux/amd64", "linux/arm64"):
+        if args.pull:
+            run(["docker", "pull", "--platform", platform, IMAGE])
         results["platforms"][platform] = {"smoke": smoke(platform), "regression_suites": regressions(platform)}
+        if args.non_root:
+            results["platforms"][platform]["non_root"] = smoke(platform, non_root=True)
     print(json.dumps(results, indent=2))
 
 

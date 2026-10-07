@@ -21,6 +21,9 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 TAIL_LINES = 25
+SUITE_TIMEOUT_SECONDS = float(os.environ.get("WB_TEST_TIMEOUT_SECONDS", "180"))
+if not 0 < SUITE_TIMEOUT_SECONDS < float("inf"):
+    raise ValueError("WB_TEST_TIMEOUT_SECONDS must be a positive finite number")
 
 
 def suites(pattern):
@@ -78,10 +81,16 @@ def main(argv):
             log_path = log.name
         try:
             with open(log_path, "w", encoding="utf-8") as sink:
-                result = subprocess.run(command(name), cwd=ROOT, env=env,
-                                        stdout=sink, stderr=subprocess.STDOUT)
+                try:
+                    result = subprocess.run(command(name), cwd=ROOT, env=env,
+                                            stdout=sink, stderr=subprocess.STDOUT,
+                                            timeout=SUITE_TIMEOUT_SECONDS)
+                    returncode = result.returncode
+                except subprocess.TimeoutExpired:
+                    returncode = 1
+                    print("suite timed out after %ss" % SUITE_TIMEOUT_SECONDS, file=sink)
             lines = tail(log_path)
-            ok = result.returncode == 0
+            ok = returncode == 0
             print("  [%s] %-38s %s"
                   % ("PASS" if ok else "FAIL", name, (lines[-1] if lines else "")[:80]))
             if ok:

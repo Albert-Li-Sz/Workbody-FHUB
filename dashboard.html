@@ -1177,6 +1177,8 @@ a:hover{text-decoration:underline}
         </div>
         <button  data-action="savePanelPassword" data-on="click">修改密码</button>
       </div>
+      <div id="panelPasswordOverrideHint" style="display:none;margin-top:10px;color:var(--warn);font-size:12px">部署配置指定了启动密码；网页修改会在下次重启时被覆盖。请同时更新部署配置。</div>
+      <div id="settingsSnapshotHint" style="display:none;margin-top:10px;color:var(--warn);font-size:12px">设置文件无法读取，当前使用最后一次有效配置。请修复设置文件后再修改配置。</div>
     </section>
 
     <section id="settings-keys">
@@ -2874,7 +2876,8 @@ async function postJSON(url, body){
   const t = await r.text();
   let parsed = {};
   try { parsed = t ? JSON.parse(t) : {}; } catch(e) { parsed = {raw: t}; }
-  if(r.status === 401 || r.status === 403){ panelSessionLost(); throw new Error('unauthorized'); }
+  const passwordValidation = parsed.error && parsed.error.code === 'current_password_invalid';
+  if((r.status === 401 || r.status === 403) && !passwordValidation){ panelSessionLost(); throw new Error('unauthorized'); }
   if(!r.ok) throw new Error((parsed.error && parsed.error.message) || r.status);
   return parsed;
 }
@@ -4376,6 +4379,13 @@ async function panelLogout(){
 }
 
 async function bootPanel(){
+  // Passwords are never accepted from URLs. Clear legacy links before login.
+  const params = new URLSearchParams(window.location.search);
+  if(params.has('pwd') || params.has('password')){
+    params.delete('pwd'); params.delete('password');
+    const query = params.toString();
+    history.replaceState(null, '', window.location.pathname + (query ? '?' + query : '') + (window.location.hash || ''));
+  }
   try {
     const r = await fetch('/panel/status', {cache: 'no-store', headers: authHeaders()});
     PANEL_STATUS = await r.json().catch(() => ({}));
@@ -4386,14 +4396,7 @@ async function bootPanel(){
     panelHideGate();
     await startDashboard();
   } else {
-    const pwdFromUrl = new URLSearchParams(window.location.search).get('pwd');
-    if(pwdFromUrl){
-      const input = document.getElementById('panelPwdInput');
-      if(input) input.value = pwdFromUrl;
-      await submitPanelLogin();
-    } else {
-      panelNeedsLogin();
-    }
+    panelNeedsLogin();
   }
 }
 
@@ -4621,6 +4624,10 @@ async function saveAdvancedSettings(btn, ev, groupId){
 async function loadSettings(showToast){
   try {
     const data = await getJSON('/settings');
+    const passwordHint = document.getElementById('panelPasswordOverrideHint');
+    if(passwordHint) passwordHint.style.display = data.panel_password_startup_override ? 'block' : 'none';
+    const snapshotHint = document.getElementById('settingsSnapshotHint');
+    if(snapshotHint) snapshotHint.style.display = data.settings_using_snapshot ? 'block' : 'none';
     const pwdState = document.getElementById('setPwdState');
     if(pwdState){
       pwdState.textContent = data.panel_password_is_default ? '(当前为默认密码)' : '(已自定义)';

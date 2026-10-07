@@ -33,6 +33,7 @@ wb_settings.save(P.ACCOUNTS_DIR, {"api_keys": [
     {"id": "k1", "name": "synthetic", "key": "GOODKEY", "enabled": True}
 ]})
 UPLOAD_STARTED = threading.Event()
+VALID_BODY = b'{"messages":[{"role":"user","content":"hi"}]}'
 
 
 class TestHandler(P.Handler):
@@ -82,7 +83,7 @@ class ConnectionTests(unittest.TestCase):
         self.addCleanup(sock.close)
         return sock
 
-    def headers(self, key="GOODKEY", length=2, extra=b"", path="/v1/chat/completions",
+    def headers(self, key="GOODKEY", length=len(VALID_BODY), extra=b"", path="/v1/chat/completions",
                 auth_header="Authorization"):
         body_header = (b"Transfer-Encoding: chunked\r\n" if length is None
                        else b"Content-Length: %d\r\n" % length)
@@ -134,7 +135,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(response.status, 401)
         self.assertEqual(response.getheader("Connection"), "close")
         self.assertIn("error", json.loads(response.read()))
-        conn.request("POST", "/v1/chat/completions", "{}",
+        conn.request("POST", "/v1/chat/completions", VALID_BODY,
                      {"Authorization": "Bearer GOODKEY"})
         self.assertEqual(conn.getresponse().status, 200)
 
@@ -148,7 +149,7 @@ class ConnectionTests(unittest.TestCase):
         response.read()
         original = conn.sock
         self.assertIsNotNone(original)
-        conn.request("POST", "/v1/chat/completions", "{}",
+        conn.request("POST", "/v1/chat/completions", VALID_BODY,
                      {"Authorization": "Bearer GOODKEY"})
         response = conn.getresponse()
         self.assertEqual(response.status, 200)
@@ -163,7 +164,7 @@ class ConnectionTests(unittest.TestCase):
 
     def test_complete_chunked_body_still_works(self):
         sock = self.connect()
-        sock.sendall(self.headers(length=None) + b"2\r\n{}\r\n0\r\n\r\n")
+        sock.sendall(self.headers(length=None) + b"%x\r\n" % len(VALID_BODY) + VALID_BODY + b"\r\n0\r\n\r\n")
         response, _ = self.response(sock)
         self.assertEqual(response.status, 200)
 
@@ -176,7 +177,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(response.getheader("Connection"), "close")
         self.assertLess(time.monotonic() - started, 2)
         next_sock = self.connect()
-        next_sock.sendall(self.headers() + b"{}")
+        next_sock.sendall(self.headers() + VALID_BODY)
         self.assertEqual(self.response(next_sock)[0].status, 200)
 
     def drip(self, sock, initial):
@@ -224,15 +225,15 @@ class ConnectionTests(unittest.TestCase):
         first.sendall(self.headers())
         self.assertTrue(UPLOAD_STARTED.wait(1))
         self.assert_immediate_rejection(self.headers(), 503)
-        first.sendall(b"{}")
+        first.sendall(VALID_BODY)
         self.assertEqual(self.response(first)[0].status, 200)
         third = self.connect()
-        third.sendall(self.headers() + b"{}")
+        third.sendall(self.headers() + VALID_BODY)
         self.assertEqual(self.response(third)[0].status, 200)
 
     def test_receive_deadline_does_not_cut_off_upstream_wait(self):
         sock = self.connect()
-        body = b'{"wait":true}'
+        body = VALID_BODY[:-1] + b',"wait":true}'
         sock.sendall(self.headers(length=len(body)) + body)
         self.assertEqual(self.response(sock)[0].status, 200)
 
@@ -270,7 +271,7 @@ class ConnectionTests(unittest.TestCase):
                 self.assertEqual(payload["error"]["type"], "invalid_request_error")
                 self.assertLess(time.monotonic() - started, 2)
                 next_sock = self.connect()
-                next_sock.sendall(self.headers() + b"{}")
+                next_sock.sendall(self.headers() + VALID_BODY)
                 self.assertEqual(self.response(next_sock)[0].status, 200)
 
     def test_anthropic_upload_shares_chat_capacity_before_body(self):
@@ -282,10 +283,10 @@ class ConnectionTests(unittest.TestCase):
         self.assert_immediate_rejection(
             self.headers(path="/v1/messages", auth_header="x-api-key"),
             503, anthropic=True)
-        first.sendall(b"{}")
+        first.sendall(VALID_BODY)
         self.assertEqual(self.response(first)[0].status, 200)
         third = self.connect()
-        third.sendall(self.headers(path="/v1/messages", auth_header="x-api-key") + b"{}")
+        third.sendall(self.headers(path="/v1/messages", auth_header="x-api-key") + VALID_BODY)
         self.assertEqual(self.response(third)[0].status, 200)
 
     def test_overlong_request_line_returns_json_414(self):

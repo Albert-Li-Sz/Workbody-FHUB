@@ -49,6 +49,7 @@ class Scheduler:
         self.enabled = True
         self._stop_event = threading.Event()
         self._thread = None
+        self._lifecycle_lock = threading.RLock()
         self.last_run_time = None
         self.next_run_time = None
         self.logs = []
@@ -74,24 +75,38 @@ class Scheduler:
             pass
 
     def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread and self._thread.is_alive():
+                if not self._stop_event.is_set():
+                    return False
+                self._thread.join(timeout=5)
+                if self._thread.is_alive():
+                    raise RuntimeError("scheduler is still stopping; try again after the active task finishes")
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
         self.log("后台定时调度器已启动")
+        return True
 
     def stop(self):
-        self._stop_event.set()
-        self.log("后台定时调度器已暂停")
+        with self._lifecycle_lock:
+            self._stop_event.set()
+            worker = self._thread
+            if worker and worker is not threading.current_thread():
+                worker.join(timeout=5)
+            stopped = not worker or not worker.is_alive()
+        self.log("后台定时调度器已停止" if stopped else "调度器正在等待当前任务结束")
+        return stopped
 
     def _run_loop(self):
         # 启动后先休眠 10 秒等待主服务就绪，然后执行初次检查
-        time.sleep(10)
-        try:
-            self._execute_cycle("启动初次初始化巡检")
-        except Exception as exc:
-            self.log(f"初次巡检异常: {exc}")
+        if self._stop_event.wait(10):
+            return
+        if self.enabled and not self._stop_event.is_set():
+            try:
+                self._execute_cycle("启动初次初始化巡检")
+            except Exception as exc:
+                self.log(f"初次巡检异常: {exc}")
 
         while not self._stop_event.is_set():
             self._calc_next_fire()
@@ -107,7 +122,7 @@ class Scheduler:
                         self._execute_cycle(reason)
                     except Exception as exc:
                         self.log(f"排程执行异常: {exc}")
-                    time.sleep(65) # 避开当前这一分钟重复触发
+                    self._stop_event.wait(65) # 避开当前这一分钟重复触发，可立即停止
             if self.enabled and self.balance_refresh_enabled:
                 try:
                     self._maybe_refresh_balances()

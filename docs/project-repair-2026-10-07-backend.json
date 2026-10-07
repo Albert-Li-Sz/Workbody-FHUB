@@ -1,0 +1,188 @@
+{
+  "scope": "synthetic temporary state, loopback HTTP, mocked upstream only",
+  "observations": {
+    "corrupt_settings": {
+      "before": {
+        "retired_key_accepted": false,
+        "current_key_accepted": true
+      },
+      "after": {
+        "retired_key_accepted": false,
+        "current_key_accepted": true
+      }
+    },
+    "retired_password_change": {
+      "status": 400,
+      "elapsed_ms": 11,
+      "body": {
+        "error": {
+          "message": "set a non-empty panel password other than the retired default admin",
+          "type": "invalid_request_error",
+          "code": 400
+        }
+      }
+    },
+    "wrong_current_password": {
+      "status": 400,
+      "panel_session_still_valid": true
+    },
+    "url_password_logged": {
+      "http_status": 200,
+      "password_in_access_log": false
+    },
+    "api_key_realm_write": {
+      "status": 403,
+      "elapsed_ms": 0,
+      "body": {
+        "error": {
+          "message": "changing the upstream exit requires the panel session, not an API key",
+          "type": "invalid_request_error",
+          "code": 403
+        }
+      }
+    },
+    "invalid_requests": {
+      "chat_message_null": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "messages[0] must be an object",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      },
+      "chat_model_list": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "model must be a non-empty string",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      },
+      "responses_tools_integer": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "tools must be an array",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      },
+      "responses_model_integer": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "model must be a non-empty string",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      },
+      "responses_input_empty": {
+        "status": 502,
+        "elapsed_ms": 1,
+        "body": {
+          "error": {
+            "message": "upstream unreachable: offline audit: no upstream",
+            "type": "server_error",
+            "code": 502
+          }
+        }
+      },
+      "messages_messages_null": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "type": "error",
+          "error": {
+            "type": "invalid_request_error",
+            "message": "messages[0] must be an object"
+          }
+        }
+      },
+      "chat_function_name_list": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "tools[0].name must be a string",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      },
+      "chat_tool_calls_integer": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "messages[0].tool_calls must be an array",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      },
+      "responses_input_type_list": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "input type must be a string",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      },
+      "chat_temperature_overflow": {
+        "status": 400,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "temperature must be a finite number",
+            "type": "invalid_request_error",
+            "code": 400
+          }
+        }
+      }
+    },
+    "anonymous_health_refresh": {
+      "status": 200,
+      "elapsed_ms": 0,
+      "refresh_calls": 0
+    },
+    "disabled_scheduler_startup": {
+      "enabled": false,
+      "stop_requested": true,
+      "checkin_calls": 0
+    },
+    "scheduler_restart": {
+      "new_thread_created": true,
+      "worker_alive_after_restart": true,
+      "stop_event_set": false
+    },
+    "daily_usage_after_rotation": {
+      "before": 1200,
+      "after": 1200,
+      "archived_files": 1,
+      "all_counters_preserved": true,
+      "restart_counters_preserved": true,
+      "incremental_append_preserved": true
+    },
+    "archive_reader_truncation": {
+      "actual_rows": 2200,
+      "returned_rows": 2200,
+      "main_file_bytes": 9071690,
+      "first_returned_index": 0
+    },
+    "handler_exceptions": []
+  },
+  "findings": []
+}

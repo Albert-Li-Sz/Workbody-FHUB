@@ -1,0 +1,134 @@
+{
+  "scope": "synthetic temporary state, loopback HTTP, mocked upstream only",
+  "observations": {
+    "corrupt_settings": {
+      "before": {
+        "retired_key_accepted": false,
+        "current_key_accepted": true
+      },
+      "after": {
+        "retired_key_accepted": true,
+        "current_key_accepted": false
+      }
+    },
+    "retired_password_change": {
+      "status": null,
+      "exception": "RemoteDisconnected"
+    },
+    "wrong_current_password": {
+      "status": 401,
+      "panel_session_still_valid": true
+    },
+    "url_password_logged": {
+      "http_status": 200,
+      "password_in_access_log": true
+    },
+    "api_key_realm_write": {
+      "status": 403,
+      "elapsed_ms": 0,
+      "body": {
+        "error": {
+          "message": "changing the upstream exit requires the panel session, not an API key",
+          "type": "invalid_request_error",
+          "code": 403
+        }
+      }
+    },
+    "invalid_requests": {
+      "chat_message_null": {
+        "status": null,
+        "exception": "RemoteDisconnected"
+      },
+      "chat_model_list": {
+        "status": 502,
+        "elapsed_ms": 1,
+        "body": {
+          "error": {
+            "message": "upstream unreachable: offline audit: no upstream",
+            "type": "server_error",
+            "code": 502
+          }
+        }
+      },
+      "responses_tools_integer": {
+        "status": null,
+        "exception": "RemoteDisconnected"
+      },
+      "responses_model_integer": {
+        "status": 502,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "upstream unreachable: offline audit: no upstream",
+            "type": "server_error",
+            "code": 502
+          }
+        }
+      },
+      "responses_input_empty": {
+        "status": 502,
+        "elapsed_ms": 0,
+        "body": {
+          "error": {
+            "message": "upstream unreachable: offline audit: no upstream",
+            "type": "server_error",
+            "code": 502
+          }
+        }
+      },
+      "messages_messages_null": {
+        "status": 502,
+        "elapsed_ms": 0,
+        "body": {
+          "type": "error",
+          "error": {
+            "type": "api_error",
+            "message": "offline audit: no upstream"
+          }
+        }
+      }
+    },
+    "anonymous_health_refresh": {
+      "status": 200,
+      "elapsed_ms": 162,
+      "refresh_calls": 1
+    },
+    "disabled_scheduler_startup": {
+      "enabled": false,
+      "stop_requested": true,
+      "checkin_calls": 1
+    },
+    "scheduler_restart": {
+      "new_thread_created": false,
+      "worker_alive_after_restart": false,
+      "stop_event_set": true
+    },
+    "daily_usage_after_rotation": {
+      "before": 1200,
+      "after": 484,
+      "archived_files": 1
+    },
+    "archive_reader_truncation": {
+      "actual_rows": 2200,
+      "returned_rows": 2034,
+      "main_file_bytes": 9071690,
+      "first_returned_index": 166
+    },
+    "handler_exceptions": [
+      "ValueError",
+      "AttributeError",
+      "TypeError"
+    ]
+  },
+  "findings": [
+    "A01",
+    "A02",
+    "A03",
+    "A04",
+    "A05",
+    "A06",
+    "A07",
+    "A08",
+    "A09"
+  ]
+}

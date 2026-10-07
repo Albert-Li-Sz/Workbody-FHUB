@@ -1,0 +1,82 @@
+{
+  "image": "workbody-fhub:1.0.1",
+  "source": "working tree",
+  "network": "none",
+  "accounts": "synthetic temporary Docker data",
+  "platforms": {
+    "linux/amd64": {
+      "smoke": {
+        "health": 200,
+        "anonymous_api": 401,
+        "admin_login": 401,
+        "bootstrap_login": 200,
+        "authenticated_settings": 200,
+        "version": "1.0.1",
+        "settings_mode": "0600",
+        "machine": "x86_64",
+        "python": "3.11.17",
+        "uid": 0,
+        "source_files_verified": 31
+      },
+      "regression_suites": [
+        "ddg_search",
+        "web_security",
+        "web_tool_flow",
+        "panel_bootstrap",
+        "removed_exit",
+        "health_auth",
+        "project_repairs"
+      ],
+      "non_root": {
+        "health": 200,
+        "anonymous_api": 401,
+        "admin_login": 401,
+        "bootstrap_login": 200,
+        "authenticated_settings": 200,
+        "version": "1.0.1",
+        "settings_mode": "0600",
+        "machine": "x86_64",
+        "python": "3.11.17",
+        "uid": 1000,
+        "source_files_verified": 31
+      }
+    },
+    "linux/arm64": {
+      "smoke": {
+        "health": 200,
+        "anonymous_api": 401,
+        "admin_login": 401,
+        "bootstrap_login": 200,
+        "authenticated_settings": 200,
+        "version": "1.0.1",
+        "settings_mode": "0600",
+        "machine": "aarch64",
+        "python": "3.11.17",
+        "uid": 0,
+        "source_files_verified": 31
+      },
+      "regression_suites": [
+        "ddg_search",
+        "web_security",
+        "web_tool_flow",
+        "panel_bootstrap",
+        "removed_exit",
+        "health_auth",
+        "project_repairs"
+      ],
+      "non_root": {
+        "health": 200,
+        "anonymous_api": 401,
+        "admin_login": 401,
+        "bootstrap_login": 200,
+        "authenticated_settings": 200,
+        "version": "1.0.1",
+        "settings_mode": "0600",
+        "machine": "aarch64",
+        "python": "3.11.17",
+        "uid": 1000,
+        "source_files_verified": 31
+      }
+    }
+  }
+}

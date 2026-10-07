@@ -55,6 +55,8 @@ import wb_prompt
 import wb_global
 import wb_taskqueue
 import wb_reqlog
+import wb_validation
+from wb_version import VERSION
 import wb_modelsdev
 import wb_probes
 IS_WINDOWS = os.name == "nt"
@@ -216,20 +218,20 @@ USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "reasoning_tokens",
 # "admin"), independent of the /v1 API key. Sessions live in memory only, so a
 # restart forces browsers to log in again.
 PANEL = wb_settings.PanelSessions()
+PANEL_PASSWORD_STARTUP_OVERRIDE = False
 API_KEY_FILE_SET = False
 def configured_keys():
     """Panel-managed API keys, always read fresh so panel edits apply at once."""
-    try:
-        return wb_settings.api_keys(ACCOUNTS_DIR)
-    except Exception as exc:
-        log("could not read api keys: %s" % exc)
-        return []
+    return wb_settings.api_keys(ACCOUNTS_DIR)
+def panel_keys_managed():
+    """An empty/deleted panel key list must not revive launcher credentials."""
+    return "api_keys" in wb_settings.load(ACCOUNTS_DIR)
 def auth_required():
     """Whether /v1 calls must present a key at all."""
     if wb_settings.auth_disabled(ACCOUNTS_DIR):
         return False
     # Disabling the final key must not disable authentication.
-    if configured_keys():
+    if panel_keys_managed() or configured_keys():
         return True
     return bool(API_KEY)
 def identify_key(supplied):
@@ -238,7 +240,7 @@ def identify_key(supplied):
     credentials - otherwise a launcher key left in a .bat file would silently
     keep working after the panel was locked down.
     """
-    extra = () if configured_keys() else (API_KEY,)
+    extra = () if panel_keys_managed() or configured_keys() else (API_KEY,)
     return wb_settings.match_api_key(ACCOUNTS_DIR, supplied, extra_keys=extra)
 def _empty_stats():
     return {"requests": 0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
@@ -947,7 +949,7 @@ _STATS_TTL = float(os.environ.get("WB_STATS_TTL", 15))
 # reads rows that arrived since the last scan.
 # ---------------------------------------------------------------------------
 _daily_usage = {"day": "", "totals": None, "credits": None, "models": None,
-                "offset": 0, "at": 0.0}
+                "offset": 0, "at": 0.0, "main_id": None, "archives_stamp": None}
 _daily_usage_lock = threading.Lock()
 
 
@@ -965,7 +967,7 @@ def _daily_state_copy(source):
     }
 
 
-def _scan_daily_usage(offset, state):
+def _scan_daily_usage(offset, state, path=None):
     """Fold rows at/after today's local midnight into `state`.
 
     Returns (state, new_offset). A line without its trailing newline is left
@@ -973,7 +975,7 @@ def _scan_daily_usage(offset, state):
     this read raced the writer.
     """
     midnight = _local_midnight()
-    with open(USAGE_LOG, encoding="utf-8") as fh:
+    with open(path or USAGE_LOG, encoding="utf-8") as fh:
         fh.seek(offset)
         while True:
             pos = fh.tell()
@@ -989,6 +991,8 @@ def _scan_daily_usage(offset, state):
             try:
                 row = json.loads(line)
             except Exception:
+                continue
+            if not isinstance(row, dict):
                 continue
             if (row.get("at") or 0) < midnight:
                 continue
@@ -1022,26 +1026,31 @@ def daily_usage_stats(ttl=None):
     ttl = _STATS_TTL if ttl is None else ttl
     day = time.strftime("%Y-%m-%d")
     now = time.time()
-    with _daily_usage_lock:
+    with _daily_usage_lock, wb_reqlog.LOCK:
         c = _daily_usage
         if c["day"] == day and c["totals"] is not None and (now - c["at"]) < ttl:
             return _daily_state_copy(c)
-        # A new day keeps the byte offset: everything past it is today's, and
-        # the midnight filter drops whatever old rows are still unread.
-        if c["day"] == day and c["totals"] is not None:
-            state = _daily_state_copy(c)
-        else:
-            state = {"tokens": {}, "credits": {}, "models": {}}
-        offset = int(c["offset"] or 0)
         try:
-            size = os.path.getsize(USAGE_LOG)
-        except OSError:
-            size = 0
-        if offset > size:
-            state = {"tokens": {}, "credits": {}, "models": {}}
-            offset = 0
-        try:
-            state, offset = _scan_daily_usage(offset, state)
+            archives = wb_reqlog.archive_files(os.path.dirname(USAGE_LOG))
+            archives_stamp = tuple((path, wb_reqlog._file_stamp(path)) for path in archives)
+            main_stat = os.stat(USAGE_LOG) if os.path.exists(USAGE_LOG) else None
+            main_id = (main_stat.st_dev, main_stat.st_ino) if main_stat else None
+            offset = int(c["offset"] or 0)
+            rebuild = (c["day"] != day or c["totals"] is None
+                       or c.get("main_id") != main_id
+                       or c.get("archives_stamp") != archives_stamp
+                       or offset > (main_stat.st_size if main_stat else 0))
+            if rebuild:
+                state = {"tokens": {}, "credits": {}, "models": {}}
+                for path in archives:
+                    state, _ = _scan_daily_usage(0, state, path=path)
+                offset = 0
+            else:
+                state = _daily_state_copy(c)
+            if main_stat:
+                state, offset = _scan_daily_usage(offset, state)
+            elif not archives:
+                raise FileNotFoundError(USAGE_LOG)
         except Exception as exc:
             log("daily token scan failed: %s" % exc)
             _daily_usage.update({"day": day, "totals": None, "offset": 0,
@@ -1050,7 +1059,8 @@ def daily_usage_stats(ttl=None):
         _daily_usage.update({"day": day, "totals": state["tokens"],
                              "credits": state["credits"],
                              "models": state["models"], "offset": offset,
-                             "at": time.time()})
+                             "at": time.time(), "main_id": main_id,
+                             "archives_stamp": archives_stamp})
         return _daily_state_copy(_daily_usage)
 
 
@@ -2297,7 +2307,9 @@ def runtime_settings_view():
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
         "max_concurrent_chat": MAX_CONCURRENT_CHAT,
         "chat_slot_wait_seconds": CHAT_SLOT_WAIT_SECONDS,
-        "version": "1.0.0",
+        "panel_password_startup_override": PANEL_PASSWORD_STARTUP_OVERRIDE,
+        "settings_using_snapshot": wb_settings.using_settings_snapshot(ACCOUNTS_DIR),
+        "version": VERSION,
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -7185,7 +7197,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.command != "POST":
             self._request_reader.stop()
-        getattr(self, mname)()
+        try:
+            getattr(self, mname)()
+        except wb_settings.SettingsError as exc:
+            self._error(503, str(exc))
+        except PermissionError:
+            self._error(503, "private storage is unavailable; check data directory permissions")
         self.wfile.flush()
         self._request_reader.stop()
     def handle(self):
@@ -7200,7 +7217,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (socket.timeout, ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "Workbody-FHUB/1.0.0"
+    server_version = "Workbody-FHUB/" + VERSION
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -7216,7 +7233,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
         except Exception:
             pass
-        log(fmt % args)
+        message = fmt % args
+        def redact_query(match):
+            from urllib.parse import unquote_plus
+            sensitive = {"pwd", "password", "key", "api_key", "token"}
+            if unquote_plus(match.group(2)).lower() in sensitive:
+                return match.group(1) + match.group(2) + "=<REDACTED>"
+            return match.group(0)
+        message = re.sub(r"([?&])([^=&\s\"]+)=([^&\s]*)", redact_query, message)
+        log(message)
     def _json(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -7280,9 +7305,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    def _error(self, code, message, err_type="server_error"):
+    def _error(self, code, message, err_type="server_error", error_code=None):
         self._close_unread_body()
-        error = {"message": message, "type": err_type, "code": code}
+        error = {"message": message, "type": err_type,
+                 "code": code if error_code is None else error_code}
         hint = gateway_hint(code, message)
         if hint:
             error["gateway_hint"] = hint
@@ -7624,7 +7650,7 @@ class Handler(BaseHTTPRequestHandler):
             # literal "intl" and drifted from the panel switch.
             "realm": CURRENT_REALM,
             "accounts": len(POOL.accounts) if POOL else 0,
-            "accounts_ready": POOL.count_ready() if POOL else 0,
+            "accounts_ready": POOL.count_ready(allow_refresh=False) if POOL else 0,
             "api_key_required": auth_required(),
         }
         if self._key_ok():
@@ -8423,9 +8449,8 @@ class Handler(BaseHTTPRequestHandler):
             reply["api_key_set"] = bool(new_key)
         if plan.get("restart_scheduler"):
             if SCHEDULER:
-                SCHEDULER.stop()
-                SCHEDULER.start()
-            reply["scheduler"] = "restarted"
+                SCHEDULER.apply_settings()
+            reply["scheduler"] = "updated"
         reply.update(runtime_settings_view())
         return self._json(200, reply)
     def _handle_proxy_slots(self, path, payload):
@@ -8545,10 +8570,12 @@ class Handler(BaseHTTPRequestHandler):
             current = str(payload.get("current") or "")
             new = str(payload.get("new") or "")
             if not wb_settings.verify_panel_password(ACCOUNTS_DIR, current):
-                return self._error(401, "current password is wrong", "invalid_request_error")
-            if len(new) < 4:
-                return self._error(400, "new password must be at least 4 characters", "invalid_request_error")
-            wb_settings.set_panel_password(ACCOUNTS_DIR, new)
+                return self._error(400, "current password is wrong", "invalid_request_error",
+                                   error_code="current_password_invalid")
+            try:
+                wb_settings.set_panel_password(ACCOUNTS_DIR, new)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
             if new != wb_settings.DEFAULT_PANEL_PASSWORD:
                 # Rotating the password invalidates every other browser session.
                 PANEL.revoke_all()
@@ -9793,6 +9820,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._payload_or_error()
             if payload is None:
                 return
+            try:
+                wb_validation.validate_request(payload, "messages")
+            except wb_validation.RequestValidationError as exc:
+                return self._anthropic_error(400, str(exc), "invalid_request_error")
             return self._handle_messages_count_tokens(payload)
         # Include uploads in the slot budget for both conversation protocols.
         if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
@@ -9818,6 +9849,14 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._payload_or_error()
             if payload is None:
                 return
+            protocol = ("messages" if is_messages_route else
+                        "responses" if path in ("/v1/responses", "/responses") else "chat")
+            try:
+                wb_validation.validate_request(payload, protocol)
+            except wb_validation.RequestValidationError as exc:
+                if is_messages_route:
+                    return self._anthropic_error(400, str(exc), "invalid_request_error")
+                return self._error(400, str(exc), "invalid_request_error")
             if is_messages_route:
                 return self._handle_messages(payload)
             return self._dispatch_chat_post(path, payload)
@@ -10141,6 +10180,8 @@ def _bootstrap_runtime(args):
         API_KEY_FILE_SET = True
     panel_password = args.panel_password
     password_file = getattr(args, "panel_password_file", None)
+    global PANEL_PASSWORD_STARTUP_OVERRIDE
+    PANEL_PASSWORD_STARTUP_OVERRIDE = bool(panel_password or password_file)
     if password_file:
         with open(password_file, encoding="utf-8") as password_source:
             panel_password = password_source.read(4097).strip()

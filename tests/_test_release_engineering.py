@@ -7,10 +7,12 @@ disappearing (checksums asset, tag == source version, healthcheck, PUID/PGID).
 Run with: python _test_release_engineering.py
 """
 import os
-import re
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from wb_version import VERSION, verify_artifacts
 
 
 def read(*parts):
@@ -21,11 +23,9 @@ def read(*parts):
 class VersionStringTests(unittest.TestCase):
     def test_source_version_strings_agree(self):
         src = read("wb_proxy.py")
-        overview = re.search(r'"version"\s*:\s*"([^"]+)"', src)
-        server = re.search(r'server_version\s*=\s*"Workbody-FHUB/([^"]+)"', src)
-        self.assertIsNotNone(overview, "overview version string not found")
-        self.assertIsNotNone(server, "server header version string not found")
-        self.assertEqual(overview.group(1), server.group(1))
+        self.assertIn('"version": VERSION', src)
+        self.assertIn('server_version = "Workbody-FHUB/" + VERSION', src)
+        self.assertEqual(verify_artifacts(), VERSION)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -35,10 +35,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("version-assert", text)
         self.assertIn("refs/tags/v", text)
         self.assertIn("GITHUB_REF_NAME", text)
-        self.assertIn("server_version", text)
-        # The workflow's extraction must see the same two strings the source
-        # test pins, otherwise a passing CI would mean nothing.
-        self.assertIn('"version"', text)
+        self.assertIn("verify_artifacts", text)
 
     def test_release_checksums_workflow_hashes_every_asset(self):
         text = read(".github", "workflows", "release-checksums.yml")
@@ -62,7 +59,7 @@ class DockerTests(unittest.TestCase):
 
     def test_fork_deploys_its_published_image(self):
         text = read("docker-compose.yml")
-        self.assertIn("ghcr.io/albert-li-sz/workbody-fhub:1.0.0", text)
+        self.assertIn("ghcr.io/albert-li-sz/workbody-fhub:" + VERSION, text)
         self.assertNotIn("build:", text)
         self.assertIn('"0.0.0.0:8788:8788"', text)
         self.assertNotIn("ghcr.io/ardeyouxipianyi", text)

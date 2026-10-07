@@ -83,8 +83,8 @@ class UpstreamSettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
                 fh.write("{not json")
-            self.assertEqual(wb_settings.upstream_config(directory)["header_timeout_seconds"],
-                             120)
+            with self.assertRaises(wb_settings.SettingsError):
+                wb_settings.upstream_config(directory)
 
 
 class DeviceTokenTests(unittest.TestCase):

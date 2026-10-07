@@ -11,6 +11,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
     - uses: actions/checkout@v4
       with:
@@ -26,13 +27,9 @@ jobs:
         RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: |
         python - <<'PY'
-        import os, re
-        from pathlib import Path
-        source = Path('wb_proxy.py').read_text()
-        version = re.search(r'"version"\s*:\s*"([^"]+)"', source).group(1)
-        server = re.search(r'server_version\s*=\s*"Workbody-FHUB/([^"]+)"', source).group(1)
-        assert version == server, 'source version strings disagree'
-        assert os.environ['RELEASE_TAG'] in (version, 'v' + version), 'release tag differs from source version'
+        import os
+        from wb_version import verify_artifacts
+        print('release version:', verify_artifacts(tag=os.environ['RELEASE_TAG']))
         PY
     - name: Verify this release before publishing
       run: python tests/run_all.py
@@ -68,17 +65,18 @@ jobs:
         echo "list<<EOF" >> $GITHUB_OUTPUT
         echo "$TARGETS" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
+        echo "primary=ghcr.io/${OWNER,,}/workbody-fhub" >> $GITHUB_OUTPUT
     - name: Extract Docker metadata
       uses: docker/metadata-action@v5
       id: meta
       with:
         images: ${{ steps.images.outputs.list }}
+        flavor: latest=false
         labels: |
           org.opencontainers.image.licenses=Apache-2.0 AND MIT
         tags: |
           type=raw,value=${{ github.event.release.tag_name }}
           type=semver,pattern={{version}}
-          type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
     - name: Build and push Docker image
       uses: docker/build-push-action@v6
       with:
@@ -87,3 +85,17 @@ jobs:
         platforms: linux/amd64,linux/arm64
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+    - name: Verify the published image on both architectures
+      env:
+        IMAGE: ${{ steps.images.outputs.primary }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: python scripts/verify_image.py "$IMAGE:$RELEASE_TAG" --revision HEAD --pull --non-root
+    - name: Promote verified stable images to latest
+      if: ${{ !github.event.release.prerelease }}
+      env:
+        IMAGE_TARGETS: ${{ steps.images.outputs.list }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        while IFS= read -r target; do
+          docker buildx imagetools create --tag "$target:latest" "$target:$RELEASE_TAG"
+        done <<< "$IMAGE_TARGETS"

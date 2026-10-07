@@ -1,0 +1,13 @@
+{
+  "scope": "actual dashboard functions in Node VM with mocked HTTP/DOM",
+  "observations": {
+    "client_error": "unauthorized",
+    "valid_session_cleared_on_wrong_current_password": true,
+    "url_password_login_triggered": true,
+    "url_password_removed": false
+  },
+  "findings": [
+    "A10",
+    "A04"
+  ]
+}
