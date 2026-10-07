@@ -15,6 +15,7 @@ start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
 import hashlib
+import http.client
 from collections import deque
 import re
 import json
@@ -41,6 +42,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wb_accounts
+import wb_opencode
 import wb_opencode_catalog
 import wb_pool
 import wb_atrest
@@ -458,7 +460,7 @@ def row_outcome(row):
         return o
     return "failed" if row.get("error") else "completed"
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_ms=None, fp=None,
-                account=None, outcome="completed", key=None, effort=None):
+                account=None, outcome="completed", key=None, effort=None, realm=None):
     """Record one finished request as exactly one JSONL row.
 
     A request without a usage block still gets a row (flagged usage_missing):
@@ -500,7 +502,7 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     if account:
         row["account"] = account
     acc = POOL.get(account) if (account and POOL) else None
-    row["realm"] = acc.realm if acc else CURRENT_REALM
+    row["realm"] = realm or (acc.realm if acc else CURRENT_REALM)
     row.update(_request_context_fields())
     if (account and POOL and not usage_missing and fields.get("total_tokens")
             and fields.get("has_credit")):
@@ -638,7 +640,7 @@ def _persist_usage(row, fail_label):
 
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
-                 outcome="failed", hint=None, key=None):
+                 outcome="failed", hint=None, key=None, realm=None):
     """Record one failed request as exactly one JSONL row.
 
     Passing the account uid records which account the request was bound to, so
@@ -685,6 +687,8 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         row["account"] = account
         acc = POOL.get(account) if POOL else None
         row["realm"] = acc.realm if acc else CURRENT_REALM
+    if realm:
+        row["realm"] = realm
     row.update(_request_context_fields())
     row["key"] = key or ""
     with _lock:
@@ -2272,6 +2276,7 @@ def runtime_settings_view():
         "api_key_masked": masked,
         "auth_required": auth_required(),
         "api_keys": keys,
+        "opencode": wb_opencode.public_config(wb_settings.opencode_config(ACCOUNTS_DIR)),
         "deleted_api_keys": deleted_keys,
         "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
         "daily_token_limit": wb_settings.daily_token_limit(ACCOUNTS_DIR),
@@ -7440,7 +7445,7 @@ class Handler(BaseHTTPRequestHandler):
         if explicit:
             return explicit
         bound = self._key_realm()
-        if bound:
+        if bound in ("cn", "intl"):
             return bound
         header = self.headers.get("X-Realm")
         if header:
@@ -7610,14 +7615,37 @@ class Handler(BaseHTTPRequestHandler):
             return
         query = parse_qs(urlparse(self.path).query)
         channel = (query.get("channel") or [None])[0]
+        if channel is None and (getattr(self, "key_entry", None) or {}).get("realm") == "opencode":
+            channel = "opencode"
         if channel not in (None, "opencode", "workbuddy-cn", "workbuddy-intl"):
             return self._error(400, "channel must be opencode, workbuddy-cn or workbuddy-intl",
                                "invalid_request_error")
         if channel == "opencode":
             try:
-                return self._json(200, wb_opencode_catalog.opencode_catalog(ACCOUNTS_DIR))
+                config = wb_settings.opencode_config(ACCOUNTS_DIR)
+                if config["mode"] == "custom":
+                    with wb_opencode.open_request(config, "/models", slots=wb_settings.proxy_slots(ACCOUNTS_DIR)) as response:
+                        if response.status != 200:
+                            return self._error(response.status, "OpenCode 上游模型目录读取失败")
+                        body = response.read(wb_opencode.MAX_RESPONSE_BYTES + 1)
+                        if len(body) > wb_opencode.MAX_RESPONSE_BYTES:
+                            raise ValueError("OpenCode catalogue exceeds size limit")
+                        document = wb_opencode_catalog.build_opencode_catalog({}, json.loads(body))
+                        document["source"] = "configured-opencode"
+                else:
+                    document = (wb_opencode_catalog.opencode_catalog(ACCOUNTS_DIR)
+                                if config["mode"] == "zen" else
+                                wb_opencode_catalog.opencode_catalog(ACCOUNTS_DIR, mode="go"))
+                document["inference_ready"] = wb_opencode.configured(config)
+                document["catalogue_only"] = not document["inference_ready"]
+                document["mode"] = config["mode"]
+                return self._json(200, document)
+            except wb_opencode.ConfigurationError as exc:
+                return self._error(503, str(exc))
             except ValueError as exc:
                 return self._error(502, str(exc))
+            except (OSError, http.client.HTTPException):
+                return self._error(502, "OpenCode 上游目录暂时不可达")
         req_realm = ({"workbuddy-cn": "cn", "workbuddy-intl": "intl"}.get(channel)
                      or self._request_realm() or CURRENT_REALM)
         try:
@@ -8106,8 +8134,8 @@ class Handler(BaseHTTPRequestHandler):
                     return None, self._error(400, "a key entry is empty - fill it in or remove the row",
                                              "invalid_request_error")
                 realm = str(item.get("realm") or "").strip().lower()
-                if realm not in ("", "intl", "cn"):
-                    return None, self._error(400, "realm must be intl, cn or empty",
+                if realm not in wb_settings.REALMS:
+                    return None, self._error(400, "realm must be intl, cn, opencode or empty",
                                              "invalid_request_error")
                 # An older cached panel does not know this field at all, so a
                 # row that omits it keeps whatever is stored instead of
@@ -8260,6 +8288,12 @@ class Handler(BaseHTTPRequestHandler):
                 plan["upstream"] = wb_settings.validate_upstream_patch(raw)
             except ValueError as exc:
                 return None, self._error(400, str(exc), "invalid_request_error")
+        if "opencode" in payload:
+            try:
+                wb_opencode.validate_config(payload["opencode"], wb_settings.opencode_config(ACCOUNTS_DIR))
+                plan["opencode"] = dict(payload["opencode"])
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
         if "prompt" in payload:
             raw = payload.get("prompt")
             if not isinstance(raw, dict):
@@ -8295,7 +8329,7 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         plan, error = self._validate_settings_save(payload)
-        if error is not None:
+        if plan is None:
             return error
         reply = {}
         if "api_keys" in plan:
@@ -8368,6 +8402,8 @@ class Handler(BaseHTTPRequestHandler):
         if "upstream" in plan:
             wb_settings.set_upstream_config(ACCOUNTS_DIR, plan["upstream"])
             reply["upstream"] = wb_settings.upstream_config(ACCOUNTS_DIR)
+        if "opencode" in plan:
+            wb_settings.set_opencode_config(ACCOUNTS_DIR, plan["opencode"])
         if "prompt" in plan:
             wb_settings.set_prompt_config(ACCOUNTS_DIR, plan["prompt"])
             reply["prompt"] = wb_settings.prompt_config(ACCOUNTS_DIR)
@@ -9764,7 +9800,8 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._handle_accounts(path, payload)
-        if is_messages_route and path.endswith("/count_tokens"):
+        is_opencode = self._key_realm() == "opencode"
+        if is_messages_route and path.endswith("/count_tokens") and not is_opencode:
             payload = self._payload_or_error()
             if payload is None:
                 return
@@ -9785,7 +9822,8 @@ class Handler(BaseHTTPRequestHandler):
                 path=path,
             )
             # The body is intentionally unread: its model/stream are unknown.
-            record_error("unknown", 503, message, stream=False, key=self._key_id())
+            record_error("unknown", 503, message, stream=False, key=self._key_id(),
+                         realm="opencode" if is_opencode else None)
             if is_messages_route:
                 return self._anthropic_error(503, message, "overloaded_error")
             return self._error(503, message)
@@ -9793,11 +9831,119 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._payload_or_error()
             if payload is None:
                 return
+            if is_opencode:
+                return self._handle_opencode(path, payload)
             if is_messages_route:
                 return self._handle_messages(payload)
             return self._dispatch_chat_post(path, payload)
         finally:
             _chat_slots.release()
+
+    def _handle_opencode(self, path, payload):
+        """A fixed OpenCode key always uses native OpenCode, with no WB fallback."""
+        set_request_context(request_id=self.headers.get("X-Request-Id") or uuid.uuid4().hex,
+                            client_ip=self.client_address[0] if self.client_address else "",
+                            user_agent=self.headers.get("User-Agent") or "", path=path)
+        model = payload.get("model") or "unknown"
+        started = time.time()
+        config = wb_settings.opencode_config(ACCOUNTS_DIR)
+        native_messages = path in ("/v1/messages", "/messages", "/v1/messages/count_tokens", "/messages/count_tokens")
+        def error(status, message):
+            record_error(model, status, message, key=self._key_id(), realm="opencode")
+            if native_messages:
+                return self._anthropic_error(status, message, "invalid_request_error" if status == 400 else "api_error")
+            return self._error(status, message, "invalid_request_error" if status == 400 else "api_error")
+        blocked = self._key_model_error(payload.get("model")) or self._banned_model_error(payload.get("model"))
+        if not blocked and BLOCK_BACKGROUND_REQUESTS:
+            reason = background_request_reason(payload)
+            if reason:
+                blocked = background_request_message(reason)
+        if blocked:
+            return error(400, blocked)
+        if not isinstance(payload.get("model"), str) or not payload["model"].strip():
+            return error(400, "model is required")
+        try:
+            response = wb_opencode.open_request(config, path, payload, self.headers,
+                                               wb_settings.proxy_slots(ACCOUNTS_DIR))
+        except wb_opencode.ConfigurationError as exc:
+            return error(503, str(exc))
+        except ValueError as exc:
+            return error(400, str(exc))
+        except (socket.timeout, TimeoutError):
+            return error(504, "OpenCode 上游连接超时")
+        except (OSError, http.client.HTTPException):
+            return error(502, "OpenCode 上游连接失败")
+        with response:
+            status = response.status
+            streaming = status == 200 and response.headers.get("Content-Type", "").startswith("text/event-stream")
+            tracker = wb_opencode.StreamUsage()
+            usage = None
+            outcome = "completed" if 200 <= status < 300 else "failed"
+            first_ms = None
+            headers_sent = False
+            try:
+                body = None
+                if not streaming:
+                    body = response.read(wb_opencode.MAX_RESPONSE_BYTES + 1)
+                    if len(body) > wb_opencode.MAX_RESPONSE_BYTES:
+                        return error(502, "OpenCode 上游响应超过大小限制")
+                    if status >= 300:
+                        body = body.replace(config["api_key"].encode(), b"[redacted]")
+                    try:
+                        document = json.loads(body)
+                        usage = wb_opencode.response_usage(document)
+                        if isinstance(document, dict) and document.get("error"):
+                            outcome = "failed"
+                    except (ValueError, UnicodeError):
+                        pass
+                self.send_response(status)
+                self.send_header("Content-Type", response.headers.get("Content-Type", "application/json"))
+                self.send_header("Cache-Control", "no-store")
+                for field in ("Retry-After", "X-Request-Id", "Content-Encoding"):
+                    if response.headers.get(field):
+                        self.send_header(field, response.headers[field])
+                if cors_origin_allowed(self.path):
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                if body is not None:
+                    self.send_header("Content-Length", str(len(body)))
+                else:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
+                self.end_headers()
+                headers_sent = True
+                if body is not None:
+                    self.wfile.write(body)
+                else:
+                    read = getattr(response, "read1", response.read)
+                    while True:
+                        chunk = read(16384)
+                        if not chunk:
+                            break
+                        if first_ms is None:
+                            first_ms = int((time.time() - started) * 1000)
+                        tracker.feed(chunk)
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    usage = tracker.usage
+                    if tracker.failed or not tracker.completed:
+                        outcome = "upstream_aborted"
+            except (BrokenPipeError, ConnectionResetError):
+                outcome = "client_aborted"
+                self.close_connection = True
+            except (OSError, http.client.HTTPException):
+                if not headers_sent:
+                    return error(502, "OpenCode 上游响应读取失败")
+                outcome = "upstream_aborted"
+                self.close_connection = True
+            if not path.endswith("/count_tokens"):
+                elapsed = int((time.time() - started) * 1000)
+                if outcome == "completed":
+                    record_usage(model, wb_opencode.normalize_usage(usage, native_messages), stream=streaming, elapsed_ms=elapsed,
+                                 ttft_ms=first_ms, key=self._key_id(), realm="opencode")
+                else:
+                    record_error(model, status, "OpenCode " + outcome, usage=wb_opencode.normalize_usage(usage or tracker.usage, native_messages),
+                                 stream=streaming, elapsed_ms=elapsed, ttft_ms=first_ms,
+                                 outcome=outcome, key=self._key_id(), realm="opencode")
 
     def _dispatch_chat_post(self, path, payload):
         # Per-request archive context: a request id is always recorded; the

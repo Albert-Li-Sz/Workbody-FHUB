@@ -52,7 +52,7 @@ const api = new Function('window','document','localStorage','getJSON','esc',sour
   assert.ok(!tbody.innerHTML.includes('钳制') && !tbody.innerHTML.includes('未探测'),
             'WorkBuddy output probes must not annotate another provider');
   assert.ok(!tbody.innerHTML.includes('>文本<'), 'missing OpenCode metadata must not invent a text capability');
-  assert.ok(el('modelChannelStatus').textContent.includes('推理接入整合中'));
+  assert.ok(el('modelChannelStatus').textContent.includes('OpenCode 上游未配置'));
   assert.equal(el('modelChannelSelect').value,'opencode');
 
   // Changing an unrelated view must not override the explicit model channel.

@@ -8,12 +8,13 @@
 | --- | --- |
 | 两个上游 | 本地配置 `upstream-workbuddy`、`upstream-opencode`，自己的 fork 为 `origin`；固定来源记录在 [upstreams.json](../upstreams.json)。 |
 | 三个模型渠道 | 模型页可选 OpenCode、WorkBuddy 国内、WorkBuddy 国际，浏览器保存选择；切换不修改网关默认出口、账号绑定或 API Key 绑定。 |
-| OpenCode 目录 | 从官方 Zen 目录取真实 ID，Models.dev 的 `opencode` provider 补充价格、规格和能力；保留 `-free` 后缀。无法获取实时目录时可使用明确标注来源的元数据目录。 |
-| 缓存与失败 | OpenCode 独立缓存至 `accounts/catalogs/opencode.json`，5 分钟有效，失败后短期节流；旧缓存显示过期提示，没有目录时显示失败并清空旧行。记录来源和更新时间，文件权限沿用私有存储。 |
-| OpenCode 推理 | 尚未接入。目录响应明确返回 `catalogue_only: true`、`inference_ready: false`，页面提示接入状态。目录存在、零标价均不是账号调用验证。 |
+| OpenCode 目录 | 官方 Zen / Go 使用各自实时目录和 Models.dev provider 元数据，保留 `-free` 后缀；自建兼容网关从所配置上游的 `/models` 获取目录，不借用官方能力或价格。 |
+| 缓存与失败 | Zen / Go 分别缓存至 `accounts/catalogs/opencode.json`、`opencode-go.json`，5 分钟有效，失败后短期节流；旧缓存显示过期提示，没有目录时显示失败并清空旧行。记录来源和更新时间，文件权限沿用私有存储。 |
+| 三种固定出口 | 网关 Key 新增 `realm: opencode`，与 `cn`、`intl` 并列。跟随面板的旧 Key 和已有绑定继续沿用原行为；OpenCode 绑定不受默认出口、客户端 realm 或模型同名影响。 |
+| OpenCode 推理 | 已实现独立上游配置与原生 Chat / Responses / Messages 转发，流事件不改写，usage 单独归入 OpenCode；配置缺失或绑定代理失效时返回 503。`inference_ready` 表示启用且已存 Key，目录、配置状态均不是有效账号调用证明。具体步骤见 [OpenCode 出口](opencode-exit.md)。 |
 | WorkBuddy 账号迁移 | 修复导入丢失 `product`、`proxySlot`、旧 `proxy`、`addedAt` 的问题，覆盖导出→导入→落盘重载。旧版本字段、格式和凭据校验继续支持。 |
 
-旧 `/v1/models` 没有 `channel` 参数时仍按原来的 Key / realm 规则返回 WorkBuddy 目录。新增查询参数为 `channel=opencode`、`channel=workbuddy-cn`、`channel=workbuddy-intl`，仅控制目录。显式选择渠道可浏览其他目录，调用时仍执行原有 Key 权限与区域规则。
+`/v1/models` 没有 `channel` 参数时，OpenCode 绑定 Key 返回 OpenCode 目录，旧 Key 仍按原来的 WorkBuddy 规则处理。查询参数 `channel=opencode`、`channel=workbuddy-cn`、`channel=workbuddy-intl` 仅控制目录，显式选择渠道可浏览其他目录。对话请求始终执行 Key 的出口绑定与模型权限，不因浏览目录改变出口。
 
 ## 上游维护
 
@@ -38,22 +39,22 @@ git fetch --no-tags upstream-opencode main
 
 ## 渐进架构
 
-当前只新增 `wb_opencode_catalog.py`，不拆改既有 WorkBuddy 推理链。等第二个推理适配器真正接入，再把公共认证、模型身份和协议边界从 `wb_proxy.py` 提取出来。
+当前新增 `wb_opencode_catalog.py` 与 `wb_opencode.py`。入口在认证和公共并发控制后按 Key 分流，原生 OpenCode 请求不经过 WorkBuddy 提示词、积分、协议转换或账号轮换逻辑。后续增加更多 provider 时，再把公共路由与模型身份边界从 `wb_proxy.py` 提取为独立接口。
 
 ```mermaid
 flowchart TD
     Client[现有 API 客户端与管理面板] --> Hub[现有 Python 网关\n入口认证 / 读取超时 / 并发限额]
     Hub --> Catalog[模型目录\n三个展示渠道 / 来源 / 独立缓存]
-    Hub --> Route[后续：渠道路由\nKey 绑定 / 模型身份 / 账号选择]
+    Hub --> Route[渠道路由\nAPI Key 固定出口]
     Route --> WB[WorkBuddy 适配器\n国内 / 国际]
-    Route --> OC[后续：OpenCode API 适配器\nZen / Go]
+    Route --> OC[OpenCode 原生 API 适配器\nZen / Go / 自建兼容网关]
     Route --> Agent[可选后续：OpenCode agent 适配器\nserve 或 ACP]
     WB --> Store[私有凭据与持久化设置]
     OC --> Store
     Agent --> Store
 ```
 
-公共适配器暴露小接口：列出模型、检查凭据、发送原生请求、取消请求、归一错误。WorkBuddy 的 JWT 刷新、积分与签到留在 WorkBuddy 模块；Zen / Go 的 Key 与计费状态留在 OpenCode 模块；agent 的进程、会话与工具权限留在 agent 模块。面板不用了解这些协议内部字段。
+当前 OpenCode 模块负责配置校验、凭据隔离、原生请求和流式 usage 观察，目录单独缓存。后续公共适配器接口可统一列出模型、检查凭据、发送原生请求、取消请求与归一错误。WorkBuddy 的 JWT 刷新、积分与签到留在 WorkBuddy 模块；Zen / Go 的 Key 与计费状态留在 OpenCode 模块；agent 的进程、会话与工具权限留在 agent 模块。
 
 内部模型身份采用 `(provider, mode/realm, upstream_model_id)`，同名 DeepSeek 模型不能跨渠道合并额度、能力、冷却和价格。外部旧模型 ID 保持兼容；新增渠道优先通过 API Key 的显式渠道绑定选择，必要时引入带渠道的模型别名，并在页面展示其真实上游 ID。
 
@@ -79,7 +80,7 @@ flowchart TD
 | 旧 API 客户端 | 保留现有 `/v1` 接口、模型 ID、Key 模型限制、默认出口与区域绑定；新增功能显式启用。 |
 | 可选 agent 服务 | 后续独立容器 / 子进程模式，明确 OpenCode 版本、独立工作目录、生命周期、权限与服务认证，不能因切换目录自动启动。 |
 
-当前 Dockerfile 已通过 `COPY wb_*.py dashboard.html ./` 包含新的目录模块，基础镜像与入口无需更改。发布自己镜像后再更新部署镜像地址；当前上游 `latest` 镜像不会自动包含本地整合改动。amd64 / arm64 镜像、1Panel 导入和实际数据卷升级留到发布阶段验收。
+当前 Dockerfile 已通过 `COPY wb_*.py dashboard.html ./` 包含新的目录与转发模块，基础镜像与入口无需更改。OpenCode 配置保存于现有 `accounts/settings.json`，沿用私有原子写入，无需新增挂载。发布自己镜像后再更新部署镜像地址；当前上游 `latest` 镜像不会自动包含本地整合改动。amd64 / arm64 镜像、1Panel 导入和实际数据卷升级留到发布阶段验收。
 
 ## 账号导入导出
 
@@ -101,9 +102,9 @@ flowchart TD
 | --- | --- | --- |
 | 0. 上游与调研 | 已完成 | 固定来源、检查 main / PR / 官方 issue，记录实际限制与新 key / agent 路径。 |
 | 1. 目录与迁移基础 | 本分支实现 | 三渠道选择；快速切换无旧响应覆盖；刷新后记住选择；缓存失效与失败提示；WorkBuddy 导出导入重载保留配置。 |
-| 2. 正式 API 账号 | 待实现 | Zen / Go 的真实 Key 配置、类型化存储、定向 auth.json 导入、兼容导出与 Key 渠道绑定。 |
-| 3. 推理协议 | 待实现 | 按模型原生协议完成流式 / 非流式回答、工具、usage、取消和错误传播；使用已授权有效账号验证完整回答。 |
+| 2. 正式 API 配置 | 本分支部分实现 | Zen / Go / 自建上游 Key、超时、代理槽与网关 Key 绑定已实现；类型化多账号、定向 auth.json 导入和完整备份恢复待实现。 |
+| 3. 推理协议 | 本地模拟验收 | 原生三协议、流事件与请求体保留、usage、非成功状态、Retry-After、客户端断开与上游截断已处理；协议自动转换和真实账号完整回答待验证。 |
 | 4. agent 可选模式 | 按需求实现 | serve / ACP 的会话、进程、工具权限、独立工作目录、取消与清理，按部署版本的 API spec 验收。 |
 | 5. 发布兼容性 | 待实现 | Python 最低版本与 Windows CI、amd64 / arm64 镜像、1Panel、本机启动、卷升级 / 回滚和完整备份恢复。 |
 
-本分支增加了离线目录、HTTP 路由、异步切换和账号迁移回归测试，统一入口仍为 `python tests/run_all.py`。本机完整测试与浏览器验收验证当前实现；目录抓取成功不等于推理成功，未做真实 OpenCode 账号调用。升级前备份 accounts / usage，回滚应用时保留原有卷，新增目录缓存可丢弃并重新抓取。
+本分支增加了离线目录、HTTP 路由、异步切换、账号迁移以及 OpenCode 原生出口回归测试，统一入口仍为 `python tests/run_all.py`，共 79 个套件（64 个 Python、15 个 JS）。OpenCode 转发测试使用本地模拟上游与合成 Key，未做真实 OpenCode 账号调用。升级前备份 accounts / usage，回滚应用时保留原有卷，新增目录缓存可丢弃并重新抓取。

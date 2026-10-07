@@ -449,6 +449,9 @@ a:hover{text-decoration:underline}
 .section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .section-head h2{margin:0}
 .section-note{font-size:12px;color:var(--dim);margin-top:4px;line-height:1.55}
+.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px;margin:16px 0}
+.settings-grid>label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--dim)}
+.settings-grid>label.check-label{flex-direction:row;align-items:center;grid-column:1 / -1}
 .settings-subnav{
   position:sticky;top:74px;z-index:8;display:flex;gap:6px;flex-wrap:wrap;
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -1150,6 +1153,7 @@ a:hover{text-decoration:underline}
     <nav class="settings-subnav" aria-label="设置分类">
       <a href="#settings-access">存取</a>
       <a href="#settings-keys">API Key</a>
+      <a href="#settings-opencode">OpenCode</a>
       <a href="#settings-slots">代理槽</a>
       <a href="#settings-quota">额度治理</a>
       <a href="#settings-pricing">计价</a>
@@ -1181,7 +1185,7 @@ a:hover{text-decoration:underline}
         <div>
           <h2 style="margin:0">API Key 与出口绑定 <em id="setKeyState"></em></h2>
           <div style="font-size:12px;color:var(--dim);margin-top:4px">
-            为每个 Key 绑定专属出口。客户端使用该 Key 请求将固定走对应区域，实现双出口并发。
+            为每个 Key 固定绑定 WorkBuddy 国内、WorkBuddy 国际或 OpenCode。绑定后不受默认出口切换影响。
           </div>
         </div>
         <button  data-action="addApiKeyRow" data-on="click">+ 添加 API Key</button>
@@ -1190,6 +1194,22 @@ a:hover{text-decoration:underline}
       <!-- 已删除的 Key 只留名字和日期：密钥已抹掉，所以这里没有「复制」。
            历史用量按 id 记账，删掉这一行会让那些请求变成「未知 key」。 -->
       <div id="deletedKeySection"></div>
+    </section>
+
+    <section id="settings-opencode">
+      <h2>OpenCode 上游 <em id="setOpenCodeState"></em></h2>
+      <p style="font-size:12px;color:var(--dim)">填写 OpenCode 的上游凭据后，客户端使用绑定 OpenCode 的网关 Key 调用。两个 Key 分别使用；未配置时请求会返回明确错误。</p>
+      <div class="settings-grid">
+        <label class="check-label"><input id="setOpenCodeEnabled" type="checkbox"> 启用 OpenCode 出口</label>
+        <label>接入方式 <select id="setOpenCodeMode" class="slot-select" data-action="onOpenCodeModeChange" data-on="change"><option value="zen">官方 Zen</option><option value="go">官方 Go</option><option value="custom">自建兼容网关</option></select></label>
+        <label>上游 Base URL <input id="setOpenCodeBaseUrl" class="slot-input" type="url" placeholder="http://127.0.0.1:13339/openai/v1" autocomplete="off"></label>
+        <label>上游 API Key <input id="setOpenCodeKey" class="slot-input" type="password" placeholder="留空保持已保存的 Key" autocomplete="new-password"></label>
+        <label>连接 / 读空闲超时（秒） <input id="setOpenCodeTimeout" class="slot-input" type="number" min="1" max="600" value="120"></label>
+        <label>出口代理槽 <select id="setOpenCodeProxySlot" class="slot-select"><option value="">直连</option></select></label>
+        <label class="check-label"><input id="setOpenCodeClearKey" type="checkbox"> 保存时清除已存上游 Key</label>
+      </div>
+      <button class="sec" data-action="saveOpenCodeSettings" data-on="click">保存 OpenCode 上游</button>
+      <div style="font-size:12px;color:var(--dim);margin-top:8px">按模型使用 Chat Completions、Responses 或 Messages 原生接口。目录与零标价不代表账号权限，免费层限制和配额错误会原样返回。</div>
     </section>
 
     <section id="settings-slots">
@@ -2063,7 +2083,8 @@ async function loadModels(){
     if(status) status.textContent = channel === 'opencode'
       ? (r.stale ? '缓存目录（刷新暂不可用）' : '目录来源：' + (r.source || 'OpenCode'))
         + (Number.isFinite(r.fetched_at) ? ' · 更新于 ' + new Date(r.fetched_at * 1000).toLocaleString() : '')
-        + ' · 推理接入整合中，目录价格不代表账号可用性。'
+        + (r.inference_ready ? ' · 上游已配置，请使用绑定 OpenCode 的网关 Key 调用。'
+                             : ' · OpenCode 上游未配置，目录价格不代表账号可用性。')
       : '仅查看' + MODEL_CHANNEL_LABELS[channel] + '目录，网关默认出口与 Key 绑定保持原配置。';
   }catch(e){
     if(generation !== MODEL_LOAD_GENERATION) return;
@@ -4735,6 +4756,7 @@ async function loadSettings(showToast){
       deleted_at: k.deleted_at || '',
     }));
     renderKeyRows();
+    renderOpenCodeSettings(data.opencode || {});
     renderAdvancedSettings(data);
     updateUI();
     const set = (id, value) => { const el = document.getElementById(id); if(el) el.textContent = value || '-'; };
@@ -5064,7 +5086,64 @@ const REALM_CHOICES = [
   ['', '跟随面板切换'],
   ['intl', '固定国际版出口'],
   ['cn', '固定国内版出口'],
+  ['opencode', '固定 OpenCode 出口'],
 ];
+
+function renderOpenCodeSettings(config){
+  const set = (id, value, checked) => {
+    const el = document.getElementById(id);
+    if(el){ if(checked) el.checked = value; else el.value = value; }
+  };
+  set('setOpenCodeEnabled', config.enabled === true, true);
+  set('setOpenCodeMode', config.mode || 'zen');
+  set('setOpenCodeBaseUrl', config.base_url || 'https://opencode.ai/zen/v1');
+  set('setOpenCodeKey', '');
+  set('setOpenCodeClearKey', false, true);
+  set('setOpenCodeTimeout', config.timeout_seconds || 120);
+  onOpenCodeModeChange();
+  refreshOpenCodeProxySlots(config.proxy_slot || '');
+  const state = document.getElementById('setOpenCodeState');
+  if(state) state.textContent = config.configured ? '(已配置)' : config.api_key_set ? '(已保存 Key，出口未启用)' : '(未配置上游 Key)';
+}
+
+function refreshOpenCodeProxySlots(selected){
+  const slot = document.getElementById('setOpenCodeProxySlot');
+  if(slot){
+    selected = selected === undefined ? slot.value : selected;
+    const slots = typeof PROXY_SLOTS === 'undefined' ? [] : PROXY_SLOTS;
+    slot.innerHTML = '<option value="">直连</option>' + slots.map(s =>
+      '<option value="' + esc(s.id) + '">' + esc(s.name || s.id) + (s.enabled === false ? '（已停用）' : '') + '</option>').join('')
+      + (selected && !slots.some(s => s.id === selected) ? '<option value="' + esc(selected) + '">' + esc(selected) + '（已保存槽位）</option>' : '');
+    slot.value = selected;
+  }
+}
+
+function onOpenCodeModeChange(){
+  const mode = (document.getElementById('setOpenCodeMode') || {}).value;
+  const input = document.getElementById('setOpenCodeBaseUrl');
+  if(!input) return;
+  input.readOnly = mode !== 'custom';
+  if(mode === 'zen') input.value = 'https://opencode.ai/zen/v1';
+  if(mode === 'go') input.value = 'https://opencode.ai/zen/go/v1';
+}
+
+async function saveOpenCodeSettings(btn){
+  const value = id => (document.getElementById(id) || {}).value || '';
+  const checked = id => (document.getElementById(id) || {}).checked === true;
+  if(btn) btn.disabled = true;
+  try{
+    await postJSON('/settings/save', {opencode: {
+      enabled: checked('setOpenCodeEnabled'), mode: value('setOpenCodeMode'),
+      base_url: value('setOpenCodeBaseUrl'), api_key: value('setOpenCodeKey'),
+      clear_api_key: checked('setOpenCodeClearKey'), proxy_slot: value('setOpenCodeProxySlot'),
+      timeout_seconds: Number(value('setOpenCodeTimeout')),
+    }});
+    toast('OpenCode 上游配置已保存', 'ok');
+    await loadSettings();
+    await loadModels();
+  }catch(e){ toast('保存失败: ' + e.message, 'bad'); }
+  finally { if(btn) btn.disabled = false; }
+}
 
 /* Model allow-list per key. Patterns are matched case-insensitively with `*`
    wildcards ("deepseek*", "gpt-6-astra"). An empty list means no limit, which
@@ -5087,8 +5166,7 @@ function renderDeletedKeyRows(){
   if(!box) return;
   if(!DELETED_KEY_ROWS.length){ box.innerHTML = ''; return; }
   const rows = DELETED_KEY_ROWS.map(k => {
-    const realmLbl = (k.realm === 'intl') ? '固定国际版出口'
-      : ((k.realm === 'cn') ? '固定国内版出口' : '跟随面板切换');
+    const realmLbl = (REALM_CHOICES.find(([value]) => value === k.realm) || REALM_CHOICES[0])[1];
     return '<div style="font-size:12px;color:var(--dim);display:flex;gap:14px;flex-wrap:wrap;padding:7px 0;border-top:1px solid var(--line)">'
       + '<span style="color:var(--fg);font-weight:600">' + esc(k.name || '未命名') + '</span>'
       + '<span>' + esc(realmLbl) + '</span>'
@@ -5165,6 +5243,8 @@ function renderKeyRows(){
       ? '<span class="realm-badge-intl" style="font-size:11px">固定国际版出口</span>'
       : (row.realm === 'cn')
       ? '<span class="realm-badge-cn" style="font-size:11px">固定国内版出口</span>'
+      : (row.realm === 'opencode')
+      ? '<span class="badge ok" style="font-size:11px">固定 OpenCode 出口</span>'
       : '<span class="badge s" style="font-size:11px">跟随面板切换</span>';
 
     const modelBadge = (Array.isArray(row.models) && row.models.length)
@@ -5425,6 +5505,7 @@ async function loadProxySlots(force){
     const r = await getJSON('/proxy/slots');
     PROXY_SLOTS = r.slots || [];
     renderProxySlots();
+    refreshOpenCodeProxySlots();
   }catch(e){
     // Panel not logged in yet; actions on the settings page surface errors.
   }
@@ -6614,6 +6695,7 @@ function keyRealmCell(k){
   if(k.source === 'bucket') return '<span style="color:var(--dim)">—</span>';
   if(k.realm === 'cn') return '<span class="badge warn" style="font-size:10px">国内版</span>';
   if(k.realm === 'intl') return '<span class="badge s" style="font-size:10px">国际版</span>';
+  if(k.realm === 'opencode') return '<span class="badge ok" style="font-size:10px">OpenCode</span>';
   // realm 为空的 Key 不绑出口，而是跟着模型走：它可能两个出口都用过，
   // 那时代理返回的积分是两个价格体系相加的结果，必须说出来。
   if(k.cross_realm) return '<span class="badge warn" style="font-size:10px">跟随 · 混合</span>';
@@ -6738,6 +6820,8 @@ const ACTION_HANDLERS = {
   onMatrixModelFilterChange: (el) => { matrixModelFilter = el.value; if(cachedMatrixData) renderPerfMatrix(cachedMatrixData.usage, cachedMatrixData.perf); },
   savePanelPassword: (el) => savePanelPassword(el),
   addApiKeyRow: () => addApiKeyRow(),
+  saveOpenCodeSettings: (el) => saveOpenCodeSettings(el),
+  onOpenCodeModeChange: () => onOpenCodeModeChange(),
   discoverProxySlots: (el) => discoverProxySlots(el),
   addProxySlotRow: () => addProxySlotRow(),
   saveProxySlots: (el) => saveProxySlots(el),

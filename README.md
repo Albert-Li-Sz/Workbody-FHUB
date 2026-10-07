@@ -11,7 +11,7 @@
 
 把腾讯 **[www.workbuddy.ai](https://www.workbuddy.ai)**（国际版）与 **[codebuddy.cn](https://www.codebuddy.cn)**（国内版）的原生服务封装成标准 OpenAI 兼容接口（Chat Completions 与 Responses API），并补齐多账号调度与运维能力：
 
-本整合分支继续沿用 Python + Docker / 1Panel 部署。模型页新增 **OpenCode / WorkBuddy 国内 / WorkBuddy 国际** 三个渠道选择，切换目录不改变网关默认出口或 Key 绑定；OpenCode 当前提供带来源、更新时间和缓存的模型目录，推理接入将在后续阶段实现。WorkBuddy 账号导入同时修复产品身份、代理绑定和添加时间丢失的问题。上游清单见 [upstreams.json](upstreams.json)，接入调研与后续兼容计划见 [整合方案](docs/integration-plan.md) 和 [OpenCode 调研](docs/research/opencode-free-gate.md)。
+本整合分支继续沿用 Python + Docker / 1Panel 部署。模型页支持 **OpenCode / WorkBuddy 国内 / WorkBuddy 国际** 三个渠道，API Key 可分别固定绑定这三个出口。在设置中配置独立的 OpenCode 上游 Key 后，绑定 OpenCode 的网关 Key 可透传 Chat Completions、Responses、Messages 及其流式响应；未配置时明确报错。模型页切换仍只影响目录。WorkBuddy 账号导入同时修复产品身份、代理绑定和添加时间丢失的问题。接入步骤与协议边界见 [OpenCode 出口](docs/opencode-exit.md)，上游清单见 [upstreams.json](upstreams.json)，后续计划见 [整合方案](docs/integration-plan.md) 和 [OpenCode 调研](docs/research/opencode-free-gate.md)。
 
 - **开箱即用**：绿色包自带精简 Python，双击脚本即启；
 - **双区域独立路由**：国际版 / 国内版独立配置与调度，看板一键切换，状态落盘；
@@ -178,7 +178,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 77 个套件：63 个 Python + 14 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 79 个套件：64 个 Python + 15 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里；fixtures／截图默认放系统 temp，可用 `WB_MOBILE_FIXTURES` / `WB_MOBILE_SHOTS` 覆盖，Windows 可直接运行。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12。推送 `v*` tag 时额外断言 **tag == 源码版本**（`wb_proxy.py` 里的两处版本串必须先一致，`-ci` 演练 tag 豁免）。
 

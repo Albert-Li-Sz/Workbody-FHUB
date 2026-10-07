@@ -20,6 +20,7 @@ import time
 import wb_storage
 
 import wb_pool
+import wb_opencode
 
 DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
@@ -270,7 +271,26 @@ def ensure_launcher_key(accounts_dir):
 # Each key can be bound to one upstream realm, so several clients can hit
 # different exits at the same time instead of sharing the global switch.
 
-REALMS = ("", "intl", "cn")
+REALMS = ("", "intl", "cn", "opencode")
+
+
+def opencode_config(accounts_dir):
+    stored = load(accounts_dir).get("opencode")
+    stored = stored if isinstance(stored, dict) else {}
+    known = {k: stored[k] for k in wb_opencode.DEFAULTS if k in stored}
+    try:
+        return wb_opencode.validate_config(known)
+    except ValueError:
+        return dict(wb_opencode.DEFAULTS)  # Invalid hand-edited settings fail closed.
+
+
+def set_opencode_config(accounts_dir, config):
+    with _lock:
+        data = load(accounts_dir)
+        validated = wb_opencode.validate_config(config, opencode_config(accounts_dir))
+        data["opencode"] = deep_merge(data.get("opencode"), validated)
+        save(accounts_dir, data)
+        return validated
 
 
 def _clean_model_patterns(value):

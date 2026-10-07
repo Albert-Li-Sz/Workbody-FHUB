@@ -75,9 +75,9 @@ def _model(mid, metadata=None, listed=None):
     return item
 
 
-def build_opencode_catalog(index, live=None):
+def build_opencode_catalog(index, live=None, provider_id="opencode"):
     """Combine exact upstream IDs with OpenCode's metadata, preserving -free."""
-    provider = index.get("opencode") if isinstance(index, dict) else None
+    provider = index.get(provider_id) if isinstance(index, dict) else None
     metadata = provider.get("models") if isinstance(provider, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
     listed = live.get("data") if isinstance(live, dict) else None
@@ -116,10 +116,13 @@ def _get_json(url):
     return json.loads(body.decode("utf-8"))
 
 
-def opencode_catalog(directory):
+def opencode_catalog(directory, mode="zen"):
     """Bounded fetch, a separate cache, and explicit stale data on failure."""
-    key = os.path.abspath(directory)
-    path = os.path.join(key, "catalogs", "opencode.json")
+    if mode not in ("zen", "go"):
+        raise ValueError("OpenCode catalogue mode must be zen or go")
+    directory = os.path.abspath(directory)
+    key = directory if mode == "zen" else (directory, mode)
+    path = os.path.join(directory, "catalogs", "opencode.json" if mode == "zen" else "opencode-go.json")
     with _lock:
         now = time.time()
         if _failures.get(key, 0) > now:
@@ -139,7 +142,8 @@ def opencode_catalog(directory):
             _cache[key] = cached
             return copy.deepcopy(cached["catalog"])
         live = index = None
-        for url, target in ((OPENCODE_MODELS_URL, "live"), (MODELSDEV_URL, "index")):
+        live_url = OPENCODE_MODELS_URL if mode == "zen" else "https://opencode.ai/zen/go/v1/models"
+        for url, target in ((live_url, "live"), (MODELSDEV_URL, "index")):
             try:
                 payload = _get_json(url)
                 if target == "live":
@@ -149,7 +153,7 @@ def opencode_catalog(directory):
             except Exception:
                 pass
         try:
-            catalog = build_opencode_catalog(index, live)
+            catalog = build_opencode_catalog(index, live, "opencode" if mode == "zen" else "opencode-go")
         except ValueError:
             if cached and cached["catalog"].get("data"):
                 catalog = copy.deepcopy(cached["catalog"])
