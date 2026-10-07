@@ -204,6 +204,7 @@ class CatalogEntryTests(unittest.TestCase):
         class Handler(wb_proxy.Handler):
             def __init__(self):
                 self.captured = None
+                self.path = "/v1/models"
 
             def _authorized(self):
                 return True

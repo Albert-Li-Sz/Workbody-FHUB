@@ -2561,7 +2561,10 @@ def normalise_import_row(row, realm=None):
     # is milliseconds, which normalize_epoch() below converts to seconds.
     if (isinstance(row, dict) and "access_token" in row
             and "accessToken" not in row):
-        row = {
+        # Keep portable routing/identity fields when a cockpit-style row also
+        # carries them. Only translate credential aliases; rebuilding the row
+        # from scratch discarded product, proxySlot and addedAt on migration.
+        row = dict(row, **{
             "uid": row.get("uid"),
             "nickname": row.get("nickname") or row.get("email") or "",
             "domain": row.get("domain"),
@@ -2569,7 +2572,7 @@ def normalise_import_row(row, realm=None):
             "refreshToken": row.get("refresh_token"),
             "expiresAt": row.get("expires_at"),
             "source": "cockpit",
-        }
+        })
 
     auth = row.get("auth") if isinstance(row.get("auth"), dict) else None
     profile = row.get("account") if isinstance(row.get("account"), dict) else None
@@ -2616,11 +2619,17 @@ def normalise_import_row(row, realm=None):
         "domain": domain_for_realm(detected, pick("domain")),
         "realm": detected,
         "platform": str(pick("platform") or "CLI"),
+        "product": wb_identity.normalize_product(pick("product")),
         "enterpriseId": str(pick("enterpriseId") or ""),
         "accessToken": token,
         "refreshToken": str(pick("refreshToken") or ""),
         "expiresAt": normalize_epoch(pick("expiresAt")) or jwt_exp(token),
+        "addedAt": normalize_epoch(pick("addedAt")),
         "source": str(pick("source") or "import"),
+        # Preserve the stored binding, never the runtime-resolved slot URL.
+        # The target installation resolves proxySlot against its own settings.
+        "proxySlot": str(pick("proxySlot") or "").strip(),
+        "proxy": str(pick("proxy") or "").strip(),
         "enabled": True,
         # Volatile state is intentionally reset - see VOLATILE_FIELDS.
         "lastError": "",

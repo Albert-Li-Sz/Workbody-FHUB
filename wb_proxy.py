@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wb_accounts
+import wb_opencode_catalog
 import wb_pool
 import wb_atrest
 import wb_catalog
@@ -7607,7 +7608,18 @@ class Handler(BaseHTTPRequestHandler):
     def _get_v1_models(self):
         if not self._authorized():
             return
-        req_realm = self._request_realm() or CURRENT_REALM
+        query = parse_qs(urlparse(self.path).query)
+        channel = (query.get("channel") or [None])[0]
+        if channel not in (None, "opencode", "workbuddy-cn", "workbuddy-intl"):
+            return self._error(400, "channel must be opencode, workbuddy-cn or workbuddy-intl",
+                               "invalid_request_error")
+        if channel == "opencode":
+            try:
+                return self._json(200, wb_opencode_catalog.opencode_catalog(ACCOUNTS_DIR))
+            except ValueError as exc:
+                return self._error(502, str(exc))
+        req_realm = ({"workbuddy-cn": "cn", "workbuddy-intl": "intl"}.get(channel)
+                     or self._request_realm() or CURRENT_REALM)
         try:
             entries = fetch_models(realm=req_realm)
         except Exception as exc:
@@ -7619,7 +7631,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         data = [model_entry(mid, meta) for mid, meta in entries]
-        return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM})
+        selected = {"cn": "workbuddy-cn", "intl": "workbuddy-intl"}.get(req_realm)
+        if selected:
+            for item in data:
+                item["channel"] = selected
+        return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM,
+                                "channel": selected, "source": "workbuddy"})
 
     def _get_v1_usage(self, query):
         if not self._authorized():

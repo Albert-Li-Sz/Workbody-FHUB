@@ -927,23 +927,30 @@ a:hover{text-decoration:underline}
       <div>
         <div class="eyebrow">模型目录</div>
         <h2>模型与档位</h2>
-        <p>当前版本模型库、上下文容量、推理／视觉能力、消费倍率与输出上限钳制标注。</p>
+        <p>按渠道查看模型、上下文容量、推理／视觉能力、价格与输出上限。</p>
       </div>
       <div class="page-actions">
+        <label for="modelChannelSelect">渠道</label>
+        <select id="modelChannelSelect" class="slot-select" data-action="selectModelsChannel" data-on="change">
+          <option value="opencode">OpenCode</option>
+          <option value="workbuddy-cn">WorkBuddy 国内</option>
+          <option value="workbuddy-intl" selected>WorkBuddy 国际</option>
+        </select>
+        <button class="sec" data-action="loadModels" data-on="click">刷新目录</button>
         <button class="sec" data-action="switchMainTab" data-on="click" data-arg="analytics">查看用量</button>
       </div>
     </div>
   <section>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <h2 style="margin:0">当前版本模型库与能力清单 <em id="availModelCount"></em></h2>
-      <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力及在售倍率</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px">
+      <h2 style="margin:0"><span id="modelChannelTitle">WorkBuddy 国际模型</span> <em id="availModelCount"></em></h2>
+      <div id="modelChannelStatus" role="status" style="font-size:12px;color:var(--dim)">仅切换模型目录，网关默认出口与 Key 绑定保持原配置。</div>
     </div>
     <div style="overflow-x:auto">
       <table id="modelsTable" class="data-cards">
         <thead>
           <tr>
             <th style="text-align:left;width:220px">模型 ID</th>
-            <th style="text-align:center;width:140px">消费倍率 / 优惠</th>
+            <th style="text-align:center;width:140px">价格 / 消费倍率</th>
             <th style="text-align:center;width:160px">模型能力</th>
             <th style="text-align:center;width:110px">上下文窗口</th>
             <th style="text-align:center;width:100px">最大输出</th>
@@ -1881,6 +1888,11 @@ window.ACTIVE_GATEWAY_REALM = "intl";
 window.VIEW_REALM = "intl";
 window.REALM_FILTER = "all";
 window.MODELS_DATA = [];
+window.MODEL_CHANNEL = '';
+try {
+  const saved = localStorage.getItem('wb_model_channel');
+  if(['opencode', 'workbuddy-cn', 'workbuddy-intl'].includes(saved)) window.MODEL_CHANNEL = saved;
+} catch(e){}
 window.ACCOUNTS = [];
 
 function updateUI(){
@@ -2015,13 +2027,49 @@ async function initRealm(){
   window.updateUI();
 }
 
+const MODEL_CHANNEL_LABELS = {opencode: 'OpenCode', 'workbuddy-cn': 'WorkBuddy 国内', 'workbuddy-intl': 'WorkBuddy 国际'};
+let MODEL_LOAD_GENERATION = 0;
+
+function selectedModelsChannel(){
+  return MODEL_CHANNEL_LABELS[window.MODEL_CHANNEL] ? window.MODEL_CHANNEL
+    : (window.VIEW_REALM === 'cn' ? 'workbuddy-cn' : 'workbuddy-intl');
+}
+
+async function selectModelsChannel(channel){
+  if(!MODEL_CHANNEL_LABELS[channel]) return;
+  window.MODEL_CHANNEL = channel;
+  try { localStorage.setItem('wb_model_channel', channel); } catch(e){}
+  await loadModels();
+}
+
 async function loadModels(){
+  const channel = selectedModelsChannel();
+  const generation = ++MODEL_LOAD_GENERATION;
+  const select = document.getElementById('modelChannelSelect');
+  const title = document.getElementById('modelChannelTitle');
+  const status = document.getElementById('modelChannelStatus');
+  if(select) select.value = channel;
+  if(title) title.textContent = MODEL_CHANNEL_LABELS[channel] + '模型';
+  if(status) status.textContent = '正在加载模型目录…';
+  MODELS_DATA = [];
+  renderAvailableModels();
+  const table = document.querySelector('#modelsTable tbody');
+  if(table) table.innerHTML = '<tr><td colspan="6" class="empty">正在加载…</td></tr>';
   try{
-    const r = await getJSON('/v1/models?realm=' + encodeURIComponent(window.VIEW_REALM));
+    const r = await getJSON('/v1/models?channel=' + encodeURIComponent(channel));
+    if(generation !== MODEL_LOAD_GENERATION) return;
     MODELS_DATA = r.data || [];
     renderAvailableModels();
+    if(status) status.textContent = channel === 'opencode'
+      ? (r.stale ? '缓存目录（刷新暂不可用）' : '目录来源：' + (r.source || 'OpenCode'))
+        + (Number.isFinite(r.fetched_at) ? ' · 更新于 ' + new Date(r.fetched_at * 1000).toLocaleString() : '')
+        + ' · 推理接入整合中，目录价格不代表账号可用性。'
+      : '仅查看' + MODEL_CHANNEL_LABELS[channel] + '目录，网关默认出口与 Key 绑定保持原配置。';
   }catch(e){
-    console.error('loadModels error:', e);
+    if(generation !== MODEL_LOAD_GENERATION) return;
+    MODELS_DATA = [];
+    renderAvailableModels();
+    if(status) status.textContent = '读取模型目录失败：' + e.message;
   }
 }
 
@@ -2041,14 +2089,24 @@ function renderAvailableModels(){
     //    上游一旦调价面板会继续宣传免费；cn 的夜间注记在 credits 缺失时还会
     //    兜底显示写死的 0.79x。现在取不到就不显示数字。
     let credBadge = '-';
+    const isOpenCode = m.channel === 'opencode' || m.owned_by === 'opencode';
     const credText = (m.credits == null ? '' : String(m.credits)).trim();
     const c = credText.toLowerCase().replace('x', '');
-    if(c === '0.00' || c === '0'){
+    if(isOpenCode){
+      const pricing = m.pricing || {};
+      if(Number.isFinite(pricing.input) && Number.isFinite(pricing.output)){
+        credBadge = pricing.input === 0 && pricing.output === 0
+          ? '<span class="badge ok">免费（目录标价）</span>'
+          : '<span class="badge s">$' + esc(pricing.input) + ' / $' + esc(pricing.output) + '</span>'
+            + '<div style="font-size:10px;color:var(--dim);margin-top:4px">输入 / 输出 · 每百万 Token</div>';
+      }
+    } else if(c === '0.00' || c === '0'){
       credBadge = '<span class="badge ok" style="background:rgba(38,187,130,.15);color:#26bb82">限时免费 0.00x</span>';
     } else if(credText){
       // 统一成倍率写法：'x0.79' / '0.79' / 数字 0.5 都显示成 '0.79x' / '0.5x'。
       const raw = credText.replace(/^x/i, '') + 'x';
-      const night = ((m.id === 'glm-5.2' || m.id === 'deepseek-v4-pro') && window.VIEW_REALM === 'cn')
+      const modelRealm = m.channel === 'workbuddy-cn' ? 'cn' : m.channel === 'workbuddy-intl' ? 'intl' : window.VIEW_REALM;
+      const night = ((m.id === 'glm-5.2' || m.id === 'deepseek-v4-pro') && modelRealm === 'cn')
         ? ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span>' : '';
       credBadge = '<span class="badge s">' + esc(raw) + night + '</span>';
     }
@@ -2058,7 +2116,7 @@ function renderAvailableModels(){
     const hasVis = m.supports_vision || m.vision || m.multimodal || (m.input_modalities && m.input_modalities.includes('image'));
     if(hasVis){
       caps.push('<span class="badge ok" style="font-size:11px">视觉</span>');
-    } else {
+    } else if(!isOpenCode || (m.input_modalities && m.input_modalities.includes('text'))) {
       caps.push('<span class="badge" style="color:var(--dim);font-size:11px">文本</span>');
     }
     const hasTool = m.supports_tool_calls || (m.capabilities && m.capabilities.tool_calls);
@@ -2069,7 +2127,7 @@ function renderAvailableModels(){
     if(hasReasoning){
       caps.push('<span class="badge" style="background:rgba(124,58,237,.12);color:var(--think);border-color:rgba(124,58,237,.3);font-size:11px;font-weight:600">推理</span>');
     }
-    const capHtml = caps.join(' ');
+    const capHtml = caps.length ? caps.join(' ') : '<span style="color:var(--dim)">—</span>';
 
     const fmtK = v => {
       if(!v) return '-';
@@ -2087,7 +2145,7 @@ function renderAvailableModels(){
 
     // 4. 最大输出（M5 E2：有实测钳制时标注「钳制 N×」，数据来自 output_probes.json）
     let maxOut = m.max_output_tokens ? ('<b>' + fmtK(m.max_output_tokens) + '</b>') : '-';
-    const clamp = Number(m.output_clamp || 0);
+    const clamp = isOpenCode ? 0 : Number(m.output_clamp || 0);
     if(clamp > 0){
       const claimed = Number(m.max_output_tokens || 0);
       const tip = '声称 ' + (claimed ? fmtK(claimed) : '?') + ' · 实测 ' + fmtK(clamp);
@@ -2102,7 +2160,7 @@ function renderAvailableModels(){
       }else{
         maxOut = '<b>' + fmtK(clamp) + '</b> <span style="color:var(--accent2)">✓</span>';
       }
-    } else if(m.max_output_tokens){
+    } else if(m.max_output_tokens && !isOpenCode){
       maxOut += '<div style="font-size:11px;color:var(--dim);margin-top:2px" title="尚未运行 scripts/probe_max_tokens.py，只有厂商声称值">未探测</div>';
     }
 
@@ -2124,7 +2182,7 @@ function renderAvailableModels(){
 
     return '<tr>'
       + '<td style="text-align:left" class="mono" data-label="模型 ID"><b>' + esc(m.id) + '</b></td>'
-      + '<td style="text-align:center" data-label="消费倍率">' + credBadge + '</td>'
+      + '<td style="text-align:center" data-label="' + (isOpenCode ? '价格 / 百万Token' : '消费倍率') + '">' + credBadge + '</td>'
       + '<td style="text-align:center" data-label="能力">' + capHtml + '</td>'
       + '<td style="text-align:center" data-label="上下文">' + ctx + '</td>'
       + '<td style="text-align:center" data-label="最大输出">' + maxOut + '</td>'
@@ -6651,6 +6709,8 @@ const ACTION_HANDLERS = {
   submitPanelLoginOnEnter: (el, ev) => { if(ev.key === 'Enter') submitPanelLogin(); },
   submitPanelLogin: () => submitPanelLogin(),
   switchViewRealm: (el, ev, arg) => switchViewRealm(arg),
+  selectModelsChannel: (el) => selectModelsChannel(el.value),
+  loadModels: () => loadModels(),
   toggleActiveGatewayRealm: () => toggleActiveGatewayRealm(),
   triggerSchedulerNow: (el) => triggerSchedulerNow(el),
   toggleScheduler: (el) => toggleScheduler(el),
