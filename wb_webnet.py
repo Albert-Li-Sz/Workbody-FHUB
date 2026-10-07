@@ -4,7 +4,6 @@ Host headers and TLS SNI retain the original hostname. Proxy requests also use
 numeric destination addresses, so a proxy cannot resolve them to an internal
 host. The configured proxy itself is an operator-controlled trusted endpoint.
 """
-import base64
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import http.client
 import ipaddress
@@ -17,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import os
+import wb_forward_proxy
 
 _dns_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="web-dns")
 _dns_slots = threading.BoundedSemaphore(4)
@@ -139,24 +139,26 @@ def open_response(url, deadline, headers):
     last_error = None
     for address in addresses:
         if proxy_url:
-            proxy = urllib.parse.urlsplit(proxy_url)
-            if proxy.scheme not in ("http", "https") or not proxy.hostname:
-                raise ValueError("WB_WEB_PROXY must be an http(s) proxy URL")
+            explicit = bool(os.environ.get("WB_WEB_PROXY", "").strip())
+            proxy = wb_forward_proxy.parse(proxy_url,
+                (os.environ.get("WB_WEB_PROXY_USERNAME") or None) if explicit else None,
+                (os.environ.get("WB_WEB_PROXY_PASSWORD") or None) if explicit else None)
             # stdlib has no TLS-in-TLS socket. Fail explicitly rather than
             # downgrade an HTTPS proxy or silently send unvalidated hostnames.
             if parsed.scheme == "https" and proxy.scheme == "https":
                 raise ValueError("HTTPS destinations require an http:// CONNECT proxy")
-            credentials = {}
-            if proxy.username is not None:
-                auth = urllib.parse.unquote(proxy.username) + ":" + urllib.parse.unquote(proxy.password or "")
-                credentials["Proxy-Authorization"] = "Basic " + base64.b64encode(auth.encode()).decode()
-            if parsed.scheme == "https":
-                conn = _TunnelHTTPS(proxy.hostname, proxy.port or 80, timeout=remaining(deadline),
+            credentials = proxy.auth_headers()
+            if proxy.scheme.startswith("socks"):
+                conn = wb_forward_proxy.socks_connection(host, port, proxy,
+                    secure=parsed.scheme == "https", timeout=remaining(deadline),
+                    context=context, target_host=address)
+            elif parsed.scheme == "https":
+                conn = _TunnelHTTPS(proxy.host, proxy.port, timeout=remaining(deadline),
                                     context=context, origin_host=host)
                 conn.set_tunnel(address, port, headers=dict(credentials, Host=_authority(address, port)))
             else:
                 kind = http.client.HTTPSConnection if proxy.scheme == "https" else http.client.HTTPConnection
-                conn = kind(proxy.hostname, proxy.port or (443 if proxy.scheme == "https" else 80),
+                conn = kind(proxy.host, proxy.port,
                             timeout=remaining(deadline))
                 request_headers.update(credentials)
                 path = urllib.parse.urlunsplit((parsed.scheme, _authority(address, port),

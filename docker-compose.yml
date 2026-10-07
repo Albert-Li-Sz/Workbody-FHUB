@@ -1,7 +1,7 @@
 name: workbody-fhub
 services:
   workbody-fhub:
-    image: ${WORKBODY_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub:1.0.1}
+    image: ${WORKBODY_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub:1.0.2}
     restart: unless-stopped
     user: "${PUID:-0}:${PGID:-0}"
     ports:
@@ -12,6 +12,8 @@ services:
       TZ: Asia/Shanghai
       PANEL_PASSWORD: ${PANEL_PASSWORD:-}
       WB_WEB_PROXY: ${WB_WEB_PROXY:-}
+      WB_WEB_PROXY_USERNAME: ${WB_WEB_PROXY_USERNAME:-}
+      WB_WEB_PROXY_PASSWORD: ${WB_WEB_PROXY_PASSWORD:-}
     volumes:
       - ./accounts:/app/accounts
       - ./usage:/app/usage

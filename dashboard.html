@@ -822,7 +822,19 @@ a:hover{text-decoration:underline}
       </div>
     </div>
   <section>
-    <h2>WorkBuddy 账号<em id="acctCount"></em></h2>
+    <div class="toolbar" style="justify-content:space-between">
+      <h2 style="margin:0">WorkBuddy 账号<em id="acctCount"></em></h2>
+      <div style="display:flex;gap:4px;align-items:center" role="group" aria-label="账号池区域">
+        <button class="range-btn active" type="button" id="accountRealmIntl" aria-pressed="true" data-action="switchViewRealm" data-on="click" data-arg="intl">国际版</button>
+        <button class="range-btn" type="button" id="accountRealmCn" aria-pressed="false" data-action="switchViewRealm" data-on="click" data-arg="cn">国内版</button>
+      </div>
+    </div>
+    <div class="cards" style="margin:14px 0" aria-live="polite">
+      <div class="card"><div class="k">全部账号剩余积分</div><div class="v" id="accountBalanceTotal">—</div></div>
+      <div class="card"><div class="k">国际版剩余积分</div><div class="v" id="accountBalanceIntl">—</div></div>
+      <div class="card"><div class="k">国内版剩余积分</div><div class="v" id="accountBalanceCn">—</div></div>
+    </div>
+    <div id="accountBalanceStatus" class="section-note" style="margin-bottom:12px">查询所有账号余额后显示积分汇总。</div>
     <div class="toolbar">
     <button  data-action="openLoginModal" data-on="click">+ 添加 WorkBuddy 账号 (OAuth)</button>
     <!-- 桌面客户端自 2026-09-24 起把 token 改成加密存储（$wbEncrypted 信封）。
@@ -831,9 +843,10 @@ a:hover{text-decoration:underline}
     <button class="sec"  data-action="exportAccounts" data-on="click">导出账号</button>
     <button class="sec"  data-action="openImport" data-on="click">导入账号</button>
     <button class="sec"  data-action="fetchCredits" data-on="click">刷新积分</button>
+    <button class="sec" id="btnQueryBalances" data-action="queryBalances" data-on="click">查询全部余额</button>
     <button class="sec"  data-action="autoAssignSlots" data-on="click" title="把尚未绑定出口的已启用账号依次分配到已启用的代理槽；已有绑定的账号不受影响">分配代理出口给未绑定账号</button>
-    <button class="sec"  data-action="setAll" data-on="click" data-arg="1">全部启用</button>
-    <button class="sec"  data-action="setAll" data-on="click" data-arg="0">全部停用</button>
+    <button class="sec"  data-action="setAll" data-on="click" data-arg="1">启用当前区域全部账号</button>
+    <button class="sec"  data-action="setAll" data-on="click" data-arg="0">停用当前区域全部账号</button>
 
   </div>
     <div id="accounts"></div>
@@ -1202,7 +1215,7 @@ a:hover{text-decoration:underline}
         <div>
           <h2 style="margin:0">代理槽 <em id="slotState"></em></h2>
           <div style="font-size:12px;color:var(--dim);margin-top:4px">
-            每个账号固定绑定一个出口代理槽。槽位地址变化时绑定账号自动跟随；禁用或删除后回退直连。
+            支持 HTTP、SOCKS5／SOCKS5h 及用户名密码认证。每个账号固定绑定一个出口代理槽，修改后绑定账号自动跟随。
           </div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -1902,6 +1915,16 @@ window.ACCOUNTS = [];
 
 function updateUI(){
   const isIntlView = (window.VIEW_REALM === "intl");
+  const accounts = window.ACCOUNTS || [];
+  for(const realm of ['intl', 'cn']){
+    const button = document.getElementById(realm === 'cn' ? 'accountRealmCn' : 'accountRealmIntl');
+    if(button){
+      const selected = window.VIEW_REALM === realm;
+      button.className = 'range-btn' + (selected ? ' active' : '');
+      button.setAttribute('aria-pressed', String(selected));
+      button.textContent = (realm === 'cn' ? '国内版' : '国际版') + ' (' + accounts.filter(a => (a.realm || 'intl') === realm).length + ')';
+    }
+  }
   const tIntl = document.getElementById("tabIntl");
   const tCn = document.getElementById("tabCn");
   if(tIntl) tIntl.className = "realm-card" + (isIntlView ? " active" : "");
@@ -1982,10 +2005,17 @@ function updateUI(){
 };
 
 async function switchViewRealm(r){
+  if(!['cn', 'intl'].includes(r)) return;
   if(window.VIEW_REALM === r) return;
   window.VIEW_REALM = r;
   RECENT_PAGE = 1;
   window.updateUI();
+  renderAccounts();
+  try{
+    const url = new URL(window.location.href);
+    url.searchParams.set('view', r);
+    history.replaceState(null, '', url.toString());
+  }catch(e){}
   // 并行发起，不要逐个 await：国内版的成长任务一次要约 2 秒（上游两个接口），
   // 串行排队时后面那些毫秒级的用量接口全被它堵着，切过去看着就是"过几秒才刷新"。
   await Promise.all([loadAccounts(), loadModels(), loadGrowthTasks(),
@@ -3043,7 +3073,7 @@ function accountRow(a){
 function renderAccounts(){
   const box = document.getElementById('accounts');
   const currentView = (window.VIEW_REALM || "intl");
-  let list = (window.ACCOUNTS || []).filter(a => !a.realm || a.realm === currentView);
+  let list = (window.ACCOUNTS || []).filter(a => (a.realm || 'intl') === currentView);
   // Enabled accounts first; disabled ones sink to the bottom. Within each
   // group keep the server order stable so the table does not jump around.
   list = list.map((a, i) => [a, i])
@@ -3078,13 +3108,14 @@ function renderAccounts(){
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
     + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额渠道。</span></div>'
-    + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个</span></div>';
+    + '<div class="legend"><span>免费模型在当前区域内公平轮询；收费模型沿用选号与会话粘性设置。上游拒绝时自动切换可用账号。</span></div>';
 }
 
 async function loadAccounts(){
   try{
     const [acct, byAcct] = await Promise.all([getJSON('/accounts?realm=all'), getJSON('/usage/by-account')]);
     window.ACCOUNTS = acct.accounts || [];
+    if(acct.balance) renderAccountBalance(acct.balance);
     USAGE_BY_ACCOUNT = {};
     (byAcct.accounts || []).forEach(a => { USAGE_BY_ACCOUNT[a.account] = a; });
     await loadProxySlots();
@@ -3098,6 +3129,37 @@ async function loadAccounts(){
       }).catch(()=>{});
     }
   }catch(e){ toast('账号加载失败: ' + e.message); }
+}
+
+function renderAccountBalance(balance){
+  if(!balance) return;
+  const number = value => Number(value).toLocaleString('zh-CN', {maximumFractionDigits:2});
+  for(const [id, value, known, count] of [
+    ['accountBalanceTotal', balance.total_remain, balance.known_count, balance.account_count],
+    ['accountBalanceIntl', (balance.by_realm.intl || {}).total_remain, (balance.by_realm.intl || {}).known_count, (balance.by_realm.intl || {}).account_count],
+    ['accountBalanceCn', (balance.by_realm.cn || {}).total_remain, (balance.by_realm.cn || {}).known_count, (balance.by_realm.cn || {}).account_count],
+  ]){
+    const el = document.getElementById(id);
+    if(el) el.textContent = known || count === 0 ? number(value || 0) : '—';
+  }
+  const status = document.getElementById('accountBalanceStatus');
+  if(status){
+    const parts = [(balance.refreshed ? '已查询' : '已缓存') + ' ' + balance.known_count + '/' + balance.account_count + ' 个账号（含停用账号）'];
+    if(balance.unknown_count) parts.push(balance.unknown_count + ' 个余额未知，合计仅含已知余额');
+    if(balance.refresh_failed) parts.push(balance.refresh_failed + ' 个查询失败，保留其已有缓存余额');
+    status.textContent = parts.join(' · ');
+  }
+}
+
+async function queryBalances(btn){
+  if(btn){ btn.disabled = true; btn.textContent = '查询中...'; }
+  try{
+    const balance = await postJSON('/accounts/balance', {});
+    await loadAccounts();
+    renderAccountBalance(balance);
+    toast(balance.complete ? '全部账号余额查询完成' : '余额查询完成，部分账号余额未知或查询失败', balance.complete ? 'ok' : 'warn');
+  }catch(e){ toast('余额查询失败: ' + e.message, 'bad'); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = '查询全部余额'; } }
 }
 
 async function fetchCredits(btn){
@@ -3231,10 +3293,11 @@ async function refreshAccounts(){
 }
 async function setAll(enable, btn){
   if(btn) btn.disabled = true;
+  const realm = window.VIEW_REALM || 'intl';
   try{
-    await postJSON('/accounts/set-all', {enabled: enable});
+    await postJSON('/accounts/set-all', {enabled: enable, realm: realm});
     await loadAccounts();
-    toast(enable ? '已全部启用所有账号' : '已全部停用所有账号', 'ok');
+    toast('已' + (enable ? '启用' : '停用') + (realm === 'cn' ? '国内版' : '国际版') + '全部账号', 'ok');
   }catch(e){
     toast('批量操作失败: ' + e.message, 'bad');
   }finally{
@@ -3286,7 +3349,7 @@ async function downloadExport(query, fallbackLabel){
 async function exportAccounts(btn){
   if(btn){ btn.disabled = true; btn.textContent = '导出中...'; }
   try{
-    const r = await downloadExport('', '');
+    const r = await downloadExport('?realm=' + encodeURIComponent(window.VIEW_REALM || 'intl'), '');
     toast('已导出 ' + r.count + ' 个账号 → ' + r.name);
   }catch(e){
     toast('导出失败: ' + e.message, 'err');
@@ -4447,6 +4510,7 @@ const ADVANCED_SETTING_GROUPS = [
     desc: '加权选号、软冷却、熔断、降权、在途租约、成本探索、积分保底与粘性路由。',
     fields: [
       {key:'weighted_pick', label:'加权选号', type:'bool', hint:'按积分比例与闲置补偿加权抽取账号，关闭则恢复轮询。'},
+      {key:'free_fair_pick', label:'免费模型公平调度', type:'bool', hint:'国内、国际分别按免费模型轮询可用账号；免费请求不使用会话粘性，收费模型保持原选号策略。'},
       {key:'soft_rate', label:'软冷却基数（秒）', type:'number', min:0, step:'any', hint:'遇到上游软限流后的基础冷却秒数。'},
       {key:'soft_rate_max', label:'软冷却上限（秒）', type:'number', min:0, step:'any', hint:'指数退避的封顶秒数。'},
       {key:'breaker_threshold', label:'熔断阈值', type:'int', min:1, hint:'连续失败达到此数后进入熔断。'},
@@ -5473,6 +5537,7 @@ function autoSlotName(c){
 function slotPayload(){
   return PROXY_SLOTS.map(s => ({
     id: s.id || '', name: s.name || '', url: (s.url || '').trim(),
+    username: s.username || '', password: s.password || '',
     enabled: s.enabled !== false,
     ip: s.ip || '', country: s.country || '', country_code: s.country_code || '',
     ip_type: s.ip_type || '', isp: s.isp || '', asn: s.asn || '',
@@ -5513,7 +5578,11 @@ function renderProxySlots(){
     + PROXY_SLOTS.map((s, i) =>
         '<tr>'
         + '<td data-label="名称"><input value="' + esc(s.name || '') + '"  data-action="onProxySlotNameInput" data-on="input" data-arg="' + i + '" class="slot-input"></td>'
-        + '<td data-label="代理地址"><input value="' + esc(s.url || '') + '"  data-action="onProxySlotUrlInput" data-on="input" data-arg="' + i + '" class="slot-input mono"></td>'
+        + '<td data-label="代理地址"><input value="' + esc(s.url || '') + '" placeholder="http://host:port 或 socks5h://host:port" aria-label="代理地址" data-action="onProxySlotUrlInput" data-on="input" data-arg="' + i + '" class="slot-input mono">'
+        + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
+        + '<input value="' + esc(s.username || '') + '" placeholder="用户名（可选）" aria-label="代理用户名" autocomplete="off" data-action="onProxySlotUsernameInput" data-on="input" data-arg="' + i + '" class="slot-input" style="flex:1;min-width:90px;width:90px">'
+        + '<input type="password" value="' + esc(s.password || '') + '" placeholder="密码（可选）" aria-label="代理密码" autocomplete="new-password" data-action="onProxySlotPasswordInput" data-on="input" data-arg="' + i + '" class="slot-input" style="flex:1;min-width:90px;width:90px">'
+        + '</div></td>'
         + '<td data-label="出口">' + slotExitHtml(s) + '</td>'
         + '<td style="text-align:center" data-label="启用"><input type="checkbox" ' + (s.enabled === false ? '' : 'checked')
         +   '  data-action="onProxySlotEnabledChange" data-on="change" data-arg="' + i + '"></td>'
@@ -5656,7 +5725,8 @@ function importDiscovered(){
 async function autoAssignSlots(){
   // Only fills in accounts that have no exit yet: an account that is already
   // bound keeps its slot, so this is not a rebalancer.
-  const unbound = (window.ACCOUNTS || []).filter(a => a.enabled && !a.proxySlot);
+  const realm = window.VIEW_REALM || 'intl';
+  const unbound = (window.ACCOUNTS || []).filter(a => (a.realm || 'intl') === realm && a.enabled && !a.proxySlot);
   if(!unbound.length){ toast('所有已启用账号都已绑定代理出口', 'ok'); return; }
   const slots = PROXY_SLOTS.filter(s => s.enabled !== false);
   if(!slots.length){ toast('没有启用的代理槽，请先在「设置 → 代理槽」添加并保存', 'warn'); return; }
@@ -6248,7 +6318,7 @@ function renderPerfMatrix(usage, perf){
         const e = mpAcct || mpRealm || bmPerf[m.id] || {};
         sumErr += e.errors || 0;
         if(e.ttft_ms && e.ttft_ms.samples){ ttftW += e.ttft_ms.avg * e.ttft_ms.samples; ttftN += e.ttft_ms.samples; }
-        if(e.tokens_per_sec && e.tokens_per_sec.samples){ tpsW += e.tokens_per_sec.avg * e.tokens_per_sec.samples; tpsN += e.tokens_per_sec.samples; }
+        if(e.tokens_per_sec && e.tokens_per_sec.generation_ms_total){ tpsW += e.tokens_per_sec.output_tokens * 1000; tpsN += e.tokens_per_sec.generation_ms_total; }
         if(e.wall_ms && e.wall_ms.samples){ wallW += e.wall_ms.avg * e.wall_ms.samples; wallN += e.wall_ms.samples; }
         if(e.cache_hit_pct && e.cache_hit_pct.samples){ cacheW += e.cache_hit_pct.avg * e.cache_hit_pct.samples; cacheN += e.cache_hit_pct.samples; }
       });
@@ -6523,7 +6593,10 @@ function renderAnalytics(data){
   // KPI 3: 网关平均生成速度
   const elAvgSpeed = document.getElementById('kpiAvgSpeed');
   const elAvgLatency = document.getElementById('kpiAvgLatency');
-  if(elAvgSpeed) elAvgSpeed.innerHTML = (currentSum.speed_avg ? currentSum.speed_avg.toFixed(1) : '0.0') + ' <span style="font-size:12px;font-weight:400;color:var(--dim)">tok/s</span>';
+  if(elAvgSpeed){
+    elAvgSpeed.innerHTML = (Number.isFinite(currentSum.speed_avg) ? currentSum.speed_avg.toFixed(1) : '—') + ' <span style="font-size:12px;font-weight:400;color:var(--dim)">tok/s</span>';
+    elAvgSpeed.title = '有效请求的总输出 Token ÷ 总生成时间；生成时间从首个内容帧到末个内容帧，含思考和工具参数，排除失败、取消与无法测速的请求。样本数：' + (currentSum.speed_n || 0);
+  }
   if(elAvgLatency) elAvgLatency.textContent = '平均首字延迟 ' + (currentSum.ttft_ms_avg ? fmt(currentSum.ttft_ms_avg) + ' ms' : '—') + ' · 耗时 ' + (currentSum.elapsed_ms_avg ? (currentSum.elapsed_ms_avg / 1000).toFixed(2) + ' s' : '—');
 
   // KPI 4: 缓存命中率
@@ -6729,6 +6802,7 @@ const ACTION_HANDLERS = {
   exportAccounts: (el) => exportAccounts(el),
   openImport: () => openImport(),
   fetchCredits: (el) => fetchCredits(el),
+  queryBalances: (el) => queryBalances(el),
   autoAssignSlots: () => autoAssignSlots(),
   setAll: (el, ev, arg) => setAll(arg === '1', el),
   setRecentLimit: (el, ev, arg) => setRecentLimit(Number(arg)),
@@ -6794,6 +6868,8 @@ const ACTION_HANDLERS = {
   setAccountSlot: (el) => setAccountSlot(el.dataset.uid, el.value, el),
   onProxySlotNameInput: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].name = el.value; markSlotsDirty(); },
   onProxySlotUrlInput: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].url = el.value; markSlotsDirty(); },
+  onProxySlotUsernameInput: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].username = el.value; markSlotsDirty(); },
+  onProxySlotPasswordInput: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].password = el.value; markSlotsDirty(); },
   onProxySlotEnabledChange: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].enabled = el.checked; markSlotsDirty(); },
   testProxySlot: (el, ev, arg) => testProxySlot(Number(arg), el),
   removeProxySlot: (el, ev, arg) => removeProxySlot(Number(arg)),

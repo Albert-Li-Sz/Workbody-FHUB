@@ -15,6 +15,7 @@ import wb_pool
 
 
 import wb_atrest
+import wb_forward_proxy
 import wb_identity
 import wb_redisstore
 import wb_settings
@@ -116,9 +117,7 @@ def opener_for_proxy(proxy):
     with _OPENER_LOCK:
         opener = _OPENER_CACHE.get(proxy)
         if opener is None:
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-            )
+            opener = wb_forward_proxy.build_opener(proxy)
             _OPENER_CACHE[proxy] = opener
         return opener
 
@@ -498,7 +497,7 @@ class Account(object):
             "enabled": bool(self.enabled),
             "source": self.source,
             "proxySlot": self.proxy_slot,
-            "proxy": self.proxy,
+            "proxy": wb_forward_proxy.redact_url(self.proxy),
             "expiresAt": exp,
             "expiresIn": _human_delta(exp - time.time()) if exp else None,
             "hasRefreshToken": bool(self.refresh_token),
@@ -1634,6 +1633,7 @@ class AccountPool(object):
         self.logins = {}
         self._lock = threading.RLock()
         self._cursor = 0
+        self._free_cursors = {}
         self.pool_cfg = wb_pool.normalize(None)
         self.affinity = SessionAffinity()
         # Panel-parity cost ledger: (uid, model) -> {tier, at, credit}.
@@ -1816,7 +1816,7 @@ class AccountPool(object):
             for account in self.accounts:
                 slot = by_id.get(account.proxy_slot)
                 if slot:
-                    account.proxy = slot["url"]
+                    account.proxy = wb_forward_proxy.slot_url(slot)
                 else:
                     account.proxy = account.proxy_legacy
 
@@ -2099,7 +2099,14 @@ class AccountPool(object):
 
     def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None):
         exclude = exclude or set()
-        if session_key:
+        now = time.time()
+        with self._lock:
+            fair_free = self.pool_cfg.get("free_fair_pick", True) and any(
+                (not realm or a.realm == realm) and self._model_free_for(a, model, now)
+                for a in self.accounts)
+        # Free traffic should not remain pinned for hours to one account.
+        # Paid requests retain affinity and its prompt-cache benefit.
+        if session_key and not fair_free:
             bound_uid = self.affinity.get(session_key)
             if bound_uid and bound_uid not in exclude:
                 account = self.get(bound_uid)
@@ -2107,9 +2114,28 @@ class AccountPool(object):
                     return account
                 self.affinity.unbind(session_key)
         account = self.pick(realm=realm, exclude=exclude, model=model)
-        if account and session_key:
+        if account and session_key and not fair_free:
             self.affinity.bind(session_key, account.uid)
         return account
+
+    def _model_free_for(self, account, model, now):
+        if not model:
+            return False
+        tier = self._cost_tier(account, model, self.pool_cfg, now)
+        return tier == 0 or (tier == 1 and account.model_is_free(model))
+
+    def _pick_fair_free(self, candidates, realm, model):
+        # Advance under the pool lock, so concurrent arrivals do not share a
+        # cursor position. A UID cursor survives changes in the eligible set.
+        with self._lock:
+            key = (realm or "all", model)
+            last_uid = self._free_cursors.get(key)
+            positions = {a.uid: i for i, a in enumerate(self.accounts)}
+            last = positions.get(last_uid, -1)
+            ordered = sorted(candidates, key=lambda a: positions.get(a.uid, 0))
+            account = next((a for a in ordered if positions.get(a.uid, 0) > last), ordered[0])
+            self._free_cursors[key] = account.uid
+            return account
 
     def pick(self, realm=None, exclude=None, model=None):
         """Pick the next account for model.
@@ -2119,6 +2145,8 @@ class AccountPool(object):
         from, and a candidate used within the last 100ms is skipped so a burst
         cannot stampede one credential. weighted_pick=false restores the
         legacy cursor round-robin for anyone who wants the old order.
+        Free catalogue models use a separate realm/model cursor by default;
+        the cost ledger must not starve accounts that have not been tried yet.
         """
         exclude = exclude or set()
         now = time.time()
@@ -2133,12 +2161,29 @@ class AccountPool(object):
             candidates = [a for a in snapshot if a.ready(model=model)]
             if not candidates:
                 return None
+            catalogue_free = [a for a in candidates
+                              if a.model_is_free(model) and self._model_free_for(a, model, now)]
+            if cfg.get("free_fair_pick", True) and catalogue_free:
+                account = self._pick_fair_free(catalogue_free, realm, model)
+                account.last_used_at = now
+                return account
             candidates = self._apply_cost_layer(candidates, model, cfg, now)
             candidates = self._apply_credit_floor(candidates, model, cfg, now)
             if not candidates:
                 return None
-            account = wb_pool.choose(candidates, cfg, now=now)
+            free_candidates = [a for a in candidates if self._model_free_for(a, model, now)]
+            if cfg.get("free_fair_pick", True) and free_candidates:
+                account = self._pick_fair_free(free_candidates, realm, model)
+            else:
+                account = wb_pool.choose(candidates, cfg, now=now)
         else:
+            if cfg.get("free_fair_pick", True):
+                free_candidates = [a for a in snapshot
+                                   if self._model_free_for(a, model, now) and a.ready(model=model)]
+                if free_candidates:
+                    account = self._pick_fair_free(free_candidates, realm, model)
+                    account.last_used_at = now
+                    return account
             total = len(snapshot)
             account = None
             for offset in range(total):

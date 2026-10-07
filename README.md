@@ -1,7 +1,7 @@
 # Workbody-FHUB — WorkBuddy 国内与国际多账号网关
 
 <p align="center">
-  <a href="https://github.com/Albert-Li-Sz/Workbody-FHUB/releases"><img src="https://img.shields.io/badge/Workbody_FHUB-v1.0.1-2496ED?style=flat-square" alt="Workbody-FHUB 1.0.1"></a>
+  <a href="https://github.com/Albert-Li-Sz/Workbody-FHUB/releases"><img src="https://img.shields.io/badge/Workbody_FHUB-v1.0.2-2496ED?style=flat-square" alt="Workbody-FHUB 1.0.2"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Vibe_Coding-100%25-ff69b4?style=flat-square" alt="Vibe Coding">
 </p>
 
-Workbody-FHUB 是 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 的衍生项目，当前版本 **1.0.1**，基于上游 **1.6.13**。本衍生项目沿用目标仓库的 [Apache-2.0 许可证](LICENSE)；原项目的 Vibe Coding 声明、致谢、贡献者、免责声明和 [MIT 许可证原文](LICENSE.upstream)均保留。本分支负责自己的安全修复、网络搜索和镜像构建。
+Workbody-FHUB 是 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 的衍生项目，当前版本 **1.0.2**，基于上游 **1.6.13**。本衍生项目沿用目标仓库的 [Apache-2.0 许可证](LICENSE)；原项目的 Vibe Coding 声明、致谢、贡献者、免责声明和 [MIT 许可证原文](LICENSE.upstream)均保留。本分支负责自己的安全修复、网络搜索和镜像构建。
 
 把腾讯 **[www.workbuddy.ai](https://www.workbuddy.ai)**（国际版）与 **[codebuddy.cn](https://www.codebuddy.cn)**（国内版）的原生服务封装成标准 OpenAI 兼容接口（Chat Completions 与 Responses API），并补齐多账号调度与运维能力：
 
@@ -98,7 +98,7 @@ Unix 系统上的账号目录权限为 `0700`，凭证和 Key 设置文件权限
 
 ### 5. Workbody-FHUB Docker 镜像
 
-云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.1`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
+云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.2`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
 
 ```bash
 docker compose pull
@@ -116,25 +116,29 @@ docker compose up -d
 
 容器支持 `PUID` / `PGID`（默认 `0:0`；使用普通 UID 时请先为该 UID 准备可写的 `accounts`、`usage` 目录），并带 `/health` 健康检查。代码中的 WorkBuddy 账号代理槽继续路由模型，`WB_WEB_PROXY` 单独路由网络工具。
 
+在「设置 → 代理槽位」填写 `http://host:port`、`socks5://host:port` 或 `socks5h://host:port`，需要认证时单独填写用户名和密码，再保存并绑定账号。`socks5` 在网关解析目标域名，`socks5h` 交给代理解析；旧的 `http://user:password@host:port` 格式也可导入，保存时会拆成独立字段。同一地址可配置多个使用不同凭据的槽位。账号 API、积分刷新、代理测试和网页打卡通道均使用所绑定槽位。
+
+搜索代理可在 `.env` 中分别设置 `WB_WEB_PROXY`、`WB_WEB_PROXY_USERNAME`、`WB_WEB_PROXY_PASSWORD`，修改后运行 `docker compose up -d`。用户名、密码留空时使用 URL 中的凭据。搜索即使通过 SOCKS5h，也会连接本机校验后的公网 IP，保留原始 Host 与 TLS 域名验证。
+
 维护者可使用 `Dockerfile` 独立构建及保存镜像。默认底镜采用 Docker 官方 Python 3.11 镜像的 ECR 来源，并固定内容摘要；`docker build --build-arg PYTHON_IMAGE=可信底镜` 可覆盖来源。构建上下文排除账号、日志、`.env*` 和凭据文件。[Docker 官方镜像的 ECR 来源说明](https://aws.amazon.com/blogs/containers/docker-official-images-now-available-on-amazon-elastic-container-registry-public/)。
 
 ```bash
 # 独立构建及保存，便于向其他服务器导入
-docker build -t workbody-fhub:1.0.1 .
-docker save workbody-fhub:1.0.1 | gzip > workbody-fhub-1.0.1.tar.gz
-# 目标主机：docker load < workbody-fhub-1.0.1.tar.gz
+docker build -t workbody-fhub:1.0.2 .
+docker save workbody-fhub:1.0.2 | gzip > workbody-fhub-1.0.2.tar.gz
+# 目标主机：docker load < workbody-fhub-1.0.2.tar.gz
 ```
 
 构建双架构镜像并验证两种架构的启动、鉴权和关键回归：
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t workbody-fhub:1.0.1 --load .
-python3 scripts/verify_image.py workbody-fhub:1.0.1 --non-root
+docker buildx build --platform linux/amd64,linux/arm64 -t workbody-fhub:1.0.2 --load .
+python3 scripts/verify_image.py workbody-fhub:1.0.2 --non-root
 ```
 
 验证脚本使用隔离的临时数据卷与 `--network none`，结束后清理测试容器。审计发现、修复证据和剩余验证边界见[修复报告](docs/project-repair-2026-10-07.md)。
 
-发布流程先校验统一版本与测试，再构建并推送两种架构的固定版本镜像；成品通过启动、鉴权、关键回归及普通 UID 验证后，再更新 `latest`。配置 Docker Hub 凭据时也发布同名镜像。验证已有云镜像可增加 `--revision v1.0.1 --pull`，按指定 release 比对源码。镜像包含 release 源码及两份许可证。
+发布流程先校验统一版本与测试，再构建并推送两种架构的固定版本镜像；成品通过启动、鉴权、关键回归及普通 UID 验证后，再更新 `latest`。配置 Docker Hub 凭据时也发布同名镜像。验证已有云镜像可增加 `--revision v1.0.2 --pull`，按指定 release 比对源码。镜像包含 release 源码及两份许可证。
 
 ### 6. 测试
 
@@ -145,7 +149,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 84 个套件：69 个 Python + 15 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。每个套件默认 180 秒超时，可用 `WB_TEST_TIMEOUT_SECONDS` 调整。
+- 89 个套件：73 个 Python + 16 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。每个套件默认 180 秒超时，可用 `WB_TEST_TIMEOUT_SECONDS` 调整。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里；fixtures／截图默认放系统 temp，可用 `WB_MOBILE_FIXTURES` / `WB_MOBILE_SHOTS` 覆盖，Windows 可直接运行。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12。推送 `v*` tag 时额外断言 **tag == 源码版本**（以 `wb_version.VERSION` 为准，同时检查 API、Dockerfile、Compose 与 README；`-ci` 演练 tag 豁免 tag 比较）。
 
@@ -229,7 +233,7 @@ python tests/run_all.py realm      # 只跑名字里含 realm 的
 - **默认关闭**：工具声明原样透传，客户端自己声明的搜索工具照常拿到调用（v1.5.3 之后的既有行为，升级不受影响）；
 - 打开后网关会主动出网抓取模型给出的 URL（每次 DNS 解析与重定向都检查公网地址，并固定连接到校验后的 IP），且每轮代跑都会多跑一次上游、多消耗该账号额度；国内网络下 DuckDuckGo 可能连不上，那时模型拿到的是错误文本；
 - 搜索先访问 HTML，网络/页面异常时最多回退一次到 Lite；真正无结果不重试，HTTP 429 直接报限流，验证码页不会被当作无结果。成功结果缓存 120 秒、错误冷却 5 秒，最多 128 个查询，同一查询的并发请求共用一次检索；
-- 搜索与抓取共用 20 秒请求预算，响应及 gzip 解压后内容均限制为 2 MiB；可用 `WB_WEB_PROXY=http://proxy-host:port` 单独指定网络工具出口，未设置时沿用进程的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`。账号的代理槽只控制模型请求，不自动控制搜索；
+- 搜索与抓取共用 20 秒请求预算，响应及 gzip 解压后内容均限制为 2 MiB；可用 `WB_WEB_PROXY=http://proxy-host:port` 或 `socks5h://proxy-host:port` 单独指定网络工具出口，并通过 `WB_WEB_PROXY_USERNAME` / `WB_WEB_PROXY_PASSWORD` 设置凭据，未设置代理时沿用进程的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`。账号代理槽不自动控制搜索；
 - 代跑接在 Responses 的流式/非流式路径，保留多轮工具历史、调用 ID，并按每轮实际使用的账号记录用量。安全边界与验证结果见[修复报告](docs/project-repair-2026-10-07.md)。
 - 只影响声明了这两个工具的客户端，普通 `/v1/chat/completions` 客户端不经过这条路径。
 
@@ -305,6 +309,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 「数据指标看板」页顶部可切换统计口径：**今日 / 本周 / 本月 / 全部历史 / 自定义**。本周自周一零点起算、本月自 1 号零点起算，自定义可指定起止时间（任一侧留空表示不限）。切换后 KPI 卡片、账号用量透视表与模型性能表会一起切到同一窗口。
 
+账号池页面的「查询全部余额」会向上游刷新所有账号，返回积分总和（含停用账号）、国内／国际小计及各账号明细。`GET /accounts/balance` 读取当前缓存；`POST /accounts/balance` 以空 JSON 对象刷新后查询。均沿用管理接口鉴权（`X-Panel-Token` 面板会话；已配置 API Key 时还需对应认证）。响应含 `total_remain`、`by_realm`、`accounts`、`unknown_count`、`refresh_failed` 和 `complete`。未知余额不当作 0，查询失败保留缓存且 `complete=false`；无账号时总和为 0。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | / | Web 用量与任务监控看板 |
@@ -313,6 +319,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 | POST | /v1/messages | 原生 Anthropic Messages 协议接口（流式 / 非流式，`x-api-key` 或 `Authorization` 鉴权） |
 | POST | /v1/messages/count_tokens | Anthropic 计数接口（CJK 感知估算值，非官方分词器） |
 | GET | /v1/models | 官方对齐模型列表（含能力与规格宣告） |
+| GET | /accounts/balance | 所有账号的缓存余额总和、两区小计与明细（管理鉴权） |
+| POST | /accounts/balance | 刷新所有账号并返回余额总和、失败状态与明细（管理鉴权） |
 | GET | /pricing | 定价状态：当前生效策略、上次/下次取价时间、未定价清单（分类 + 候选） |
 | POST | /pricing/refresh | 立即取一次价（需面板会话） |
 | POST | /pricing/mapping | 手填 / 清除「模型 → OpenRouter id」运行期映射，随后自动取价（需面板会话） |
@@ -325,6 +333,16 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 ---
 
 ## 六、Workbody-FHUB 更新记录
+
+### 1.0.2
+
+具体行为、验证与部署边界见[网关与账号池更新说明](docs/gateway-pool-update-2026-10-07.md)。
+
+- 生成速度统一为有效请求的总输出 Token / 总生成时间，三种协议均从首个生成内容帧计到末个内容帧；失败、取消、缺少用量和单帧输出不参与平均值。历史日志按已有耗时重新汇总，旧日志的错误首字时间无法追回。
+- 账号池增加国内／国际切换；列表、OAuth 默认区域、批量启停、导出和分配代理跟随当前区域。默认 API 出口仍由网关设置及 Key 绑定决定。
+- 增加全部账号余额查询，显示总积分、两区小计和未知／查询失败状态，包含停用账号。
+- 免费模型默认在国内、国际各自的账号池内公平轮询，按区域及模型维护游标；跳过不可用账号，免费请求不绑定会话。收费模型维持原策略，可在设置中关闭 `pool.free_fair_pick`。
+- 代理槽位支持 HTTP 与 SOCKS5／SOCKS5h，用户名、密码独立设置，保存、重载与测试保留凭据；搜索支持独立代理认证，HTTPS 保留目标域名证书验证。
 
 ### 1.0.1
 

@@ -56,6 +56,9 @@ import wb_global
 import wb_taskqueue
 import wb_reqlog
 import wb_validation
+import wb_metrics
+import wb_balance
+import wb_forward_proxy
 from wb_version import VERSION
 import wb_modelsdev
 import wb_probes
@@ -527,8 +530,9 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     if effort:
         row["reasoning_effort"] = effort
     # Derived per-request rates (None-safe).
-    if gen_ms and gen_ms > 0:
-        row["tokens_per_sec"] = round(fields.get("completion_tokens", 0) / (gen_ms / 1000.0), 2)
+    sample = wb_metrics.speed_sample(row)
+    if sample:
+        row["tokens_per_sec"] = round(sample[0] * 1000.0 / sample[1], 2)
     # Share the denominator with the aggregate view (compute_usage_analytics),
     # otherwise the per-request row and the rollup disagree on the same data.
     if fields.get("prompt_tokens", 0) > 0:
@@ -838,10 +842,11 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
             walls.append(r["elapsed_ms"])
             for b in (mb, rb, ab):
                 b["walls"].append(r["elapsed_ms"])
-        if r.get("tokens_per_sec"):
-            tok_rates.append(r["tokens_per_sec"])
+        speed = wb_metrics.speed_sample(r)
+        if speed:
+            tok_rates.append(speed)
             for b in (mb, rb, ab):
-                b["tok_rates"].append(r["tokens_per_sec"])
+                b["tok_rates"].append(speed)
         if r.get("cache_hit_pct") is not None:
             hits.append(r["cache_hit_pct"])
             for b in (mb, rb, ab):
@@ -857,6 +862,15 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
             "max": max(vals),
             "samples": len(vals),
         }
+    def speed_block(samples):
+        if not samples:
+            return None
+        tokens = sum(pair[0] for pair in samples)
+        duration = sum(pair[1] for pair in samples)
+        result = block([pair[0] * 1000.0 / pair[1] for pair in samples])
+        result.update(avg=round(tokens * 1000.0 / duration, 1),
+                      output_tokens=tokens, generation_ms_total=duration)
+        return result
     return {
         "sampled": total,
         # Where the sampled slice starts and whether it was cut short, so a
@@ -874,7 +888,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
         "ttft_ms": block(ttfts),
         "generation_ms": block(gens),
         "wall_ms": block(walls),
-        "tokens_per_sec": block(tok_rates),
+        "tokens_per_sec": speed_block(tok_rates),
         "cache_hit_pct": block(hits),
         "by_model": {
             mid: {
@@ -886,7 +900,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
                 "ttft_ms": block(mb["ttfts"]),
                 "generation_ms": block(mb["gens"]),
                 "wall_ms": block(mb["walls"]),
-                "tokens_per_sec": block(mb["tok_rates"]),
+                "tokens_per_sec": speed_block(mb["tok_rates"]),
                 "cache_hit_pct": block(mb["hits"]),
             } for mid, mb in m_buckets.items()
         },
@@ -901,7 +915,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
                     "ttft_ms": block(rb["ttfts"]),
                     "generation_ms": block(rb["gens"]),
                     "wall_ms": block(rb["walls"]),
-                    "tokens_per_sec": block(rb["tok_rates"]),
+                    "tokens_per_sec": speed_block(rb["tok_rates"]),
                     "cache_hit_pct": block(rb["hits"]),
                 } for realm, rb in realms.items()
             } for mid, realms in mr_buckets.items()
@@ -918,7 +932,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
                         "ttft_ms": block(ab["ttfts"]),
                         "generation_ms": block(ab["gens"]),
                         "wall_ms": block(ab["walls"]),
-                        "tokens_per_sec": block(ab["tok_rates"]),
+                        "tokens_per_sec": speed_block(ab["tok_rates"]),
                         "cache_hit_pct": block(ab["hits"]),
                     } for acct, ab in accts.items()
                 } for realm, accts in realms.items()
@@ -1101,11 +1115,10 @@ def apply_daily_credit_limit(refresh=False):
         return 0
     limit = wb_settings.daily_credit_limit(ACCOUNTS_DIR)
     credits = None
-    free_models = None
+    free_models = free_models_by_realm()
     if limit > 0:
         stats = daily_usage_stats(ttl=0 if refresh else None)
         credits = stats["credits"] if stats is not None else None
-        free_models = free_models_by_realm()
     return POOL.apply_daily_credit_limit(limit, credits, free_models)
 
 
@@ -1161,8 +1174,11 @@ def free_models_by_realm():
         cached = read_cached_remote_catalog(realm)
         if cached:
             for mid, item in (cached[1] or {}).items():
-                if isinstance(item, dict) and credits_is_free(item.get("credits")):
-                    free.add(str(mid))
+                if isinstance(item, dict) and item.get("credits") is not None:
+                    if credits_is_free(item["credits"]):
+                        free.add(str(mid))
+                    else:
+                        free.discard(str(mid))
         out[realm] = free
     _free_models_cache.update({"at": now, "data": out})
     return out
@@ -1871,7 +1887,7 @@ def _new_analytics_stat():
             "credit": 0.0,
             "cost_cny": 0.0,
             "ttft_sum": 0.0, "ttft_n": 0,
-            "speed_sum": 0.0, "speed_n": 0,
+            "speed_tokens": 0, "speed_gen_ms": 0.0, "speed_n": 0,
             "elapsed_sum": 0.0, "elapsed_n": 0,
         }
 
@@ -1955,8 +1971,10 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                         if r.get("ttft_ms"):
                             stat_obj["ttft_sum"] += r["ttft_ms"]
                             stat_obj["ttft_n"] += 1
-                        if r.get("tokens_per_sec"):
-                            stat_obj["speed_sum"] += r["tokens_per_sec"]
+                        speed = wb_metrics.speed_sample(r)
+                        if speed:
+                            stat_obj["speed_tokens"] += speed[0]
+                            stat_obj["speed_gen_ms"] += speed[1]
                             stat_obj["speed_n"] += 1
                         if r.get("elapsed_ms"):
                             stat_obj["elapsed_sum"] += r["elapsed_ms"]
@@ -2202,7 +2220,8 @@ def _finalize_analytics_stat(stat_obj):
         stat_obj["cache_hit_pct"] = round((c / p * 100), 1) if p > 0 else 0.0
         stat_obj["reasoning_ratio"] = round((reas / out * 100), 1) if out > 0 else 0.0
         stat_obj["ttft_ms_avg"] = round(stat_obj["ttft_sum"] / stat_obj["ttft_n"]) if stat_obj["ttft_n"] > 0 else 0
-        stat_obj["speed_avg"] = round(stat_obj["speed_sum"] / stat_obj["speed_n"], 1) if stat_obj["speed_n"] > 0 else 0.0
+        stat_obj["speed_avg"] = (round(stat_obj["speed_tokens"] * 1000.0 / stat_obj["speed_gen_ms"], 1)
+                                 if stat_obj["speed_gen_ms"] > 0 else None)
         stat_obj["elapsed_ms_avg"] = round(stat_obj["elapsed_sum"] / stat_obj["elapsed_n"]) if stat_obj["elapsed_n"] > 0 else 0
         return stat_obj
 
@@ -4931,7 +4950,7 @@ def aggregate_stream(raw_iter, model, resp_id):
             chunk = json.loads(data)
         except Exception:
             continue
-        if first_chunk_at is None:
+        if first_chunk_at is None and wb_metrics.generated_content(chunk):
             first_chunk_at = time.time()
         if chunk.get("id"):
             resp_id = chunk["id"]
@@ -5523,6 +5542,7 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
     flow.execute(internal_calls, holder.get("round_message"))
     holder["web_sources"] = flow.sources
     body = flow.followup_body()
+    holder["round_started_at"] = time.time()
     return open_upstream(body, session_key=session_key,
                          target_realm=holder.get("realm"),
                          session_meta=holder.get("session_meta"), deadline=flow.deadline)
@@ -7589,6 +7609,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_account_credits_detail(query)
         if path == "/accounts/credits":
             return self._get_accounts_credits()
+        if path == "/accounts/balance":
+            return self._get_accounts_balance()
         if path == "/accounts":
             return self._get_accounts(query)
         if path == "/accounts/export":
@@ -7726,6 +7748,25 @@ class Handler(BaseHTTPRequestHandler):
             a.fetch_credits()
         return self._json(200, {"accounts": account_views()})
 
+    def _get_accounts_balance(self):
+        if not self._authorized():
+            return
+        return self._json(200, wb_balance.summarize(list(POOL.accounts) if POOL else []))
+
+    def _route_accounts_balance(self):
+        # A disabled account still owns its balance and belongs in this sum.
+        # Snapshot the targets once; one failing refresh must not drop others.
+        from concurrent.futures import ThreadPoolExecutor
+        accounts = list(POOL.accounts) if POOL else []
+        def fetch(account):
+            try:
+                return account.uid, bool(account.fetch_credits().get("ok"))
+            except Exception:
+                return account.uid, False
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = dict(executor.map(fetch, accounts))
+        return self._json(200, wb_balance.summarize(accounts, results))
+
     def _get_account_credits_detail(self, query):
         if not self._authorized():
             return
@@ -7770,6 +7811,7 @@ class Handler(BaseHTTPRequestHandler):
         apply_model_daily_token_limit()
         return self._json(200, {
             "accounts": account_views(realm=query.get('realm', [None])[0] or CURRENT_REALM),
+            "balance": wb_balance.summarize(list(POOL.accounts) if POOL else []),
             "storage": ACCOUNTS_DIR,
             "usable": POOL.count_ready() if POOL else 0,
         })
@@ -8471,6 +8513,8 @@ class Handler(BaseHTTPRequestHandler):
                 entry = wb_settings._clean_slot_entry(item)
                 if entry is not None:
                     cleaned.append(entry)
+                elif str(item.get("url") or "").strip():
+                    return self._error(400, "invalid proxy URL or credentials", "invalid_request_error")
             saved = wb_settings.set_proxy_slots(ACCOUNTS_DIR, cleaned)
             if POOL:
                 # A slot may have been removed: unbind anyone still naming it
@@ -8487,7 +8531,7 @@ class Handler(BaseHTTPRequestHandler):
             slot = wb_settings.find_proxy_slot(ACCOUNTS_DIR, slot_id)
             if slot is None:
                 return self._error(404, "no such proxy slot")
-            probe = probe_proxy_intel(slot["url"])
+            probe = probe_proxy_intel(wb_forward_proxy.slot_url(slot))
             reply = dict(probe)
             reply["id"] = slot_id
             reply["slot"] = None
@@ -8594,6 +8638,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "expected a JSON object", "invalid_request_error")
         if path in ("/accounts/credits", "/accounts/credits/fetch"):
             return self._route_accounts_credits_fetch(payload)
+        if path == "/accounts/balance":
+            return self._route_accounts_balance()
         if path == "/accounts/credits/detail":
             return self._route_account_credits_detail(payload)
         if path == "/tasks/run":
@@ -9293,7 +9339,10 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"account": updated})
 
     def _route_accounts_set_all(self, payload):
-        POOL.set_all_enabled(bool(payload.get("enabled")))
+        realm = payload.get("realm")
+        if realm not in (None, "all", "cn", "intl"):
+            return self._error(400, "invalid realm", "invalid_request_error")
+        POOL.set_all_enabled(bool(payload.get("enabled")), realm=None if realm == "all" else realm)
         return self._json(200, {"accounts": account_views()})
 
     def _route_accounts_delete(self, payload):
@@ -9457,7 +9506,7 @@ class Handler(BaseHTTPRequestHandler):
         holder = {"custom_names": custom_names, "request_meta": request_meta,
                   "namespace_map": namespace_map, "base_body": base_body,
                   "realm": realm, "session_meta": session_meta, "web_flow": flow}
-        first_ms = None
+        timing = wb_metrics.GenerationTiming(t_start)
         round_recorded = False
         try:
             rounds = 0
@@ -9469,16 +9518,14 @@ class Handler(BaseHTTPRequestHandler):
                     holder.pop(field, None)
                 holder["suppress_lifecycle"] = rounds > 0
                 raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
-                for frame in stream_responses_events(raw, model, holder):
-                    if first_ms is None:
-                        first_ms = int((time.time() - t_start) * 1000)
+                for frame in stream_responses_events(timing.wrap(raw), model, holder):
                     self.wfile.write(clean_responses_frame(frame))
                     self.wfile.flush()
                 usage = holder.get("usage")
                 if flow:
                     flow.usage = wb_webflow.add_usage(flow.usage, usage)
                 record_usage(model, usage, stream=True, elapsed_ms=int((time.time() - t_start) * 1000),
-                             ttft_ms=first_ms, fp=fp, account=account.uid,
+                             **timing.fields(), fp=fp, account=account.uid,
                              key=self._key_id(), effort=effort)
                 round_recorded = True
                 internal = holder.get("internal_calls") or []
@@ -9493,11 +9540,12 @@ class Handler(BaseHTTPRequestHandler):
                 upstream.close()
                 upstream, account, _ = follow_up_with_tool_results(
                     internal, holder, model, session_key, t_start)
+                timing = wb_metrics.GenerationTiming(holder.get("round_started_at", time.time()))
                 rounds += 1
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             if not round_recorded:
                 record_usage(model, holder.get("usage"), stream=True,
-                             elapsed_ms=int((time.time() - t_start) * 1000), fp=fp,
+                             elapsed_ms=int((time.time() - t_start) * 1000), **timing.fields(), fp=fp,
                              account=account.uid, outcome="client_aborted", key=self._key_id(), effort=effort)
         except Exception as exc:
             message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream stream aborted: %s" % exc
@@ -9525,16 +9573,17 @@ class Handler(BaseHTTPRequestHandler):
         flow = web_flow or (wb_webflow.WebToolFlow(base_body) if web_tools_active(base_body) else None)
         holder = {"base_body": base_body, "realm": realm, "web_flow": flow}
         round_recorded = False
+        timing = wb_metrics.GenerationTiming(t_start)
         try:
             while True:
                 round_recorded = False
                 raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
-                chat_obj = aggregate_stream(raw, model, None)
+                chat_obj = aggregate_stream(timing.wrap(raw), model, None)
                 usage = chat_obj.get("usage")
                 if flow:
                     flow.usage = wb_webflow.add_usage(flow.usage, usage)
                 record_usage(model, usage, stream=False, elapsed_ms=int((time.time() - t_start) * 1000),
-                             fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                             **timing.fields(), fp=fp, account=account.uid, key=self._key_id(), effort=effort)
                 round_recorded = True
                 calls = internal_calls_from_chat(chat_obj, web_tools=flow is not None)
                 if not calls:
@@ -9552,6 +9601,7 @@ class Handler(BaseHTTPRequestHandler):
                 upstream.close()
                 upstream, account, _ = follow_up_with_tool_results(
                     calls, holder, model, session_key, t_start)
+                timing = wb_metrics.GenerationTiming(holder.get("round_started_at", time.time()))
             if flow:
                 chat_obj = dict(chat_obj, usage=flow.usage)
             result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
@@ -9673,12 +9723,13 @@ class Handler(BaseHTTPRequestHandler):
     def _messages_nonstream_response(self, upstream, model, fp, account, t_start,
                                      base_body=None, session_key=None, realm=None,
                                      effort=None):
+        timing = wb_metrics.GenerationTiming(t_start)
         try:
-            chat_obj = aggregate_stream(upstream, model, None)
+            chat_obj = aggregate_stream(timing.wrap(upstream), model, None)
             result = chat_to_messages(chat_obj)
             wall = int((time.time() - t_start) * 1000)
             record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
-                         fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                         **timing.fields(), fp=fp, account=account.uid, key=self._key_id(), effort=effort)
             return self._json(200, result)
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
@@ -9702,18 +9753,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         holder = {"usage": None}
-        first_ms = None
+        timing = wb_metrics.GenerationTiming(t_start)
         try:
-            for frame in stream_messages_events(upstream, model, holder):
-                if first_ms is None:
-                    first_ms = int((time.time() - t_start) * 1000)
+            for frame in stream_messages_events(timing.wrap(upstream), model, holder):
                 self.wfile.write(frame)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
             record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                         ttft_ms=first_ms,
-                         gen_ms=(wall - first_ms) if first_ms is not None else None,
+                         **timing.fields(),
                          fp=fp, account=account.uid,
                          outcome="client_aborted", key=self._key_id(), effort=effort)
             return
@@ -9722,7 +9770,7 @@ class Handler(BaseHTTPRequestHandler):
             record_error(model, 502, "messages stream aborted: %s" % exc,
                          elapsed_ms=wall, account=account.uid,
                          usage=holder.get("usage"), stream=True,
-                         ttft_ms=first_ms, fp=fp, outcome="upstream_aborted",
+                         **timing.fields(), fp=fp, outcome="upstream_aborted",
                          key=self._key_id())
             try:
                 self.wfile.write(anthropic_sse_frame("error", {
@@ -9738,8 +9786,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         wall = int((time.time() - t_start) * 1000)
         record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                     ttft_ms=first_ms,
-                     gen_ms=(wall - first_ms) if first_ms is not None else None,
+                     **timing.fields(),
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         return
 
@@ -9966,10 +10013,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             emitted = False
             last_usage = None
-            first_ms = None
+            timing = wb_metrics.GenerationTiming(t_start)
             streamed_text = []
             try:
-                for line in upstream:
+                for line in timing.wrap(upstream):
                     data = strip_data_prefix(line.decode("utf-8", "replace"))
                     if not data or data == "[DONE]" or data.startswith(":"):
                         continue
@@ -9990,8 +10037,6 @@ class Handler(BaseHTTPRequestHandler):
                     cleaned = clean_chunk(data)
                     if not cleaned:
                         continue
-                    if first_ms is None:
-                        first_ms = int((time.time() - t_start) * 1000)
                     emitted = True
                     self.wfile.write(f"data: {cleaned}\n\n".encode("utf-8"))
                     self.wfile.flush()
@@ -9999,8 +10044,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Client hung up; still account for what upstream produced.
                 wall = int((time.time() - t_start) * 1000)
                 record_usage(model, last_usage, stream=True,
-                             elapsed_ms=wall, ttft_ms=first_ms,
-                             gen_ms=(wall - first_ms) if first_ms is not None else None,
+                             elapsed_ms=wall, **timing.fields(),
                              fp=fp, account=account.uid,
                              outcome="client_aborted", key=self._key_id(), effort=effort)
                 return
@@ -10011,8 +10055,7 @@ class Handler(BaseHTTPRequestHandler):
                 wall = int((time.time() - t_start) * 1000)
                 record_error(model, 502, "stream aborted: %s" % exc,
                              elapsed_ms=wall, account=account.uid,
-                            usage=last_usage, stream=True, ttft_ms=first_ms,
-                            gen_ms=(wall - first_ms) if first_ms is not None else None,
+                            usage=last_usage, stream=True, **timing.fields(),
                              fp=fp, outcome="upstream_aborted", key=self._key_id())
                 try:
                     self.wfile.write(b"data: [DONE]\n\n")
@@ -10038,25 +10081,21 @@ class Handler(BaseHTTPRequestHandler):
                         "prompt_tokens_details": {"cached_tokens": 0},
                     }
             record_usage(model, last_usage, stream=True,
-                         elapsed_ms=wall, ttft_ms=first_ms,
-                         gen_ms=(wall - first_ms) if first_ms is not None else None,
+                         elapsed_ms=wall, **timing.fields(),
                          fp=fp, account=account.uid, key=self._key_id(), effort=effort)
             return
 
     def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None):
+        timing = wb_metrics.GenerationTiming(t_start)
         try:
-            result = aggregate_stream(upstream, model, None)
+            result = aggregate_stream(timing.wrap(upstream), model, None)
         except Exception as exc:
             record_error(model, 502, str(exc), elapsed_ms=int((time.time() - t_start) * 1000),
                          account=account.uid, key=self._key_id())
             return self._error(502, f"upstream stream error: {exc}")
         wall = int((time.time() - t_start) * 1000)
-        first_at = result.get("first_chunk_at")
-        # Measured from request arrival so streaming and non-streaming are comparable.
-        first_ms = int((first_at - t_start) * 1000) if first_at else None
         record_usage(model, result.get("usage"), stream=False,
-                     elapsed_ms=wall, ttft_ms=first_ms,
-                     gen_ms=(wall - first_ms) if first_ms is not None else None,
+                     elapsed_ms=wall, **timing.fields(),
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         return self._json(200, result)
 

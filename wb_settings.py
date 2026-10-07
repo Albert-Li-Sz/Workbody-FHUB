@@ -1151,6 +1151,12 @@ def _clean_slot_entry(entry, fallback_id=None):
     url = str(entry.get("url") or "").strip()
     if not url:
         return None
+    import wb_forward_proxy
+    try:
+        url, username, password = wb_forward_proxy.clean_slot_url(
+            url, entry.get("username"), entry.get("password"))
+    except ValueError:
+        return None
     slot_id = str(entry.get("id") or "").strip()
     if not slot_id:
         slot_id = fallback_id or ""
@@ -1162,6 +1168,8 @@ def _clean_slot_entry(entry, fallback_id=None):
         "id": slot_id,
         "name": str(entry.get("name") or "").strip(),
         "url": url,
+        "username": username,
+        "password": password,
         "enabled": entry.get("enabled", True) is not False,
         "ip": str(entry.get("ip") or "").strip(),
         "country": str(entry.get("country") or "").strip(),
@@ -1200,8 +1208,8 @@ def proxy_slots(accounts_dir):
     out, seen = [], set()
     for raw in stored:
         entry = _clean_slot_entry(raw)
-        if entry and entry["url"] not in seen:
-            seen.add(entry["url"])
+        if entry and (entry["url"], entry["username"], entry["password"]) not in seen:
+            seen.add((entry["url"], entry["username"], entry["password"]))
             if not entry["id"]:
                 entry["id"] = _next_slot_id(out)
             out.append(entry)
@@ -1236,9 +1244,9 @@ def set_proxy_slots(accounts_dir, slots):
         cleaned, seen = [], set()
         for raw in slots or []:
             entry = _clean_slot_entry(raw)
-            if not entry or entry["url"] in seen:
+            if not entry or (entry["url"], entry["username"], entry["password"]) in seen:
                 continue
-            seen.add(entry["url"])
+            seen.add((entry["url"], entry["username"], entry["password"]))
             if not entry["id"] or any(e["id"] == entry["id"] for e in cleaned):
                 seq += 1
                 entry["id"] = "slot-%d" % seq

@@ -48,7 +48,12 @@ global.confirm = () => true;
 
 // What the server would return for GET /proxy/slots; the test swaps it.
 let serverSlots = [];
-global.fetch = () => {
+let lastSaved = null;
+global.fetch = (url, options) => {
+  if(url === '/proxy/slots/save' && options && options.method === 'POST'){
+    lastSaved = JSON.parse(options.body).slots;
+    serverSlots = lastSaved;
+  }
   const payload = {current: 'intl', accounts: [], slots: serverSlots, data: [],
                    results: [], byAccount: []};
   return Promise.resolve({status: 200, ok: true,
@@ -63,6 +68,7 @@ const api = new Function(script + `
     loadProxySlots,
     addProxySlotRow,
     saveProxySlots,
+    handlers: ACTION_HANDLERS,
     rows: () => PROXY_SLOTS,
     dirty: () => SLOTS_DIRTY,
     state: () => (document.getElementById('slotState') || {}).textContent,
@@ -95,14 +101,24 @@ const api = new Function(script + `
   assert.equal(api.rows().map(r => r.id).join(','), 'a,b',
                'force reloads from the server: ' + JSON.stringify(api.rows()));
 
-  // 5. Saving clears the flag, so polling resumes afterwards.
+  // 5. Credentials follow the same dirty/polling path and survive save.
+  api.handlers.onProxySlotUsernameInput({value: 'test-user'}, null, '0');
+  api.handlers.onProxySlotPasswordInput({value: 'p:@ /?"<&'}, null, '0');
+  await api.loadProxySlots();
+  assert.equal(api.rows()[0].password, 'p:@ /?"<&', 'polling preserves an edited password');
+  assert.ok(element('slotList').innerHTML.includes('type="password"'), 'the password input is masked');
+  assert.ok(element('slotList').innerHTML.includes('data-action="onProxySlotPasswordInput"'), 'password input is delegated');
+  // Saving clears the flag, so polling resumes afterwards.
   api.addProxySlotRow();
   assert.equal(api.dirty(), true, 'the new row is unsaved again');
   await api.saveProxySlots(null).catch(() => {});
   assert.equal(api.dirty(), false, 'a successful save clears the dirty flag');
   assert.ok(!api.state().includes('未保存'),
             'the header stops saying unsaved: ' + api.state());
+  assert.equal(lastSaved[0].username, 'test-user');
+  assert.equal(lastSaved[0].password, 'p:@ /?"<&');
+  await api.loadProxySlots(true);
+  assert.equal(api.rows()[0].password, 'p:@ /?"<&', 'reload keeps the saved credential');
 
   console.log('slot editor assertions passed');
 })().catch(error => { console.error(error); process.exit(1); });
-

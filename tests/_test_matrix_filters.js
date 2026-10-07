@@ -55,8 +55,8 @@ try {
   process.exit(1);
 }
 
-const S = (n) => ({ avg: n, p50: n, samples: 1 });
-const S3 = (n) => ({ avg: n, p50: n, samples: 3 });
+const S = (n) => ({ avg: n, p50: n, samples: 1, output_tokens: n, generation_ms_total: 1000 });
+const S3 = (n) => ({ avg: n, p50: n, samples: 3, output_tokens: n * 3, generation_ms_total: 3000 });
 const dsRow = (req, tot, p, c) => ({ requests: req, total_tokens: tot, prompt_tokens: p, completion_tokens: c, reasoning_tokens: 0, cached_tokens: 0 });
 const usage = {
   requests: 4, total_tokens: 8300, prompt_tokens: 6600, completion_tokens: 1700, reasoning_tokens: 0,

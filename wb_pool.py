@@ -15,6 +15,7 @@ import random
 
 DEFAULTS = {
     "weighted_pick": True,
+    "free_fair_pick": True,
     "soft_rate": 600.0,
     "soft_rate_max": 7200.0,
     "breaker_threshold": 3,
@@ -37,7 +38,7 @@ DEFAULTS = {
     "session_dead_threshold": 3,
 }
 
-_BOOL_KEYS = ("weighted_pick",)
+_BOOL_KEYS = ("weighted_pick", "free_fair_pick")
 _INT_MIN = {
     "breaker_threshold": 1,
     "degrade_threshold": 1,

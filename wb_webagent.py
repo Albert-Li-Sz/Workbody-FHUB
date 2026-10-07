@@ -66,10 +66,9 @@ class AcpChannel(object):
         cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         conn = cls(parsed.hostname, port, timeout=self.timeout)
         if self.proxy:
-            # 账号配了代理时走 CONNECT，和 urlopen 那条路径保持一致。
-            proxy = urllib.parse.urlparse(self.proxy)
-            conn = cls(proxy.hostname, proxy.port or 8080, timeout=self.timeout)
-            conn.set_tunnel(parsed.hostname, port)
+            import wb_forward_proxy
+            conn = wb_forward_proxy.tunnel_connection(parsed.hostname, port, self.proxy,
+                secure=parsed.scheme == "https", timeout=self.timeout)
         return conn
 
     def open(self):
