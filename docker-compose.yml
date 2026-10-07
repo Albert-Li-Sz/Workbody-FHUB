@@ -1,15 +1,11 @@
 name: workbody-fhub
 services:
   workbody-fhub:
-    image: ${WORKBODY_IMAGE:-workbody-fhub:1.0.0}
-    build:
-      context: .
-      args:
-        PYTHON_IMAGE: ${PYTHON_IMAGE:-public.ecr.aws/docker/library/python:3.11-alpine@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929}
+    image: ${WORKBODY_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub:1.0.0}
     restart: unless-stopped
     user: "${PUID:-0}:${PGID:-0}"
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8788}:8788"
+      - "0.0.0.0:8788:8788"
     environment:
       HOST: 0.0.0.0
       PORT: 8788

@@ -60,11 +60,11 @@ class DockerTests(unittest.TestCase):
         self.assertIn("${PUID:-", text)
         self.assertIn("${PGID:-", text)
 
-    def test_fork_builds_its_own_image_with_loopback_default(self):
+    def test_fork_deploys_its_published_image(self):
         text = read("docker-compose.yml")
-        self.assertIn("workbody-fhub:1.0.0", text)
-        self.assertIn("context: .", text)
-        self.assertIn("BIND_ADDRESS:-127.0.0.1", text)
+        self.assertIn("ghcr.io/albert-li-sz/workbody-fhub:1.0.0", text)
+        self.assertNotIn("build:", text)
+        self.assertIn('"0.0.0.0:8788:8788"', text)
         self.assertNotIn("ghcr.io/ardeyouxipianyi", text)
         ignored = read(".dockerignore")
         for pattern in ("accounts/", "usage/", ".env", "*.info"):

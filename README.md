@@ -102,27 +102,22 @@ Unix 系统上的账号目录权限为 `0700`，凭证和 Key 设置文件权限
 云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.0`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
 
 ```bash
-docker pull ghcr.io/albert-li-sz/workbody-fhub:1.0.0
-docker compose -f docker-compose.cloud.yml up -d
-```
-
-云镜像配置只拉取发布镜像；默认仍只向本机发布端口，账号和用量使用持久化目录。
-
-默认 Compose **构建此项目源码**，镜像名为 `workbody-fhub:1.0.0`，并只向本机发布 `127.0.0.1:8788`。账号和日志继续挂载 `./accounts`、`./usage`，构建上下文排除这些目录及 `.env*`、凭据文件。
-
-```bash
-docker compose up -d --build
-# 或在当前源码目录执行
+docker compose pull
+docker compose up -d
+# 或在当前项目目录执行
 ./quick-deploy.sh
 ```
 
-默认底镜采用 Docker 官方 Python 3.11 镜像的 ECR 来源，并固定内容摘要。也可显式覆盖底镜来源：
+默认 `docker-compose.yml` 直接拉取已发布的云镜像，端口映射固定为 **`0.0.0.0:8788:8788`**，可通过服务器 IP 访问：
 
-```bash
-PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-alpine docker compose up -d --build
-```
+- **Web 看板**：`http://<服务器IP>:8788/`
+- **API Base URL**：`http://<服务器IP>:8788/v1`
 
-[Docker 官方镜像的 ECR 来源说明](https://aws.amazon.com/blogs/containers/docker-official-images-now-available-on-amazon-elastic-container-registry-public/)。构建支持 `PYTHON_IMAGE` 覆盖，适用于自己的可信镜像缓存。
+账号和日志继续挂载 `./accounts`、`./usage`。首次启动密码和 API Key 见 `docker compose logs workbody-fhub`。更新时通过 `WORKBODY_IMAGE` 指定目标版本，然后重新执行 `docker compose pull` 和 `docker compose up -d`，或运行 `./quick-deploy.sh`。
+
+容器支持 `PUID` / `PGID`（默认 `0:0`，自定义时需保证数据目录可写），并带 `/health` 健康检查。代码中的 WorkBuddy 账号代理槽继续路由模型，`WB_WEB_PROXY` 单独路由网络工具。
+
+维护者可使用 `Dockerfile` 独立构建及保存镜像。默认底镜采用 Docker 官方 Python 3.11 镜像的 ECR 来源，并固定内容摘要；`docker build --build-arg PYTHON_IMAGE=可信底镜` 可覆盖来源。构建上下文排除账号、日志、`.env*` 和凭据文件。[Docker 官方镜像的 ECR 来源说明](https://aws.amazon.com/blogs/containers/docker-official-images-now-available-on-amazon-elastic-container-registry-public/)。
 
 ```bash
 # 独立构建及保存，便于向其他服务器导入
@@ -139,10 +134,6 @@ python3 scripts/verify_image.py workbody-fhub:1.0.0
 ```
 
 验证脚本使用隔离的临时数据卷与 `--network none`，结束后清理测试容器。审计发现、修复证据和剩余验证边界见[修复报告](docs/audit-2026-10-07.md)。
-
-查看首次启动密码和 API Key：`docker compose logs workbody-fhub`。更新源码后重新执行 `docker compose up -d --build`。通过 `PORT` 修改宿主端口；`BIND_ADDRESS` 可改为明确需要的监听地址。向公网开放前配置自定义面板密码、HTTPS 与访问限制。
-
-容器支持 `PUID` / `PGID`（默认 `0:0`，自定义时需保证数据目录可写），并带 `/health` 健康检查。代码中的 WorkBuddy 账号代理槽继续路由模型，`WB_WEB_PROXY` 单独路由网络工具。
 
 发布流程 `.github/workflows/docker-publish.yml` 在本仓库发布 release 时先验证版本和测试，再构建 `linux/amd64`、`linux/arm64` 并推送到 GHCR；配置 Docker Hub 凭据时也发布自己的同名镜像。镜像包含当前分支源码及两份许可证。
 
@@ -362,7 +353,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 - **Docker 部署与更新生态全面升级**（PR #125）：
   - **一键部署与更新脚本 (`quick-deploy.sh`)**：终端仅需执行一行命令 `curl -fsSL https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | bash`。首次运行自动检测环境并拉取启动；后续再次执行同一命令即可完成自动平滑升级，账号配置与历史用量绝不丢失；
-  - **NAS / 面板单文件 Compose 模板（免源码克隆）**：官方 `docker-compose.yml` 剔除 `build: .` 依赖，飞牛 fnOS、群晖、1Panel 等用户无需 `git clone`，直接复制粘贴 YAML 即可建站并支持面板一键更新；开发者本地构建单独拆分为 `docker-compose.build.yml`；
+  - **NAS / 面板单文件 Compose 模板（免源码克隆）**：官方 `docker-compose.yml` 剔除 `build: .` 依赖，飞牛 fnOS、群晖、1Panel 等用户无需 `git clone`，直接复制粘贴 YAML 即可建站并支持面板一键更新；本分支统一使用云镜像 Compose 配置；
   - **支持双镜像仓库推送（GHCR + Docker Hub）**：工作流新增对 Docker Hub（`ardeyouxipianyi/workbuddy2api-hub`）的自动同步推送，消除前缀缺省报错困扰，兼顾国内 Docker 镜像加速器拉取；
   - **Watchtower 全自动静默更新**：提供开箱即用的 Watchtower 配置与命令，支持后台无感自动升级。
 
@@ -512,7 +503,7 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 
 ### v1.5.6
 
-- **Docker 部署下的 Linux 桌面凭据挂载**（PR #55，感谢 [@LuFering](https://github.com/LuFering)）：新增 `docker-compose.override.yml.example`，以只读方式把宿主机 `~/.local/share/CodeBuddyExtension/Data/Public/auth` 挂进容器，补上 Linux + Docker 场景下看板扫描不到桌面凭据的说明；`.gitignore` 同时忽略本地 `docker-compose.override.yml`。
+- **Docker 部署下的 Linux 桌面凭据挂载**（PR #55，感谢 [@LuFering](https://github.com/LuFering)）：上游曾提供只读挂载宿主机 `~/.local/share/CodeBuddyExtension/Data/Public/auth` 的示例，补上 Linux + Docker 场景下看板扫描不到桌面凭据的说明。本分支的 Docker 部署统一使用云镜像和 OAuth 添加账号。
 - **保留积分开关**（issue #44）：看板「设置」新增最低保留积分，账号余额低于该值时不再接单，避免余额被用尽后触发上游的提醒短信。填 `0` 关闭（默认）；从未查询过余额的账号不受影响；账号只是停止接单，仍在池中并继续定时任务，充值后自动恢复。阈值保存在 `accounts/settings.json` 的 `reserve_credits`，改动即时生效、无需重启。
 
 ### v1.5.5

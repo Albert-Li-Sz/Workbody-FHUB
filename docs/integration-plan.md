@@ -15,15 +15,16 @@
 
 停用所有现存 Key 会拒绝 API 请求。只有操作者明确使用原有关闭鉴权开关，才按该开关允许免 Key 调用。新安装且未配置任何 Key 的历史行为继续沿用启动方式；容器 `--lan` 会生成启动 Key。
 
-## 部署本地源码
+## Docker 部署
 
-云镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.0.0`，使用 `docker compose -f docker-compose.cloud.yml up -d` 拉取并部署。
-
-默认 `docker-compose.yml` 构建本分支源码，镜像名为 `workbody-fhub:1.0.0`，默认只向 `127.0.0.1` 发布端口。兼容的源码构建配置也可使用：
+默认 `docker-compose.yml` 使用已发布的云镜像 `ghcr.io/albert-li-sz/workbody-fhub:1.0.0`，直接发布到宿主机 `0.0.0.0:8788`：
 
 ```sh
-docker compose -f docker-compose.build.yml up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+也可运行 `./quick-deploy.sh` 完成拉取和启动。面板地址为 `http://<服务器IP>:8788/`，API 地址为 `http://<服务器IP>:8788/v1`。通过 `WORKBODY_IMAGE` 指定其他已发布版本，再执行上述命令更新。
 
 应用使用 `accounts` 与 `usage` 两个持久化卷。升级前备份它们，确认国内/国际 Key 仍绑定正确出口，并用实际模型完成一次响应验证。API 可连接、目录可读取和单元测试通过不能代替真实模型调用。
 
