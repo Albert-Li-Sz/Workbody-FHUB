@@ -3,6 +3,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 from wb_version import VERSION
 IMAGE = "workbody-fhub:" + VERSION
 REVISION = None
+READY_TIMEOUT = 60.0
 
 
 def run(args, data=None):
@@ -82,17 +84,26 @@ def smoke(platform, non_root=False):
                     "--tmpfs", "/app/usage:uid=1000,gid=1000,mode=0700"] if non_root else [])
         run(["docker", "run", "--rm", "-d", "--platform", platform, "--network", "none",
              "--name", name] + options + [IMAGE])
-        ready = '''import time, urllib.request
-for attempt in range(100):
+        ready = '''import json, os, pathlib, time, urllib.request
+deadline = time.monotonic() + READY_TIMEOUT_PLACEHOLDER
+last_error = None
+while time.monotonic() < deadline:
     try:
         urllib.request.urlopen('http://127.0.0.1:8788/health', timeout=1).close()
         break
-    except Exception:
-        time.sleep(0.1)
+    except Exception as exc:
+        last_error = {'type': type(exc).__name__, 'status': getattr(exc, 'code', None)}
+        time.sleep(0.2)
 else:
-    raise RuntimeError('gateway did not become ready')
+    directories = {}
+    for name in ['/app/accounts', '/app/usage']:
+        stat = pathlib.Path(name).stat()
+        directories[name] = {'uid': stat.st_uid, 'gid': stat.st_gid,
+                             'mode': oct(stat.st_mode & 0o777)}
+    raise RuntimeError('gateway did not become ready: ' + json.dumps(
+        {'uid': os.getuid(), 'last_error': last_error, 'directories': directories}))
 print('ready')
-'''
+'''.replace('READY_TIMEOUT_PLACEHOLDER', repr(READY_TIMEOUT))
         run(["docker", "exec", "-i", name, "python", "-"], ready)
         logs = run(["docker", "logs", name])
         match = re.search(r"PANEL BOOTSTRAP PASSWORD: ([A-Za-z0-9_-]+)", logs)
@@ -163,15 +174,20 @@ def regressions(platform):
 
 
 def main():
-    global IMAGE, REVISION
+    global IMAGE, REVISION, READY_TIMEOUT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", nargs="?", default=IMAGE)
     parser.add_argument("--revision", help="release revision for source hashes; defaults to the working tree")
     parser.add_argument("--platform", action="append", choices=["linux/amd64", "linux/arm64"])
     parser.add_argument("--pull", action="store_true", help="pull the requested platform before verification")
     parser.add_argument("--non-root", action="store_true", help="also verify UID/GID 1000 with private temporary data")
+    parser.add_argument("--ready-timeout", type=float, default=READY_TIMEOUT,
+                        help="seconds allowed for cold startup, including QEMU emulation (default 60)")
     args = parser.parse_args()
     IMAGE = args.image
+    if not math.isfinite(args.ready_timeout) or args.ready_timeout <= 0:
+        parser.error("--ready-timeout must be a positive finite number")
+    READY_TIMEOUT = args.ready_timeout
     if args.revision:
         if args.revision.startswith("-"):
             parser.error("invalid revision")
@@ -179,10 +195,12 @@ def main():
     results = {"image": IMAGE, "source": REVISION or "working tree", "network": "none", "accounts": "synthetic temporary Docker data",
                "platforms": {}}
     for platform in args.platform or ("linux/amd64", "linux/arm64"):
+        print("Verifying %s: root smoke and regression suites" % platform, file=sys.stderr, flush=True)
         if args.pull:
             run(["docker", "pull", "--platform", platform, IMAGE])
         results["platforms"][platform] = {"smoke": smoke(platform), "regression_suites": regressions(platform)}
         if args.non_root:
+            print("Verifying %s: UID/GID 1000 smoke" % platform, file=sys.stderr, flush=True)
             results["platforms"][platform]["non_root"] = smoke(platform, non_root=True)
     print(json.dumps(results, indent=2))
 
