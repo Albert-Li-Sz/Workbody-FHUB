@@ -1,0 +1,69 @@
+{
+  "image": "workbody-fhub:1.0.0",
+  "network": "none",
+  "accounts": "synthetic anonymous Docker volumes",
+  "platforms": {
+    "linux/amd64": {
+      "smoke": {
+        "health": 200,
+        "anonymous_api": 401,
+        "admin_login": 401,
+        "bootstrap_login": 200,
+        "authenticated_settings": 200,
+        "version": "1.0.0",
+        "settings_mode": "0600",
+        "machine": "x86_64",
+        "python": "3.11.17",
+        "source_files_verified": 28
+      },
+      "regression_suites": [
+        "ddg_search",
+        "web_security",
+        "web_tool_flow",
+        "panel_bootstrap",
+        "removed_exit",
+        "health_auth"
+      ]
+    },
+    "linux/arm64": {
+      "smoke": {
+        "health": 200,
+        "anonymous_api": 401,
+        "admin_login": 401,
+        "bootstrap_login": 200,
+        "authenticated_settings": 200,
+        "version": "1.0.0",
+        "settings_mode": "0600",
+        "machine": "aarch64",
+        "python": "3.11.17",
+        "source_files_verified": 28
+      },
+      "regression_suites": [
+        "ddg_search",
+        "web_security",
+        "web_tool_flow",
+        "panel_bootstrap",
+        "removed_exit",
+        "health_auth"
+      ]
+    }
+  },
+  "build": {
+    "image": "workbody-fhub:1.0.0",
+    "tags": [
+      "workbody-fhub:1.0.0",
+      "workbody-fhub:latest"
+    ],
+    "platforms": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "manifest_digest": "sha256:8b633d3b67bb68c8e11bf8d03baffbce6ded1fd41ddec9dc21066d28d6d4da98",
+    "archive": "dist/workbody-fhub-1.0.0.tar.gz",
+    "archive_bytes": 47102300,
+    "archive_sha256": "5355fafc7472874096a793ba7bd9e3611286a5477986642aaa6d219f56ff231e",
+    "registry_published": false
+  },
+  "test_cases_per_platform": 62,
+  "original_declarations_preserved": true
+}

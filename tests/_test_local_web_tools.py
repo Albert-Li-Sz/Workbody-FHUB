@@ -243,7 +243,7 @@ calls = {"n": 0}
 def always_tool_body(body, session_key=None, target_realm=None, **kwargs):
     calls["n"] += 1
     calls.setdefault("bodies", []).append(body)
-    if calls["n"] > W.MAX_WEB_ROUNDS:
+    if calls["n"] >= W.MAX_WEB_ROUNDS:
         # out of rounds: the gateway must have taken the tools away, so this
         # answer is a real one and the stream can end normally.
         return FakeUpstream(sse(ANSWER_CHUNKS)), FakeAccount(), body.get("reasoning_effort")

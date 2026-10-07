@@ -30,3 +30,6 @@ desktop.ini
 
 # Local Docker Compose override
 docker-compose.override.yml
+.env
+.env.*
+dist/

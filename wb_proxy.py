@@ -42,8 +42,6 @@ import urllib.error
 import urllib.request
 import uuid
 import wb_accounts
-import wb_opencode
-import wb_opencode_catalog
 import wb_pool
 import wb_atrest
 import wb_catalog
@@ -51,6 +49,7 @@ import wb_ipintel
 import wb_pricing
 import wb_settings
 import wb_webtools
+import wb_webflow
 import wb_identity
 import wb_prompt
 import wb_global
@@ -229,7 +228,8 @@ def auth_required():
     """Whether /v1 calls must present a key at all."""
     if wb_settings.auth_disabled(ACCOUNTS_DIR):
         return False
-    if any(entry.get("enabled") for entry in configured_keys()):
+    # Disabling the final key must not disable authentication.
+    if configured_keys():
         return True
     return bool(API_KEY)
 def identify_key(supplied):
@@ -2276,7 +2276,6 @@ def runtime_settings_view():
         "api_key_masked": masked,
         "auth_required": auth_required(),
         "api_keys": keys,
-        "opencode": wb_opencode.public_config(wb_settings.opencode_config(ACCOUNTS_DIR)),
         "deleted_api_keys": deleted_keys,
         "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
         "daily_token_limit": wb_settings.daily_token_limit(ACCOUNTS_DIR),
@@ -2298,7 +2297,7 @@ def runtime_settings_view():
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
         "max_concurrent_chat": MAX_CONCURRENT_CHAT,
         "chat_slot_wait_seconds": CHAT_SLOT_WAIT_SECONDS,
-        "version": "1.6.13",
+        "version": "1.0.0",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -4522,7 +4521,7 @@ def no_usable_account_message(realm, accounts):
 
 
 def open_upstream(payload, session_key=None, target_realm=None,
-                  session_meta=None, inbound_request_id="", trace_id=""):
+                  session_meta=None, inbound_request_id="", trace_id="", deadline=None):
     # Refresh the daily token guard before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -4564,6 +4563,8 @@ def open_upstream(payload, session_key=None, target_realm=None,
     header_timeout, idle_timeout = upstream_timeouts()
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
     for _attempt in range(max_attempts):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise wb_webflow.WebToolLimitError("web tool time limit exceeded")
         account = POOL.pick_for_session(realm=realm, session_key=session_key,
                                         exclude=tried, model=model) if POOL else None
         if account is None:
@@ -4595,12 +4596,13 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 tried.add(account.uid)
                 continue
             try:
-                resp = wb_accounts.urlopen(req, timeout=header_timeout,
+                timeout = min(header_timeout, max(0.001, deadline - time.monotonic())) if deadline else header_timeout
+                resp = wb_accounts.urlopen(req, timeout=timeout,
                                            proxy=account.proxy)
             except Exception:
                 account.release()
                 raise
-            _apply_stream_idle_timeout(resp, idle_timeout)
+            _apply_stream_idle_timeout(resp, min(idle_timeout, max(0.001, deadline - time.monotonic())) if deadline else idle_timeout)
             account.note_success(model=model)
             reset_switch_counter(account, model)
             return _LeasedResponse(resp, account), account, upstream_effort_of(upstream_body, model)
@@ -5045,21 +5047,33 @@ def aggregate_stream(raw_iter, model, resp_id):
 # gateway only speaks Chat Completions, so those requests are translated down,
 # and the reply is translated back up into Responses objects / SSE events.
 def local_ip_addresses():
-    """Every non-loopback IPv4 address this machine answers on."""
+    """Discover LAN addresses without delaying startup on a stalled resolver."""
     found = []
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip not in found and not ip.startswith("127."):
-                found.append(ip)
-    except Exception:
-        pass
+    addresses = []
+    done = threading.Event()
+
+    def lookup():
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if ip not in addresses and not ip.startswith("127."):
+                    addresses.append(ip)
+        except Exception:
+            pass
+        finally:
+            done.set()
+
+    # This address list is informational. Do not hold /health and the whole
+    # server behind libc DNS, especially with Docker --network none.
+    threading.Thread(target=lookup, name="lan-addresses", daemon=True).start()
+    if done.wait(timeout=1):
+        found = addresses
     if not found:
         try:
-            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            probe.connect(("8.8.8.8", 80))
-            found.append(probe.getsockname()[0])
-            probe.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.settimeout(1)
+                probe.connect(("8.8.8.8", 80))
+                found.append(probe.getsockname()[0])
         except Exception:
             pass
     return found
@@ -5486,56 +5500,20 @@ def build_citations(text, sources):
 
 def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_start,
                                 drop_tools=False):
-    """執行反代自己代跑的網路工具，把結果餵回模型，回傳新的上游連線。
+    """Append real tool results to the shared history and open a bounded followup.
 
-    drop_tools=True 表示這是最後一輪：把網路工具從工具清單收回，模型沒有東西
-    可以再呼叫，只能用手上的結果把話講完。舊版在回合用盡時合成一個
-    resp_wrapup（status=completed、output=[]）收尾，那等於把失敗偽裝成正常
-    結束，客戶端看到的就是「講到一半斷掉」——issue #43。
+    WebToolFlow enforces hard budgets before execution and withdraws exhausted
+    tools. The legacy drop_tools parameter remains for caller compatibility.
     """
-    convo = holder.get("convo_messages")
-    if convo is None:
-        convo = list(holder.get("base_messages") or [])
-        holder["convo_messages"] = convo
-
-    tool_calls = []
-    for i, c in enumerate(internal_calls):
-        tool_calls.append({
-            "id": "call_web_%d_%d" % (int(t_start * 1000) % 1000000, i),
-            "type": "function",
-            "function": {"name": c["name"], "arguments": c.get("arguments") or "{}"},
-        })
-    convo.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-
-    for tc in tool_calls:
-        nm = tc["function"]["name"]
-        result = wb_webtools.execute(nm, tc["function"]["arguments"])
-        found = wb_webtools.sources_from_result(result)
-        if found:
-            holder.setdefault("web_sources", []).extend(found)
-        log("web tool %s -> %d chars, %d citeable source(s)"
-            % (nm, len(result or ""), len(found)), level="INFO")
-        convo.append({
-            "role": "tool",
-            "tool_call_id": tc["id"],
-            "name": nm,
-            "content": result,
-        })
-
-    body = dict(holder.get("base_body") or {})
-    if drop_tools:
-        body["tools"] = [t for t in (body.get("tools") or [])
-                         if not wb_webtools.is_internal_tool(tool_name_of(t))]
-        convo.append({
-            "role": "system",
-            "content": ("The web tools are no longer available. Answer the user now with "
-                        "what you already have. Do not say that you are searching again."),
-        })
-    body["messages"] = convo
-    body["stream"] = True
+    flow = holder.get("web_flow")
+    if flow is None:
+        flow = holder["web_flow"] = wb_webflow.WebToolFlow(holder.get("base_body"))
+    flow.execute(internal_calls, holder.get("round_message"))
+    holder["web_sources"] = flow.sources
+    body = flow.followup_body()
     return open_upstream(body, session_key=session_key,
                          target_realm=holder.get("realm"),
-                         session_meta=holder.get("session_meta"))
+                         session_meta=holder.get("session_meta"), deadline=flow.deadline)
 
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
@@ -5553,8 +5531,38 @@ def internal_calls_from_chat(chat_obj, web_tools=False):
         fn = tc.get("function") or {}
         name = fn.get("name") or ""
         if wb_webtools.is_internal_tool(name):
-            out.append({"name": name, "arguments": fn.get("arguments") or "{}"})
+            out.append({"id": tc.get("id"), "name": name, "arguments": fn.get("arguments") or "{}"})
     return out
+
+
+def web_response_frame(holder, event, payload):
+    holder["sequence_number"] = holder.get("sequence_number", 0) + 1
+    data = dict(payload, type=event, sequence_number=holder["sequence_number"])
+    return ("event: " + event + "\ndata: " + json.dumps(data, ensure_ascii=False) + "\n\n").encode()
+
+
+def mixed_web_result_frames(holder, flow):
+    """Hand client-owned calls back without inventing their tool results."""
+    response = holder["round_response"]
+    text = flow.result_text()
+    item = {"id": _new_id("msg_"), "type": "message", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": build_citations(text, flow.sources)}]}
+    index = len(response["output"])
+    yield web_response_frame(holder, "response.output_item.added", {
+        "output_index": index, "item": dict(item, status="in_progress", content=[])})
+    yield web_response_frame(holder, "response.content_part.added", {
+        "item_id": item["id"], "output_index": index, "content_index": 0,
+        "part": {"type": "output_text", "text": "", "annotations": []}})
+    for event, key in (("response.output_text.delta", "delta"), ("response.output_text.done", "text")):
+        yield web_response_frame(holder, event, {"item_id": item["id"], "output_index": index,
+            "content_index": 0, key: text})
+    yield web_response_frame(holder, "response.content_part.done", {
+        "item_id": item["id"], "output_index": index, "content_index": 0, "part": item["content"][0]})
+    yield web_response_frame(holder, "response.output_item.done", {"output_index": index, "item": item})
+    response["output"].append(item)
+    response["output_text"] += text
+    response["usage"] = _responses_usage(flow.usage)
+    yield web_response_frame(holder, "response.completed", {"response": response})
 
 
 def tool_name_of(tool):
@@ -6567,11 +6575,13 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
     return obj
 def stream_responses_events(upstream, model, holder):
     """Yield Responses-API SSE frames translated from chat-completions chunks."""
-    resp_id, msg_id, rs_id = _new_id("resp_"), _new_id("msg_"), _new_id("rs_")
-    created = int(time.time())
-    seq = 0
+    resp_id = holder.setdefault("response_id", _new_id("resp_"))
+    msg_id, rs_id = _new_id("msg_"), _new_id("rs_")
+    created = holder.setdefault("response_created_at", int(time.time()))
+    seq = holder.get("sequence_number", 0)
     text_parts, reason_parts = [], []
-    outputs = []
+    outputs = holder.setdefault("response_outputs", [])
+    round_start_index = len(outputs)
     reason_index = None
     msg_index = None
     finish = "stop"
@@ -6598,13 +6608,13 @@ def stream_responses_events(upstream, model, holder):
             "status": status,
             "model": model,
             "output": [o for o in outputs if o],
-            "output_text": "".join(text_parts),
+            "output_text": holder.get("previous_output_text", "") + "".join(text_parts),
             "parallel_tool_calls": meta.get("parallel_tool_calls", True),
             "tool_choice": meta.get("tool_choice", "auto"),
             "tools": meta.get("tools") or [],
             "metadata": {},
         }
-        u = _responses_usage(usage)
+        u = _responses_usage(wb_webflow.add_usage(holder.get("usage_before_round"), usage))
         if u:
             obj["usage"] = u
         if ns_map:
@@ -6613,6 +6623,7 @@ def stream_responses_events(upstream, model, holder):
     def ev(etype, payload):
         nonlocal seq
         seq += 1
+        holder["sequence_number"] = seq
         data = {"type": etype, "sequence_number": seq}
         data.update(payload)
         body = json.dumps(data, ensure_ascii=False)
@@ -6721,6 +6732,7 @@ def stream_responses_events(upstream, model, holder):
                     entry = _internal_calls.setdefault(dc.get("id") or _new_id("call_"),
                                                        {"name": dc.get("name"), "arguments": "{}"})
                     entry["name"] = dc.get("name") or entry["name"]
+                    entry["id"] = dc.get("id") or _new_id("call_")
                     entry["arguments"] = dc.get("arguments") or entry.get("arguments") or "{}"
                     continue
                 out_idx = len(outputs)
@@ -6759,7 +6771,7 @@ def stream_responses_events(upstream, model, holder):
         # resp_wrapup，那才是 issue #43 真正的病灶）。
         if _internal_calls:
             holder.setdefault("internal_calls", []).extend(
-                {"name": v["name"], "arguments": v["arguments"]}
+                {"id": v.get("id"), "name": v["name"], "arguments": v["arguments"]}
                 for v in _internal_calls.values()
             )
             holder["suppress_completion"] = True
@@ -6844,6 +6856,22 @@ def stream_responses_events(upstream, model, holder):
         status = ("completed" if (finish != "length" and not dropped_truncated)
                   else "incomplete")
         final = resp_obj(status)
+        client_items = [o for o in outputs[round_start_index:] if o and o.get("type") in
+                        ("function_call", "custom_tool_call")]
+        holder["client_calls"] = bool(client_items)
+        calls = [{"id": v.get("id"), "type": "function", "function": {
+                    "name": v["name"], "arguments": v.get("arguments") or "{}"}}
+                 for v in list(tool_calls_map.values()) + list(_internal_calls.values())]
+        if not tool_calls_map:
+            calls.extend({"id": o["call_id"], "type": "function", "function": {
+                "name": o["name"], "arguments": o.get("arguments") or "{}"}}
+                         for o in client_items)
+        holder["round_message"] = {"role": "assistant", "content": full_text or None,
+                                    "tool_calls": calls}
+        if reason_parts:
+            holder["round_message"]["reasoning_content"] = "".join(reason_parts)
+        holder["round_response"] = final
+        holder["previous_output_text"] = final["output_text"]
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
         if not holder.get("suppress_completion"):
@@ -6898,6 +6926,10 @@ def stream_responses_events(upstream, model, holder):
                         _own_web_tools and fn_name
                         and wb_webtools.is_internal_tool(fn_name)):
                     entry = _internal_calls.setdefault(idx, {"name": fn_name, "arguments": ""})
+                    if call_id:
+                        entry["id"] = call_id
+                    elif not entry.get("id"):
+                        entry["id"] = _new_id("call_")
                     if fn_name:
                         entry["name"] = fn_name
                     if fn_args:
@@ -7168,7 +7200,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (socket.timeout, ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.6.13"
+    server_version = "Workbody-FHUB/1.0.0"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -7615,37 +7647,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         query = parse_qs(urlparse(self.path).query)
         channel = (query.get("channel") or [None])[0]
-        if channel is None and (getattr(self, "key_entry", None) or {}).get("realm") == "opencode":
-            channel = "opencode"
-        if channel not in (None, "opencode", "workbuddy-cn", "workbuddy-intl"):
-            return self._error(400, "channel must be opencode, workbuddy-cn or workbuddy-intl",
+        if channel not in (None, "workbuddy-cn", "workbuddy-intl"):
+            return self._error(400, "channel must be workbuddy-cn or workbuddy-intl",
                                "invalid_request_error")
-        if channel == "opencode":
-            try:
-                config = wb_settings.opencode_config(ACCOUNTS_DIR)
-                if config["mode"] == "custom":
-                    with wb_opencode.open_request(config, "/models", slots=wb_settings.proxy_slots(ACCOUNTS_DIR)) as response:
-                        if response.status != 200:
-                            return self._error(response.status, "OpenCode 上游模型目录读取失败")
-                        body = response.read(wb_opencode.MAX_RESPONSE_BYTES + 1)
-                        if len(body) > wb_opencode.MAX_RESPONSE_BYTES:
-                            raise ValueError("OpenCode catalogue exceeds size limit")
-                        document = wb_opencode_catalog.build_opencode_catalog({}, json.loads(body))
-                        document["source"] = "configured-opencode"
-                else:
-                    document = (wb_opencode_catalog.opencode_catalog(ACCOUNTS_DIR)
-                                if config["mode"] == "zen" else
-                                wb_opencode_catalog.opencode_catalog(ACCOUNTS_DIR, mode="go"))
-                document["inference_ready"] = wb_opencode.configured(config)
-                document["catalogue_only"] = not document["inference_ready"]
-                document["mode"] = config["mode"]
-                return self._json(200, document)
-            except wb_opencode.ConfigurationError as exc:
-                return self._error(503, str(exc))
-            except ValueError as exc:
-                return self._error(502, str(exc))
-            except (OSError, http.client.HTTPException):
-                return self._error(502, "OpenCode 上游目录暂时不可达")
         req_realm = ({"workbuddy-cn": "cn", "workbuddy-intl": "intl"}.get(channel)
                      or self._request_realm() or CURRENT_REALM)
         try:
@@ -8135,8 +8139,12 @@ class Handler(BaseHTTPRequestHandler):
                                              "invalid_request_error")
                 realm = str(item.get("realm") or "").strip().lower()
                 if realm not in wb_settings.REALMS:
-                    return None, self._error(400, "realm must be intl, cn, opencode or empty",
-                                             "invalid_request_error")
+                    # Keep an existing retired binding disabled during a panel
+                    # round-trip; enabling it requires an explicit new exit.
+                    old = existing.get(entry_id, {})
+                    if old.get("realm") != realm or item.get("enabled", True) is not False:
+                        return None, self._error(400, "realm must be intl, cn or empty",
+                                                 "invalid_request_error")
                 # An older cached panel does not know this field at all, so a
                 # row that omits it keeps whatever is stored instead of
                 # silently dropping the restriction.
@@ -8289,11 +8297,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return None, self._error(400, str(exc), "invalid_request_error")
         if "opencode" in payload:
-            try:
-                wb_opencode.validate_config(payload["opencode"], wb_settings.opencode_config(ACCOUNTS_DIR))
-                plan["opencode"] = dict(payload["opencode"])
-            except ValueError as exc:
-                return None, self._error(400, str(exc), "invalid_request_error")
+            return None, self._error(400, "this upstream exit has been removed",
+                                     "invalid_request_error")
         if "prompt" in payload:
             raw = payload.get("prompt")
             if not isinstance(raw, dict):
@@ -8402,8 +8407,6 @@ class Handler(BaseHTTPRequestHandler):
         if "upstream" in plan:
             wb_settings.set_upstream_config(ACCOUNTS_DIR, plan["upstream"])
             reply["upstream"] = wb_settings.upstream_config(ACCOUNTS_DIR)
-        if "opencode" in plan:
-            wb_settings.set_opencode_config(ACCOUNTS_DIR, plan["opencode"])
         if "prompt" in plan:
             wb_settings.set_prompt_config(ACCOUNTS_DIR, plan["prompt"])
             reply["prompt"] = wb_settings.prompt_config(ACCOUNTS_DIR)
@@ -9353,6 +9356,7 @@ class Handler(BaseHTTPRequestHandler):
         model = payload.get("model") or "deepseek-v4.1-flash"
         want_stream = bool(payload.get("stream"))
         t_start = time.time()
+        flow = wb_webflow.WebToolFlow(chat_req) if web_tools_active(chat_req) else None
         fp = prompt_fingerprint(chat_req.get("messages"))
         log(
             "responses: model=%s stream=%s msgs=%d effort=%r custom_tools=%s"
@@ -9376,9 +9380,11 @@ class Handler(BaseHTTPRequestHandler):
                 inbound_request_id=(self.headers.get("X-Conversation-Request-ID")
                                     or self.headers.get("X-Root-Request-ID") or ""),
                 trace_id=(self.headers.get("X-Trace-ID") or ""))
-            upstream, account, effort = open_upstream(
-                chat_req, session_key=session_key, target_realm=req_realm,
-                session_meta=session_meta)
+            upstream_options = {"session_key": session_key, "target_realm": req_realm,
+                                "session_meta": session_meta}
+            if flow:
+                upstream_options["deadline"] = flow.deadline
+            upstream, account, effort = open_upstream(chat_req, **upstream_options)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -9406,13 +9412,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._responses_stream_response(
                     upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                     base_body=chat_req, session_key=session_key, realm=req_realm,
-                    session_meta=session_meta, effort=effort)
+                    session_meta=session_meta, effort=effort, web_flow=flow)
             return self._responses_nonstream_response(
                 upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                 base_body=chat_req, session_key=session_key, realm=req_realm,
-                effort=effort)
+                effort=effort, web_flow=flow)
 
-    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, session_meta=None, effort=None):
+    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, session_meta=None, effort=None, web_flow=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -9420,135 +9426,118 @@ class Handler(BaseHTTPRequestHandler):
         if cors_origin_allowed(self.path):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        holder = {"usage": None, "custom_names": custom_names,
-                  "request_meta": request_meta,
-                  "namespace_map": namespace_map,
-                  "base_body": base_body,
-                  "base_messages": (base_body or {}).get("messages"),
-                  "session_key": session_key,
-                  "realm": realm,
-                  "session_meta": session_meta}
+        flow = web_flow or (wb_webflow.WebToolFlow(base_body) if web_tools_active(base_body) else None)
+        holder = {"custom_names": custom_names, "request_meta": request_meta,
+                  "namespace_map": namespace_map, "base_body": base_body,
+                  "realm": realm, "session_meta": session_meta, "web_flow": flow}
         first_ms = None
+        round_recorded = False
         try:
-            # 一輪跑完如果模型要的是 web_search / web_fetch，就由反代
-            # 執行、把結果餵回去再跑一輪。客戶端從頭到尾只看到一則連續的回應。
             rounds = 0
-            total_usage = None
             while True:
-                holder.pop("internal_calls", None)
-                holder.pop("suppress_completion", None)
+                round_recorded = False
+                holder["usage"] = None
+                holder["usage_before_round"] = flow.usage if flow else None
+                for field in ("internal_calls", "suppress_completion", "round_message", "client_calls"):
+                    holder.pop(field, None)
                 holder["suppress_lifecycle"] = rounds > 0
-                for frame in stream_responses_events(upstream, model, holder):
+                raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
+                for frame in stream_responses_events(raw, model, holder):
                     if first_ms is None:
                         first_ms = int((time.time() - t_start) * 1000)
                     self.wfile.write(clean_responses_frame(frame))
                     self.wfile.flush()
-                # 每一輪的 token 都是真的花掉的，記帳要加總
-                total_usage = sum_usage(total_usage, holder.get("usage"))
+                usage = holder.get("usage")
+                if flow:
+                    flow.usage = wb_webflow.add_usage(flow.usage, usage)
+                record_usage(model, usage, stream=True, elapsed_ms=int((time.time() - t_start) * 1000),
+                             ttft_ms=first_ms, fp=fp, account=account.uid,
+                             key=self._key_id(), effort=effort)
+                round_recorded = True
                 internal = holder.get("internal_calls") or []
                 if not internal:
                     break
-                rounds += 1
-                # 用完就收回工具，讓模型自己收尾；這裡不合成任何事件。
-                give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
-                try:
-                    upstream.close()
-                except Exception:
-                    pass
-                upstream, account, _ = follow_up_with_tool_results(
-                    internal, holder, model, session_key, t_start, drop_tools=give_up)
-            if total_usage:
-                holder["usage"] = total_usage
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            wall = int((time.time() - t_start) * 1000)
-            record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                         ttft_ms=first_ms,
-                         gen_ms=(wall - first_ms) if first_ms is not None else None,
-                         fp=fp, account=account.uid,
-                         outcome="client_aborted", key=self._key_id(), effort=effort)
-            return
-        except Exception as exc:
-            wall = int((time.time() - t_start) * 1000)
-            record_error(model, 502, "stream aborted: %s" % exc,
-                         elapsed_ms=wall, account=account.uid,
-                         usage=holder.get("usage"), stream=True,
-                         ttft_ms=first_ms,
-                         gen_ms=(wall - first_ms) if first_ms is not None else None,
-                         fp=fp, outcome="upstream_aborted", key=self._key_id())
-            try:
-                self.wfile.write(b"data: [DONE]" + bytes([10, 10]))
-                self.wfile.flush()
-            except Exception:
-                pass
-            return
-        finally:
-            # 代跑多輪時 upstream 會被換掉，外層的 with 只認得最開始那一條，
-            # 最後一條要在這裡收掉。
-            try:
+                if holder.get("client_calls"):
+                    flow.execute(internal, holder.get("round_message"))
+                    for frame in mixed_web_result_frames(holder, flow):
+                        self.wfile.write(clean_responses_frame(frame))
+                        self.wfile.flush()
+                    break
                 upstream.close()
-            except Exception:
+                upstream, account, _ = follow_up_with_tool_results(
+                    internal, holder, model, session_key, t_start)
+                rounds += 1
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            if not round_recorded:
+                record_usage(model, holder.get("usage"), stream=True,
+                             elapsed_ms=int((time.time() - t_start) * 1000), fp=fp,
+                             account=account.uid, outcome="client_aborted", key=self._key_id(), effort=effort)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream stream aborted: %s" % exc
+            partial_usage = None if round_recorded else (holder.get("usage") or getattr(flow, "current_usage", None))
+            record_error(model, 502, message, account=account.uid, stream=True,
+                         usage=partial_usage, fp=fp,
+                         elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id())
+            response = dict(holder.get("round_response") or {})
+            response.update(id=holder.get("response_id") or _new_id("resp_"),
+                            object="response", status="failed", model=model,
+                            error={"code": "web_tool_limit" if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream_error",
+                                   "message": message})
+            failed_usage = wb_webflow.add_usage(flow.usage if flow else None, partial_usage)
+            if failed_usage:
+                response["usage"] = _responses_usage(failed_usage)
+            try:
+                self.wfile.write(web_response_frame(holder, "response.failed", {"response": response}))
+                self.wfile.flush()
+            except (OSError, ValueError):
                 pass
-        wall = int((time.time() - t_start) * 1000)
-        record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                     ttft_ms=first_ms,
-                     gen_ms=(wall - first_ms) if first_ms is not None else None,
-                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-        return
+        finally:
+            upstream.close()
 
-    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
-        # 跟串流那條一樣：客戶端宣告 web_search / web_fetch 時由反代代跑。
-        # 中間那幾輪對客戶端不可見，最後才組成一個 Responses 物件回傳；不這樣
-        # 做的話 web_search 的 function_call 會直接漏給客戶端，客戶端只會回
-        # 一句 unsupported call。
-        sources = []
-        rounds = 0
-        # 開關關閉時不攔同名呼叫：那是客戶端自己的工具。
-        web_tools = web_tools_active(base_body)
+    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, web_flow=None):
+        flow = web_flow or (wb_webflow.WebToolFlow(base_body) if web_tools_active(base_body) else None)
+        holder = {"base_body": base_body, "realm": realm, "web_flow": flow}
+        round_recorded = False
         try:
             while True:
-                try:
-                    chat_obj = aggregate_stream(upstream, model, None)
-                except Exception as exc:
-                    record_error(model, 502, str(exc),
-                                 elapsed_ms=int((time.time() - t_start) * 1000),
-                                 account=account.uid, key=self._key_id())
-                    return self._error(502, f"upstream stream error: {exc}")
-                calls = internal_calls_from_chat(chat_obj, web_tools=web_tools)
+                round_recorded = False
+                raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
+                chat_obj = aggregate_stream(raw, model, None)
+                usage = chat_obj.get("usage")
+                if flow:
+                    flow.usage = wb_webflow.add_usage(flow.usage, usage)
+                record_usage(model, usage, stream=False, elapsed_ms=int((time.time() - t_start) * 1000),
+                             fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                round_recorded = True
+                calls = internal_calls_from_chat(chat_obj, web_tools=flow is not None)
                 if not calls:
                     break
-                rounds += 1
-                give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
-                try:
-                    upstream.close()
-                except Exception:
-                    pass
-                holder = {"base_messages": (base_body or {}).get("messages"),
-                          "base_body": base_body, "realm": realm,
-                          "web_sources": sources}
-                try:
-                    upstream, account, _ = follow_up_with_tool_results(
-                        calls, holder, model, session_key, t_start, drop_tools=give_up)
-                except Exception as exc:
-                    record_error(model, 502, "web tool follow-up failed: %s" % exc,
-                                 elapsed_ms=int((time.time() - t_start) * 1000),
-                                 account=account.uid, key=self._key_id())
-                    return self._error(502, "web tool follow-up failed: %s" % exc)
-                sources = holder.get("web_sources") or sources
-            wall = int((time.time() - t_start) * 1000)
-            result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
-                                      sources=sources)
-            record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
-                         account=account.uid, key=self._key_id(), effort=effort)
-            return self._json(200, result)
-        finally:
-            # follow-up 會把 upstream 換成新的一條，外層的 with 只認得最開始
-            # 那一條；最後一條（或中途早退時的當前那條）必須在這裡收掉，
-            # 否則在途租約會永久卡住（非流式 Responses + 內建網路工具的 P1）。
-            # _LeasedResponse.release 有防重入，重複關閉是安全的。
-            try:
+                message = chat_obj["choices"][0]["message"]
+                holder["round_message"] = message
+                client_calls = [tc for tc in message.get("tool_calls") or []
+                                if not wb_webtools.is_internal_tool((tc.get("function") or {}).get("name"))]
+                if client_calls:
+                    flow.execute(calls, message)
+                    message = dict(message, tool_calls=client_calls,
+                                   content=(message.get("content") or "") + "\n\n" + flow.result_text())
+                    chat_obj = dict(chat_obj, choices=[dict(chat_obj["choices"][0], message=message)])
+                    break
                 upstream.close()
-            except Exception:
-                pass
+                upstream, account, _ = follow_up_with_tool_results(
+                    calls, holder, model, session_key, t_start)
+            if flow:
+                chat_obj = dict(chat_obj, usage=flow.usage)
+            result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
+                                      sources=flow.sources if flow else None)
+            return self._json(200, result)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream/web follow-up failed: %s" % exc
+            record_error(model, 502, message, account=account.uid,
+                         elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id(),
+                         usage=None if round_recorded else getattr(flow, "current_usage", None))
+            return self._error(502, message)
+        finally:
+            upstream.close()
 
     def _handle_messages_count_tokens(self, payload):
         """Best-effort Anthropic count_tokens endpoint.
@@ -9800,8 +9789,7 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._handle_accounts(path, payload)
-        is_opencode = self._key_realm() == "opencode"
-        if is_messages_route and path.endswith("/count_tokens") and not is_opencode:
+        if is_messages_route and path.endswith("/count_tokens"):
             payload = self._payload_or_error()
             if payload is None:
                 return
@@ -9822,8 +9810,7 @@ class Handler(BaseHTTPRequestHandler):
                 path=path,
             )
             # The body is intentionally unread: its model/stream are unknown.
-            record_error("unknown", 503, message, stream=False, key=self._key_id(),
-                         realm="opencode" if is_opencode else None)
+            record_error("unknown", 503, message, stream=False, key=self._key_id())
             if is_messages_route:
                 return self._anthropic_error(503, message, "overloaded_error")
             return self._error(503, message)
@@ -9831,119 +9818,11 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._payload_or_error()
             if payload is None:
                 return
-            if is_opencode:
-                return self._handle_opencode(path, payload)
             if is_messages_route:
                 return self._handle_messages(payload)
             return self._dispatch_chat_post(path, payload)
         finally:
             _chat_slots.release()
-
-    def _handle_opencode(self, path, payload):
-        """A fixed OpenCode key always uses native OpenCode, with no WB fallback."""
-        set_request_context(request_id=self.headers.get("X-Request-Id") or uuid.uuid4().hex,
-                            client_ip=self.client_address[0] if self.client_address else "",
-                            user_agent=self.headers.get("User-Agent") or "", path=path)
-        model = payload.get("model") or "unknown"
-        started = time.time()
-        config = wb_settings.opencode_config(ACCOUNTS_DIR)
-        native_messages = path in ("/v1/messages", "/messages", "/v1/messages/count_tokens", "/messages/count_tokens")
-        def error(status, message):
-            record_error(model, status, message, key=self._key_id(), realm="opencode")
-            if native_messages:
-                return self._anthropic_error(status, message, "invalid_request_error" if status == 400 else "api_error")
-            return self._error(status, message, "invalid_request_error" if status == 400 else "api_error")
-        blocked = self._key_model_error(payload.get("model")) or self._banned_model_error(payload.get("model"))
-        if not blocked and BLOCK_BACKGROUND_REQUESTS:
-            reason = background_request_reason(payload)
-            if reason:
-                blocked = background_request_message(reason)
-        if blocked:
-            return error(400, blocked)
-        if not isinstance(payload.get("model"), str) or not payload["model"].strip():
-            return error(400, "model is required")
-        try:
-            response = wb_opencode.open_request(config, path, payload, self.headers,
-                                               wb_settings.proxy_slots(ACCOUNTS_DIR))
-        except wb_opencode.ConfigurationError as exc:
-            return error(503, str(exc))
-        except ValueError as exc:
-            return error(400, str(exc))
-        except (socket.timeout, TimeoutError):
-            return error(504, "OpenCode 上游连接超时")
-        except (OSError, http.client.HTTPException):
-            return error(502, "OpenCode 上游连接失败")
-        with response:
-            status = response.status
-            streaming = status == 200 and response.headers.get("Content-Type", "").startswith("text/event-stream")
-            tracker = wb_opencode.StreamUsage()
-            usage = None
-            outcome = "completed" if 200 <= status < 300 else "failed"
-            first_ms = None
-            headers_sent = False
-            try:
-                body = None
-                if not streaming:
-                    body = response.read(wb_opencode.MAX_RESPONSE_BYTES + 1)
-                    if len(body) > wb_opencode.MAX_RESPONSE_BYTES:
-                        return error(502, "OpenCode 上游响应超过大小限制")
-                    if status >= 300:
-                        body = body.replace(config["api_key"].encode(), b"[redacted]")
-                    try:
-                        document = json.loads(body)
-                        usage = wb_opencode.response_usage(document)
-                        if isinstance(document, dict) and document.get("error"):
-                            outcome = "failed"
-                    except (ValueError, UnicodeError):
-                        pass
-                self.send_response(status)
-                self.send_header("Content-Type", response.headers.get("Content-Type", "application/json"))
-                self.send_header("Cache-Control", "no-store")
-                for field in ("Retry-After", "X-Request-Id", "Content-Encoding"):
-                    if response.headers.get(field):
-                        self.send_header(field, response.headers[field])
-                if cors_origin_allowed(self.path):
-                    self.send_header("Access-Control-Allow-Origin", "*")
-                if body is not None:
-                    self.send_header("Content-Length", str(len(body)))
-                else:
-                    self.send_header("Connection", "close")
-                    self.close_connection = True
-                self.end_headers()
-                headers_sent = True
-                if body is not None:
-                    self.wfile.write(body)
-                else:
-                    read = getattr(response, "read1", response.read)
-                    while True:
-                        chunk = read(16384)
-                        if not chunk:
-                            break
-                        if first_ms is None:
-                            first_ms = int((time.time() - started) * 1000)
-                        tracker.feed(chunk)
-                        self.wfile.write(chunk)
-                        self.wfile.flush()
-                    usage = tracker.usage
-                    if tracker.failed or not tracker.completed:
-                        outcome = "upstream_aborted"
-            except (BrokenPipeError, ConnectionResetError):
-                outcome = "client_aborted"
-                self.close_connection = True
-            except (OSError, http.client.HTTPException):
-                if not headers_sent:
-                    return error(502, "OpenCode 上游响应读取失败")
-                outcome = "upstream_aborted"
-                self.close_connection = True
-            if not path.endswith("/count_tokens"):
-                elapsed = int((time.time() - started) * 1000)
-                if outcome == "completed":
-                    record_usage(model, wb_opencode.normalize_usage(usage, native_messages), stream=streaming, elapsed_ms=elapsed,
-                                 ttft_ms=first_ms, key=self._key_id(), realm="opencode")
-                else:
-                    record_error(model, status, "OpenCode " + outcome, usage=wb_opencode.normalize_usage(usage or tracker.usage, native_messages),
-                                 stream=streaming, elapsed_ms=elapsed, ttft_ms=first_ms,
-                                 outcome=outcome, key=self._key_id(), realm="opencode")
 
     def _dispatch_chat_post(self, path, payload):
         # Per-request archive context: a request id is always recorded; the
@@ -10154,7 +10033,7 @@ def main():
     _serve_forever(args)
 
 def _parse_cli_args():
-    ap = argparse.ArgumentParser(description="WorkBuddy (workbuddy.ai) -> OpenAI-compatible proxy")
+    ap = argparse.ArgumentParser(description="Workbody-FHUB: WorkBuddy -> OpenAI-compatible gateway")
     ap.add_argument("--info", help="path to the WorkBuddy *.info credential file")
     ap.add_argument("--host", default=os.environ.get("HOST") or "127.0.0.1")
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or "8788"))
@@ -10174,8 +10053,10 @@ def _parse_cli_args():
                     help="where the per-account credential files live (default: ./accounts)")
     ap.add_argument("--import-desktop", action="store_true",
                     help="import the desktop app credential as an account, then exit")
-    ap.add_argument("--panel-password", default=None,
-                    help="set the web panel password on startup (default: admin)")
+    ap.add_argument("--panel-password", default=os.environ.get("PANEL_PASSWORD") or None,
+                    help="set the panel password (or PANEL_PASSWORD); generated on first startup")
+    ap.add_argument("--panel-password-file", default=os.environ.get("PANEL_PASSWORD_FILE") or None,
+                    help="read the panel password from a Docker secret / private file")
     args = ap.parse_args()
     return args
 
@@ -10258,11 +10139,21 @@ def _bootstrap_runtime(args):
     if key_from_panel and not args.api_key:
         API_KEY = saved_key
         API_KEY_FILE_SET = True
-    if args.panel_password:
-        wb_settings.set_panel_password(ACCOUNTS_DIR, args.panel_password)
-        log("panel      : password set from --panel-password")
-    elif wb_settings.panel_password_is_default(ACCOUNTS_DIR):
-        log("panel      : password is still the default 'admin' - change it in the panel")
+    panel_password = args.panel_password
+    password_file = getattr(args, "panel_password_file", None)
+    if password_file:
+        with open(password_file, encoding="utf-8") as password_source:
+            panel_password = password_source.read(4097).strip()
+        if not panel_password or len(panel_password) > 4096:
+            raise ValueError("invalid panel password file")
+    if panel_password:
+        wb_settings.set_panel_password(ACCOUNTS_DIR, panel_password)
+        log("panel      : custom password configured")
+    else:
+        bootstrap_password = wb_settings.ensure_panel_password(ACCOUNTS_DIR)
+        if bootstrap_password:
+            print("  PANEL BOOTSTRAP PASSWORD: " + bootstrap_password, flush=True)
+            log("panel      : generated and saved a random password; admin is disabled")
     POOL = wb_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()
     POOL.apply_proxy_slots()

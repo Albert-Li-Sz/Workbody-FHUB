@@ -7,7 +7,7 @@ const source = html.slice(html.indexOf('const MODEL_CHANNEL_LABELS'), html.index
 assert.ok(source.includes('async function selectModelsChannel'));
 const options = /id="modelChannelSelect"[\s\S]*?<\/select>/.exec(html)[0];
 assert.deepStrictEqual([...options.matchAll(/<option value="([^"]+)"/g)].map(m => m[1]),
-                       ['opencode', 'workbuddy-cn', 'workbuddy-intl']);
+                       ['workbuddy-cn', 'workbuddy-intl']);
 const elements = {};
 const el = id => elements[id] || (elements[id] = {value:'',textContent:'',innerHTML:''});
 const tbody = el('tbody');
@@ -35,41 +35,41 @@ const api = new Function('window','document','localStorage','getJSON','esc',sour
   // A slow previous channel must not repaint the newly selected catalogue.
   const slow = api.selectModelsChannel('workbuddy-intl');
   const slowReply = pending.shift();
-  work = api.selectModelsChannel('opencode');
+  work = api.selectModelsChannel('workbuddy-cn');
   const latestReply = pending.shift();
   assert.ok(!tbody.innerHTML.includes('domestic'), 'old rows disappear while loading');
-  latestReply.resolve({source:'models.dev',data:[{id:'example-free',channel:'opencode',
-                        max_output_tokens:32000,output_clamp:16000,pricing:{input:0,output:0}},
-                        {id:'paid',channel:'opencode',pricing:{input:2,output:8}}]});
+  latestReply.resolve({source:'workbuddy',data:[{id:'latest-domestic',channel:'workbuddy-cn',
+                        credits:'x0.50',max_output_tokens:32000,output_clamp:16000}]});
   await work;
   slowReply.resolve({data:[{id:'stale-workbuddy',credits:'x0.00'}]});
   await slow;
   assert.ok(!tbody.innerHTML.includes('stale-workbuddy'));
-  assert.ok(tbody.innerHTML.includes('example-free'));
-  assert.ok(tbody.innerHTML.includes('免费（目录标价）'));
-  assert.ok(tbody.innerHTML.includes('$2 / $8'));
-  assert.ok(!tbody.innerHTML.includes('0.00x'), 'OpenCode pricing must not use WorkBuddy credits');
-  assert.ok(!tbody.innerHTML.includes('钳制') && !tbody.innerHTML.includes('未探测'),
-            'WorkBuddy output probes must not annotate another provider');
-  assert.ok(!tbody.innerHTML.includes('>文本<'), 'missing OpenCode metadata must not invent a text capability');
-  assert.ok(el('modelChannelStatus').textContent.includes('OpenCode 上游未配置'));
-  assert.equal(el('modelChannelSelect').value,'opencode');
+  assert.ok(tbody.innerHTML.includes('latest-domestic'));
+  assert.ok(tbody.innerHTML.includes('0.50x'));
+  assert.ok(tbody.innerHTML.includes('钳制'));
+  assert.equal(el('modelChannelSelect').value,'workbuddy-cn');
 
   // Changing an unrelated view must not override the explicit model channel.
-  window.VIEW_REALM='cn';
+  window.VIEW_REALM='intl';
   work=api.loadModels();
-  assert.equal(pending[0].url,'/v1/models?channel=opencode');
-  pending.shift().resolve({source:'models.dev',stale:true,data:[]});
+  assert.equal(pending[0].url,'/v1/models?channel=workbuddy-cn');
+  pending.shift().resolve({source:'workbuddy',data:[]});
   await work;
-  assert.ok(el('modelChannelStatus').textContent.includes('缓存目录'));
+  assert.ok(el('modelChannelStatus').textContent.includes('WorkBuddy 国内'));
 
   work=api.selectModelsChannel('workbuddy-cn');
   pending.shift().reject(new Error('offline'));
   await work;
   assert.ok(el('modelChannelStatus').textContent.includes('offline'));
-  assert.ok(!tbody.innerHTML.includes('example-free'));
+  assert.ok(!tbody.innerHTML.includes('latest-domestic'));
   const before=pending.length;
   await api.selectModelsChannel('invalid');
+  await api.selectModelsChannel('opencode');
   assert.equal(pending.length,before);
-  console.log('model channel isolation, pricing and request race assertions passed');
+  window.MODEL_CHANNEL='opencode';
+  work=api.loadModels();
+  assert.equal(pending[0].url,'/v1/models?channel=workbuddy-intl');
+  pending.shift().resolve({data:[]});
+  await work;
+  console.log('WorkBuddy channel isolation, retired selection and request race assertions passed');
 })().catch(error=>{console.error(error);process.exit(1);});

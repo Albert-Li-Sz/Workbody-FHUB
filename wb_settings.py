@@ -20,7 +20,6 @@ import time
 import wb_storage
 
 import wb_pool
-import wb_opencode
 
 DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
@@ -199,10 +198,8 @@ def verify_panel_password(accounts_dir, password):
     password = password or ""
     data = load(accounts_dir)
     stored = data.get("panel_password_hash")
-    if not stored:
-        return password == DEFAULT_PANEL_PASSWORD
-    if data.get("panel_password_default") is True:
-        return password == DEFAULT_PANEL_PASSWORD
+    if not stored or data.get("panel_password_default") is True:
+        return False
     salt = data.get("panel_password_salt")
     if not salt:
         return False
@@ -215,20 +212,26 @@ def verify_panel_password(accounts_dir, password):
 
 
 def set_panel_password(accounts_dir, password):
+    if not isinstance(password, str) or not password or password == DEFAULT_PANEL_PASSWORD:
+        raise ValueError("set a non-empty panel password other than the retired default admin")
     with _lock:
         data = load(accounts_dir)
-        if password == DEFAULT_PANEL_PASSWORD:
-            data.pop("panel_password_salt", None)
-            data.pop("panel_password_rounds", None)
-            data["panel_password_hash"] = ""
-            data["panel_password_default"] = True
-        else:
-            salt = secrets.token_hex(16)
-            data["panel_password_salt"] = salt
-            data["panel_password_rounds"] = PBKDF2_ROUNDS
-            data["panel_password_hash"] = _digest(password, salt)
-            data["panel_password_default"] = False
+        salt = secrets.token_hex(16)
+        data["panel_password_salt"] = salt
+        data["panel_password_rounds"] = PBKDF2_ROUNDS
+        data["panel_password_hash"] = _digest(password, salt)
+        data["panel_password_default"] = False
         save(accounts_dir, data)
+
+
+def ensure_panel_password(accounts_dir):
+    """Return a generated bootstrap password once; preserve custom hashes."""
+    with _lock:
+        if not panel_password_is_default(accounts_dir):
+            return None
+        password = secrets.token_urlsafe(24)
+        set_panel_password(accounts_dir, password)
+        return password
 
 
 def api_key_override(accounts_dir):
@@ -271,26 +274,7 @@ def ensure_launcher_key(accounts_dir):
 # Each key can be bound to one upstream realm, so several clients can hit
 # different exits at the same time instead of sharing the global switch.
 
-REALMS = ("", "intl", "cn", "opencode")
-
-
-def opencode_config(accounts_dir):
-    stored = load(accounts_dir).get("opencode")
-    stored = stored if isinstance(stored, dict) else {}
-    known = {k: stored[k] for k in wb_opencode.DEFAULTS if k in stored}
-    try:
-        return wb_opencode.validate_config(known)
-    except ValueError:
-        return dict(wb_opencode.DEFAULTS)  # Invalid hand-edited settings fail closed.
-
-
-def set_opencode_config(accounts_dir, config):
-    with _lock:
-        data = load(accounts_dir)
-        validated = wb_opencode.validate_config(config, opencode_config(accounts_dir))
-        data["opencode"] = deep_merge(data.get("opencode"), validated)
-        save(accounts_dir, data)
-        return validated
+REALMS = ("", "intl", "cn")
 
 
 def _clean_model_patterns(value):
@@ -351,15 +335,15 @@ def _clean_key_entry(entry):
     if not key and not deleted_at:
         return None
     realm = str(entry.get("realm") or "").strip().lower()
-    if realm not in REALMS:
-        realm = ""
+    # Retired or invalid exits must never silently spend a WorkBuddy account.
+    supported_realm = realm in REALMS
     return {
         "id": str(entry.get("id") or secrets.token_hex(6)),
         "name": str(entry.get("name") or "").strip() or "未命名",
         "key": key,
         "realm": realm,
         "models": _clean_model_patterns(entry.get("models")),
-        "enabled": False if deleted_at else entry.get("enabled", True) is not False,
+        "enabled": supported_realm and not deleted_at and entry.get("enabled", True) is not False,
         "created_at": entry.get("created_at") or time.strftime("%Y/%m/%d %H:%M"),
         "deleted_at": deleted_at,
     }

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reviewed_on": "2026-10-07",
   "origin": {
-    "url": "https://github.com/Albert-Li-Sz/workbuddy2api-hub.git"
+    "url": "https://github.com/Albert-Li-Sz/Workbody-FHUB.git"
   },
   "upstreams": [
     {
@@ -16,21 +16,6 @@
           "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/136",
           "reviewed_commit": "5c39bc18b20b10c254953d254aab0022f60f6551",
           "status": "integrated-locally"
-        }
-      ]
-    },
-    {
-      "remote": "upstream-opencode",
-      "url": "https://github.com/GuJi08233/opencode-free-gate.git",
-      "branch": "main",
-      "reviewed_commit": "215c725bdf3a5c0d916edf7a491ac3bf7fd1120b",
-      "integration": "protocol-reference",
-      "license_note": "No LICENSE/COPYING/NOTICE in the reviewed tree; no Go source is vendored.",
-      "references": [
-        {
-          "url": "https://github.com/GuJi08233/opencode-free-gate/pull/3",
-          "reviewed_commit": "221548127aade3e6f6c685b93cd2bc67c9c70fc3",
-          "status": "open-unmerged-reference"
         }
       ]
     }

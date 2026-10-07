@@ -10,3 +10,17 @@ python/
 *.bak*
 temp_*
 .DS_Store
+# Never send credentials, request archives or environment files to builders.
+accounts/
+usage/
+.env
+.env.*
+*.info
+*.info.*
+tests/
+docs/
+scripts/
+.github/
+dist/
+*.tar
+*.tar.gz

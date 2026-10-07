@@ -22,7 +22,7 @@ class VersionStringTests(unittest.TestCase):
     def test_source_version_strings_agree(self):
         src = read("wb_proxy.py")
         overview = re.search(r'"version"\s*:\s*"([^"]+)"', src)
-        server = re.search(r'server_version\s*=\s*"wb-proxy/([^"]+)"', src)
+        server = re.search(r'server_version\s*=\s*"Workbody-FHUB/([^"]+)"', src)
         self.assertIsNotNone(overview, "overview version string not found")
         self.assertIsNotNone(server, "server header version string not found")
         self.assertEqual(overview.group(1), server.group(1))
@@ -59,6 +59,27 @@ class DockerTests(unittest.TestCase):
         text = read("docker-compose.yml")
         self.assertIn("${PUID:-", text)
         self.assertIn("${PGID:-", text)
+
+    def test_fork_builds_its_own_image_with_loopback_default(self):
+        text = read("docker-compose.yml")
+        self.assertIn("workbody-fhub:1.0.0", text)
+        self.assertIn("context: .", text)
+        self.assertIn("BIND_ADDRESS:-127.0.0.1", text)
+        self.assertNotIn("ghcr.io/ardeyouxipianyi", text)
+        ignored = read(".dockerignore")
+        for pattern in ("accounts/", "usage/", ".env", "*.info"):
+            self.assertIn(pattern, ignored)
+
+    def test_original_project_declarations_and_license_are_preserved(self):
+        text = read("README.md")
+        self.assertTrue(text.startswith("# Workbody-FHUB"))
+        self.assertIn("https://github.com/ardeyouxipianyi/workbuddy2api-hub", text)
+        self.assertIn("100% Vibe Coding 协同产物", text)
+        self.assertIn("本项目为非官方自托管网关，仅供技术研究", text)
+        self.assertIn("本项目不提供任何账号及额度", text)
+        self.assertIn("Credits & References", text)
+        self.assertIn("MIT License", read("LICENSE.upstream"))
+        self.assertIn("Apache License", read("LICENSE"))
 
 
 class ReadmeTests(unittest.TestCase):

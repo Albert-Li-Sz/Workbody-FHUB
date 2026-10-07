@@ -1,17 +1,19 @@
-# WorkBuddy2API-Hub — 国际版、国内版多账号网关中枢
+# Workbody-FHUB — WorkBuddy 国内与国际多账号网关
 
 <p align="center">
-  <a href="https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases"><img src="https://img.shields.io/badge/Release-v1.6.13-2496ED?style=flat-square" alt="Version 1.6.13"></a>
+  <a href="https://github.com/Albert-Li-Sz/Workbody-FHUB/releases"><img src="https://img.shields.io/badge/Workbody_FHUB-v1.0.0-2496ED?style=flat-square" alt="Workbody-FHUB 1.0.0"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
-  <img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-green.svg?style=flat-square" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/Vibe_Coding-100%25-ff69b4?style=flat-square" alt="Vibe Coding">
 </p>
 
+Workbody-FHUB 是 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 的衍生项目，当前版本 **1.0.0**，基于上游 **1.6.13**。本衍生项目沿用目标仓库的 [Apache-2.0 许可证](LICENSE)；原项目的 Vibe Coding 声明、致谢、贡献者、免责声明和 [MIT 许可证原文](LICENSE.upstream)均保留。本分支负责自己的安全修复、网络搜索和镜像构建。
+
 把腾讯 **[www.workbuddy.ai](https://www.workbuddy.ai)**（国际版）与 **[codebuddy.cn](https://www.codebuddy.cn)**（国内版）的原生服务封装成标准 OpenAI 兼容接口（Chat Completions 与 Responses API），并补齐多账号调度与运维能力：
 
-本整合分支继续沿用 Python + Docker / 1Panel 部署。模型页支持 **OpenCode / WorkBuddy 国内 / WorkBuddy 国际** 三个渠道，API Key 可分别固定绑定这三个出口。在设置中配置独立的 OpenCode 上游 Key 后，绑定 OpenCode 的网关 Key 可透传 Chat Completions、Responses、Messages 及其流式响应；未配置时明确报错。模型页切换仍只影响目录。WorkBuddy 账号导入同时修复产品身份、代理绑定和添加时间丢失的问题。接入步骤与协议边界见 [OpenCode 出口](docs/opencode-exit.md)，上游清单见 [upstreams.json](upstreams.json)，后续计划见 [整合方案](docs/integration-plan.md) 和 [OpenCode 调研](docs/research/opencode-free-gate.md)。
+本分支沿用 Python + Docker / 1Panel 部署，模型页保留 **WorkBuddy 国内 / WorkBuddy 国际** 两个渠道，API Key 可固定绑定对应出口，模型目录切换只影响展示。账号导入保留产品身份、代理绑定和添加时间。本地网络搜索采用 DuckDuckGo HTML，异常时最多回退一次至 Lite，并提供短期缓存、并发合并与响应大小限制。部署与迁移见 [项目说明](docs/integration-plan.md)，搜索行为见 [网络搜索说明](docs/research/web-search-support.md)，修复与验证记录见 [审计报告](docs/audit-2026-10-07.md)。
 
 - **开箱即用**：绿色包自带精简 Python，双击脚本即启；
 - **双区域独立路由**：国际版 / 国内版独立配置与调度，看板一键切换，状态落盘；
@@ -29,6 +31,8 @@
 - **Web 看板**：指标卡片、模型性能与用量大表、按 API Key 的用量归属、实时请求流水一屏可查。
 - **积分与权益包明细查看**：完整解析账号各套餐包/加量包额度、已用、剩余、生效状态及有效期周期，看板一键弹窗并支持实时刷新；
 - **Web 看板**：指标卡片、模型性能与用量大表、实时请求流水一屏可查。
+
+原项目声明（保留原文）：
 
 > ⚡ **Vibe Coding 产物**：本项目为 100% Vibe Coding 协同产物，由人类开发者提出架构与业务意图，AI 助手端到端完成逆向分析、链路调度、WAF 指纹脱敏与界面编写。
 
@@ -61,11 +65,9 @@ Unix 系统上的账号目录权限为 `0700`，凭证和 Key 设置文件权限
 
 ### 2. 面板访问密码
 
-打开看板需要先输入**面板访问密码**（默认 `admin`），它与 API Key 相互独立：密码只用于打开看板，可在「设置」页修改（或启动时用 `--panel-password` 指定），以 PBKDF2-SHA256 摘要存于 `accounts/settings.json`（不存明文）；登录状态保存在浏览器会话中，关闭浏览器或重启网关后需重新输入。
+首次启动自动生成随机面板密码，仅保存 PBKDF2-SHA256 摘要，明文只在该次启动日志的 `PANEL BOOTSTRAP PASSWORD` 行显示。已有自定义密码继续有效；旧默认 `admin` 会在启动时自动替换，且不能再设置为新密码。该密码与 API Key 独立。
 
-**本机/局域网自用免手输**：打开看板时可在 URL 后带上 `?pwd=面板密码`，看板会自动填入并直接登录，无需再手动输入，例如 `http://127.0.0.1:8788/?pwd=admin`。适合本机或受信任的局域网内自用；**公网暴露时不要使用**——密码会留在浏览器历史记录、地址栏以及可能的反向代理访问日志中。注意这与局域网共享里的 `?key=` 不同：`?key=` 只把 API Key 存下来供 `/v1` 接口调用，并不会自动登录面板。
-
-> 首次登录后请立即修改默认密码。
+可用 `PANEL_PASSWORD` / `--panel-password` 指定密码；Docker secret 或私有文件可通过 `PANEL_PASSWORD_FILE` / `--panel-password-file` 读取。忘记密码时可用这些启动参数设置新密码。面板中的密码修改仍验证当前密码。
 
 ### 3. 局域网共享模式
 允许局域网内其他设备（手机、平板、协同电脑）访问：
@@ -95,79 +97,54 @@ Unix 系统上的账号目录权限为 `0700`，凭证和 Key 设置文件权限
 - **防冲突**：面板保存过 Key 后，启动命令或脚本里的旧参数（如 `--api-key`）自动失效；
 - **区域自检**：Key 绑定的出口与其请求的模型不匹配时（如用国际版 Key 调国内独占的 `deepseek-v4-pro`），直接返回可读的 400 校验错误，而不是上游晦涩的 WAF 拒流报错。
 
-### 5. Docker 容器化部署
+### 5. Workbody-FHUB Docker 镜像
 
-本项目提供预编译双架构镜像（`linux/amd64` 与 `linux/arm64`），公开发布在 GHCR 及 Docker Hub，**无需克隆代码、无需本地编译**，提供多种开箱即用的部署与更新方式：
-
-#### 方式一：一键快速部署与更新（推荐，小白与云服务器首选）
-
-在终端中执行以下命令，脚本将全自动检测环境、创建配置并完成拉取启动：
+云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.0`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
 
 ```bash
-# 官方源（可直连 GitHub 环境）：
-curl -fsSL https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | bash
-
-# 国内网络 / NAS 加速（遇到 Connection reset 等连接报错时使用）：
-curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | sudo bash
+docker pull ghcr.io/albert-li-sz/workbody-fhub:1.0.0
+docker compose -f docker-compose.cloud.yml up -d
 ```
 
-- **权限提示**：NAS（如飞牛 fnOS）普通用户若无直接操作 Docker 的权限，请在管道后追加 `sudo bash`；
-- **后续升级**：再次运行相同的命令即可无感平滑升级，账号配置与用量数据绝不丢失。
+云镜像配置只拉取发布镜像；默认仍只向本机发布端口，账号和用量使用持久化目录。
 
-#### 方式二：NAS / Web 面板单文件 Compose 部署（飞牛 fnOS / 群晖 / 1Panel 等）
-
-在 NAS 或面板的 Compose 界面直接新建项目并粘贴以下内容保存启动，无需拉取项目源码：
-
-```yaml
-services:
-  wb-proxy:
-    image: ghcr.io/ardeyouxipianyi/workbuddy2api-hub:latest   # 或 ardeyouxipianyi/workbuddy2api-hub:latest
-    container_name: wb-proxy
-    restart: unless-stopped
-    ports:
-      - "8788:8788"          # 左侧宿主端口可自选；右侧必须与下面的 PORT 一致
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8788
-      # - API_KEY=your_secret_key   # 留空则自动生成并打印在启动日志
-      - TZ=Asia/Shanghai
-    volumes:
-      - ./accounts:/app/accounts    # 账号凭证与配置（更新/重建容器不丢）
-      - ./usage:/app/usage          # 用量流水日志（更新/重建容器不丢）
-```
-
-- **更新方法**：在面板中点击「拉取最新镜像并重启」，或在对应目录执行：
-  ```bash
-  docker compose pull && docker compose up -d
-  ```
-
-#### 方式三：Watchtower 全自动静默更新（彻底躺平）
-
-希望系统在每次 GitHub 发布新版本时自动静默升级，可启动 Watchtower 仅监控 `wb-proxy`（每 24 小时检查一次更新）：
+默认 Compose **构建此项目源码**，镜像名为 `workbody-fhub:1.0.0`，并只向本机发布 `127.0.0.1:8788`。账号和日志继续挂载 `./accounts`、`./usage`，构建上下文排除这些目录及 `.env*`、凭据文件。
 
 ```bash
-docker run -d --name wb-proxy-watchtower --restart unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  containrrr/watchtower:latest --interval 86400 --cleanup wb-proxy
+docker compose up -d --build
+# 或在当前源码目录执行
+./quick-deploy.sh
 ```
 
-#### 补充说明与排错
+默认底镜采用 Docker 官方 Python 3.11 镜像的 ECR 来源，并固定内容摘要。也可显式覆盖底镜来源：
 
-- **持久化数据安全**：`./accounts` 与 `./usage` 两个目录由宿主机持久化挂载，容器更新或销毁重建均不会影响已保存的账号和请求用量。
-- **命令行快捷启动（docker run）**：
-  ```bash
-  docker run -d --name wb-proxy --restart unless-stopped -p 8788:8788 \
-    -v $(pwd)/accounts:/app/accounts -v $(pwd)/usage:/app/usage \
-    ghcr.io/ardeyouxipianyi/workbuddy2api-hub:latest
-  ```
-- **开发者本地源码构建**：需调试或修改代码时，运行 `docker compose -f docker-compose.build.yml up -d --build`。
-- **鉴权说明**：容器以 `--lan` 启动，无显式 `API_KEY` 时会自动生成高强度 Key 写入 `./accounts/settings.json` 并打印在日志中：
-  `docker compose logs wb-proxy | grep -i "api key"`。
-- **报错 `pull access denied ... repository does not exist`**：镜像名若省略了 Registry 地址（如写成了 `ardeyouxipianyi/workbuddy2api-hub`），Docker 默认访问 Docker Hub。若遇网络受阻，请确保镜像名补全为 `ghcr.io/ardeyouxipianyi/workbuddy2api-hub:latest`；GHCR 包是公开的，拉取无需登录。
-- **配置参数**：环境变量 `API_KEY`、`PORT`。
-- **改 `PORT` 要同步改端口映射**：`PORT` 只决定容器内监听哪个端口，`-p HOST:CONTAINER` 的右侧必须与之一致；例如 `-e PORT=9000 -p 9000:9000`。用 compose 时 `ports` 与 `PORT` 要同时改。
-- **目录权限（PUID/PGID）**：容器默认以 root（`0:0`）运行，与历史行为一致。想以宿主用户身份跑，就在 compose 里设 `PUID=$(id -u)` / `PGID=$(id -g)`（或写进 `.env`），并确保 `./accounts`、`./usage` 对该 uid 可写；`docker run` 也可直接加 `--user $(id -u):$(id -g)`。
-- **健康检查**：镜像自带 `HEALTHCHECK`（每 30s 请求一次 `/health`），`docker ps` 的 STATUS 列会显示 healthy/unhealthy，编排器也可直接探活。
+```bash
+PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-alpine docker compose up -d --build
+```
+
+[Docker 官方镜像的 ECR 来源说明](https://aws.amazon.com/blogs/containers/docker-official-images-now-available-on-amazon-elastic-container-registry-public/)。构建支持 `PYTHON_IMAGE` 覆盖，适用于自己的可信镜像缓存。
+
+```bash
+# 独立构建及保存，便于向其他服务器导入
+docker build -t workbody-fhub:1.0.0 .
+docker save workbody-fhub:1.0.0 | gzip > workbody-fhub-1.0.0.tar.gz
+# 目标主机：docker load < workbody-fhub-1.0.0.tar.gz
+```
+
+构建双架构镜像并验证两种架构的启动、鉴权和关键回归：
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t workbody-fhub:1.0.0 --load .
+python3 scripts/verify_image.py workbody-fhub:1.0.0
+```
+
+验证脚本使用隔离的临时数据卷与 `--network none`，结束后清理测试容器。审计发现、修复证据和剩余验证边界见[修复报告](docs/audit-2026-10-07.md)。
+
+查看首次启动密码和 API Key：`docker compose logs workbody-fhub`。更新源码后重新执行 `docker compose up -d --build`。通过 `PORT` 修改宿主端口；`BIND_ADDRESS` 可改为明确需要的监听地址。向公网开放前配置自定义面板密码、HTTPS 与访问限制。
+
+容器支持 `PUID` / `PGID`（默认 `0:0`，自定义时需保证数据目录可写），并带 `/health` 健康检查。代码中的 WorkBuddy 账号代理槽继续路由模型，`WB_WEB_PROXY` 单独路由网络工具。
+
+发布流程 `.github/workflows/docker-publish.yml` 在本仓库发布 release 时先验证版本和测试，再构建 `linux/amd64`、`linux/arm64` 并推送到 GHCR；配置 Docker Hub 凭据时也发布自己的同名镜像。镜像包含当前分支源码及两份许可证。
 
 ### 6. 测试
 
@@ -178,7 +155,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只跑名字里含 realm 的
 ```
 
-- 79 个套件：64 个 Python + 15 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
+- 82 个套件：68 个 Python + 14 个 JS；JS 需要 PATH 上有 `node`，缺失时会跳过并提示。
 - `tests/_mobile_check.py` 是独立的 Playwright 手机/桌面布局检查器（需自行安装 Playwright），按需手动运行，不在上面的套件集里；fixtures／截图默认放系统 temp，可用 `WB_MOBILE_FIXTURES` / `WB_MOBILE_SHOTS` 覆盖，Windows 可直接运行。
 - CI（`.github/workflows/tests.yml`）跑同一条命令：Ubuntu 上 python 3.9 与 3.12（3.9 是本项目声称的最低版本），Windows 上 python 3.12。推送 `v*` tag 时额外断言 **tag == 源码版本**（`wb_proxy.py` 里的两处版本串必须先一致，`-ci` 演练 tag 豁免）。
 
@@ -257,10 +234,13 @@ python tests/run_all.py realm      # 只跑名字里含 realm 的
 
 部分客户端（如 Codex App）会在 Responses 请求里宣告 `web_search` / `web_fetch` 这类服务端工具，而上游没有对应的执行器——声明送上去，模型看得到工具却没有执行器，客户端最后只拿到一句 unsupported call。
 
-看板「设置 → 本地网络工具」打开后，网关把那份声明换成自己的同名 function、拦下模型的调用、在本地执行（搜索走 DuckDuckGo HTML 版，抓页面抓模型给出的 URL），再把结果喂回模型，最多代跑 3 轮（`WB_MAX_WEB_ROUNDS` 可调，上限 8）；搜索过程会作为 `web_search_call` 卡片事件与 `url_citation` 引用回到客户端。
+看板「设置 → 本地网络工具」打开后，网关把那份声明换成自己的同名 function、拦下模型的调用、在本地执行（搜索走 DuckDuckGo HTML 版，抓页面抓模型给出的 URL），再把结果喂回模型，默认轮数配置为 3（`WB_MAX_WEB_ROUNDS` 可调，配置上限 8；同时最多 16 次工具调用、180 秒编排预算，超限明确失败）；搜索过程会作为 `web_search_call` 卡片事件与 `url_citation` 引用回到客户端。
 
 - **默认关闭**：工具声明原样透传，客户端自己声明的搜索工具照常拿到调用（v1.5.3 之后的既有行为，升级不受影响）；
 - 打开后网关会主动出网抓取模型给出的 URL（只挡字面私网地址），且每轮代跑都会多跑一次上游、多消耗该账号额度；国内网络下 DuckDuckGo 可能连不上，那时模型拿到的是错误文本；
+- 搜索先访问 HTML，网络/页面异常时最多回退一次到 Lite；真正无结果不重试，HTTP 429 直接报限流，验证码页不会被当作无结果。成功结果缓存 120 秒、错误冷却 5 秒，最多 128 个查询，同一查询的并发请求共用一次检索；
+- 搜索与抓取共用 20 秒请求预算，响应及 gzip 解压后内容均限制为 2 MiB；可用 `WB_WEB_PROXY=http://proxy-host:port` 单独指定网络工具出口，未设置时沿用进程的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`。账号的代理槽只控制模型请求，不自动控制搜索；
+- 代跑当前接在 Responses 的流式/非流式路径。网页抓取的 DNS 与重定向防护、多轮历史及计量仍有已复现缺陷，见[审计报告](docs/audit-2026-10-07.md)。
 - 只影响声明了这两个工具的客户端，普通 `/v1/chat/completions` 客户端不经过这条路径。
 
 ---
@@ -606,6 +586,8 @@ export ANTHROPIC_API_KEY="你在看板设置中添加并绑定的API_Key"
 - **GPT 系列流式 Token 与生成速度修复**：忽略中间帧全 0 的 usage 占位，并加入断流 Fallback 估算，修复 `gpt-5.6-luna` / `gpt-6-astra` 等模型输入输出为 0、生成速度缺失的问题。
 
 ---
+
+> 以下致谢、免责声明和 MIT 许可说明保留原项目原文；上游许可文本见 `LICENSE.upstream`，本衍生项目许可见 `LICENSE`。
 
 ## 七、致谢与引用声明 (Credits & References)
 

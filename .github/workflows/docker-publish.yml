@@ -1,4 +1,4 @@
-name: Publish Docker image
+name: Publish Workbody-FHUB image
 
 on:
   release:
@@ -15,6 +15,27 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ github.event.release.tag_name }}
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+    - name: Verify the release tag matches the source version
+      env:
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        python - <<'PY'
+        import os, re
+        from pathlib import Path
+        source = Path('wb_proxy.py').read_text()
+        version = re.search(r'"version"\s*:\s*"([^"]+)"', source).group(1)
+        server = re.search(r'server_version\s*=\s*"Workbody-FHUB/([^"]+)"', source).group(1)
+        assert version == server, 'source version strings disagree'
+        assert os.environ['RELEASE_TAG'] in (version, 'v' + version), 'release tag differs from source version'
+        PY
+    - name: Verify this release before publishing
+      run: python tests/run_all.py
     - uses: docker/setup-qemu-action@v3
     - uses: docker/setup-buildx-action@v3
     - name: Log in to GHCR
@@ -38,10 +59,11 @@ jobs:
         DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       run: |
-        TARGETS="ghcr.io/${{ github.repository }}"
+        OWNER="${{ github.repository_owner }}"
+        TARGETS="ghcr.io/${OWNER,,}/workbody-fhub"
         if [ -n "$DOCKERHUB_USER" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
           TARGETS="$TARGETS
-        ${{ github.repository }}"
+        ${DOCKERHUB_USER}/workbody-fhub"
         fi
         echo "list<<EOF" >> $GITHUB_OUTPUT
         echo "$TARGETS" >> $GITHUB_OUTPUT
@@ -51,8 +73,11 @@ jobs:
       id: meta
       with:
         images: ${{ steps.images.outputs.list }}
+        labels: |
+          org.opencontainers.image.licenses=Apache-2.0 AND MIT
         tags: |
           type=raw,value=${{ github.event.release.tag_name }}
+          type=semver,pattern={{version}}
           type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
     - name: Build and push Docker image
       uses: docker/build-push-action@v6

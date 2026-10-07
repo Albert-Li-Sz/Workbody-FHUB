@@ -1,8 +1,15 @@
-# WorkBuddy Multi-Account Reverse Proxy Gateway
-FROM python:3.11-alpine
+# Workbody-FHUB. Pin the official Python image; PYTHON_IMAGE can select another trusted source.
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-alpine@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929
+FROM ${PYTHON_IMAGE}
+
+LABEL org.opencontainers.image.title="Workbody-FHUB" \
+      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.licenses="Apache-2.0 AND MIT" \
+      org.opencontainers.image.description="WorkBuddy multi-account gateway; fork of workbuddy2api-hub" \
+      org.opencontainers.image.source="https://github.com/Albert-Li-Sz/Workbody-FHUB"
 
 # Set environment
-ENV PYTHONUNBUFFERED=1     HOST=0.0.0.0     PORT=8788     API_KEY=     TZ=Asia/Shanghai
+ENV PYTHONUNBUFFERED=1 HOST=0.0.0.0 PORT=8788 TZ=Asia/Shanghai
 
 WORKDIR /app
 
@@ -11,6 +18,7 @@ RUN apk add --no-cache tzdata ca-certificates &&     cp /usr/share/zoneinfo/${TZ
 
 # Copy application files (Zero external pip dependencies needed)
 COPY wb_*.py dashboard.html ./
+COPY README.md LICENSE LICENSE.upstream ./
 
 # Create data directories
 RUN mkdir -p /app/accounts /app/usage

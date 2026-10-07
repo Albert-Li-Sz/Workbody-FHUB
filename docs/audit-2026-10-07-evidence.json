@@ -1,0 +1,34 @@
+{
+  "scope": "synthetic model responses and local HTTP server only",
+  "fetch_ssrf": {
+    "dns_to_loopback_read": true,
+    "redirect_to_loopback_read": true,
+    "literal_loopback_initial_url_refused": true
+  },
+  "nonstream_history_and_usage": {
+    "status": 200,
+    "followup_message_counts": [
+      3,
+      3
+    ],
+    "second_followup_tool_history": [
+      "web_fetch"
+    ],
+    "expected_total_tokens": 17,
+    "recorded_total_tokens": 9,
+    "response_total_tokens": 9
+  },
+  "round_budget": {
+    "configured_rounds": 1,
+    "executed_tool_rounds": 6,
+    "followup_requests": 6,
+    "status": 200
+  },
+  "mixed_tool_calls": {
+    "client_call_in_original_completion": true,
+    "client_call_in_followup": false,
+    "client_call_in_response": false,
+    "status": 200
+  },
+  "fresh_install_accepts_admin_password": true
+}

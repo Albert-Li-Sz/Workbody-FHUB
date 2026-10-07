@@ -22,13 +22,21 @@ v1.5.0 ~ 1.5.2 做過同一件事，被 revert（issue #43）。三個缺陷都�
 錯誤給模型，不假造結果。只用 Python 標準庫。
 """
 
+from collections import OrderedDict
+from contextvars import ContextVar
+import gzip
 import html as _html
+from html.parser import HTMLParser
+import io
 import json
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wb_webnet
 
 WEB_SEARCH_NAME = "web_search"
 WEB_FETCH_NAME = "web_fetch"
@@ -46,6 +54,45 @@ MAX_RESULTS = 10
 MAX_FETCH_CHARS = 100000
 HTTP_TIMEOUT = 20
 SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
+LITE_SEARCH_ENDPOINT = "https://lite.duckduckgo.com/lite/"
+MAX_HTTP_BYTES = 2 * 1024 * 1024
+MAX_QUERY_CHARS = 2000
+SEARCH_CACHE_TTL = 120
+SEARCH_ERROR_TTL = 5
+SEARCH_CACHE_SIZE = 128
+_search_cache = OrderedDict()
+_search_pending = set()
+_search_condition = threading.Condition()
+_call_deadline = ContextVar("web_call_deadline", default=None)
+
+
+class ResponseLimitError(ValueError):
+    """The backend exceeded the wire or decompressed response limit."""
+
+
+def _read_bounded(response, deadline):
+    chunks = []
+    size = 0
+    read = getattr(response, "read1", response.read)
+    # HTTPResponse.read(size) may wait for the entire size on a trickling
+    # peer. read1 returns after one socket read, so the deadline is checked
+    # between chunks as well as the ordinary socket idle timeout.
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("web response deadline exceeded")
+        # Reading the last Content-Length bytes can close fp immediately.
+        # Recheck it each iteration instead of touching a closed socket.
+        sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+        chunk = read(min(65536, MAX_HTTP_BYTES + 1 - size))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_HTTP_BYTES:
+            raise ResponseLimitError("response exceeds size limit")
 
 
 def max_rounds():
@@ -58,6 +105,8 @@ def max_rounds():
 
 
 MAX_WEB_ROUNDS = max_rounds()
+MAX_WEB_CALLS = 16
+MAX_WEB_TIME_SECONDS = 180
 
 
 def web_search_tool_def():
@@ -203,15 +252,46 @@ def url_arg(args):
     return str(raw or "").strip()
 
 
-def _http_get(url):
-    req = urllib.request.Request(url, headers={
+def _http_get(url, timeout=HTTP_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    if _call_deadline.get() is not None:
+        deadline = min(deadline, _call_deadline.get())
+    headers = {
         "User-Agent": _USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-    })
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        raw = resp.read()
-        charset = resp.headers.get_content_charset() or "utf-8"
+        "Accept-Encoding": "gzip",
+    }
+    for hop in range(wb_webnet.MAX_REDIRECTS + 1):
+        conn, resp = wb_webnet.open_response(url, deadline, headers)
+        try:
+            if resp.status in (301, 302, 303, 307, 308):
+                target = resp.headers.get("Location")
+                if not target or hop == wb_webnet.MAX_REDIRECTS:
+                    raise ValueError("invalid or excessive web redirects")
+                url = urllib.parse.urljoin(url, target)
+                # The next hop goes through DNS validation and IP pinning too.
+                continue
+            if resp.status >= 400:
+                raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
+            content_type = resp.headers.get_content_type()
+            if not (content_type.startswith("text/") or content_type in (
+                    "application/xhtml+xml", "application/xml", "application/json")):
+                raise ValueError("web tools only read text responses")
+            raw = _read_bounded(resp, deadline)
+            encoding = (resp.headers.get("Content-Encoding") or "").lower().strip()
+            if encoding == "gzip":
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as zipped:
+                    raw = zipped.read(MAX_HTTP_BYTES + 1)
+                if len(raw) > MAX_HTTP_BYTES:
+                    raise ResponseLimitError("decompressed response exceeds size limit")
+            elif encoding not in ("", "identity"):
+                raise ValueError("unsupported response encoding")
+            charset = resp.headers.get_content_charset() or "utf-8"
+            break
+        finally:
+            resp.close()
+            conn.close()
     try:
         return raw.decode(charset, "replace")
     except Exception:
@@ -234,56 +314,180 @@ def _strip_tags(text):
 def _ddg_target(href):
     """解開 DuckDuckGo 的 /l/?uddg= 轉址。"""
     href = _html.unescape(str(href or "").strip())
-    if href.startswith("//"):
-        href = "https:" + href
     try:
-        parsed = urllib.parse.urlparse(href)
-        if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
-            target = (urllib.parse.parse_qs(parsed.query).get("uddg") or [""])[0]
-            if target:
-                return urllib.parse.unquote(target)
-    except Exception:
-        pass
-    return href
+        parsed = urllib.parse.urlsplit(urllib.parse.urljoin(SEARCH_ENDPOINT, href))
+        host = (parsed.hostname or "").lower()
+        if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):
+            if parsed.path != "/l/":
+                return ""  # Navigation and advertising links are not sources.
+            # parse_qs already decodes once. A second unquote corrupts %2F in
+            # a target URL's own path/query and can point to a different page.
+            href = (urllib.parse.parse_qs(parsed.query).get("uddg") or [""])[0]
+        else:
+            href = urllib.parse.urlunsplit(parsed)
+        target, problem = _guard_url(href)
+        return "" if problem else target
+    except (ValueError, TypeError):
+        return ""
+
+
+class _SearchParser(HTMLParser):
+    """Read both official non-JS layouts, independent of attribute ordering."""
+
+    _void_tags = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                  "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results = []
+        self.challenge = False
+        self.no_results = False
+        self._stack = []
+        self._current = None
+        self._capture = None
+        self._seen = set()
+
+    def _finish(self):
+        row = self._current
+        if row:
+            title = re.sub(r"\s+", " ", "".join(row["title"])).strip()[:300]
+            snippet = re.sub(r"\s+", " ", "".join(row["snippet"])).strip()[:1200]
+            url = row["url"]
+            if title and url and url not in self._seen and len(self.results) < MAX_RESULTS:
+                self._seen.add(url)
+                self.results.append({"title": title, "url": url, "snippet": snippet})
+        self._current = None
+        self._capture = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = set((attrs.get("class") or "").split())
+        if tag not in self._void_tags:
+            self._stack.append((tag, classes))
+        if (attrs.get("id") == "challenge-form"
+                or any(c.startswith("anomaly-modal") for c in classes)):
+            self.challenge = True
+        if any(c.startswith("no-results") for c in classes):
+            self.no_results = True
+        if tag == "a" and classes.intersection({"result__a", "result-link"}):
+            self._finish()
+            ad = any(cs.intersection({"result--ad", "result--sponsored"})
+                     for _, cs in self._stack)
+            target = _ddg_target(attrs.get("href"))
+            if target and not ad:
+                self._current = {"url": target, "title": [], "snippet": []}
+                self._capture = ("title", len(self._stack))
+        elif classes.intersection({"result__snippet", "result-snippet"}) and self._current:
+            self._capture = ("snippet", len(self._stack))
+        elif tag == "br" and self._capture and self._current:
+            self._current[self._capture[0]].append(" ")
+
+    def handle_endtag(self, tag):
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == tag:
+                del self._stack[i:]
+                break
+        if self._capture and len(self._stack) < self._capture[1]:
+            self._capture = None
+
+    def handle_data(self, text):
+        if (self._capture and self._current
+                and not any(tag in ("script", "style", "noscript") for tag, _ in self._stack)):
+            self._current[self._capture[0]].append(text)
+
+    def close(self):
+        super().close()
+        self._finish()
+
+
+def _search_backend(query):
+    """At most two requests, sharing one timeout budget; never solve challenges."""
+    deadline = time.monotonic() + HTTP_TIMEOUT
+    if _call_deadline.get() is not None:
+        deadline = min(deadline, _call_deadline.get())
+    error = "Error: the search backend returned an unrecognized HTML page."
+    for endpoint in (SEARCH_ENDPOINT, LITE_SEARCH_ENDPOINT):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        url = endpoint + "?" + urllib.parse.urlencode({"q": query})
+        try:
+            page = _http_get(url, timeout=remaining)
+            parser = _SearchParser()
+            parser.feed(page)
+            parser.close()
+            if parser.challenge:
+                error = "Error: DuckDuckGo requires a CAPTCHA; search results are unavailable."
+            elif parser.results:
+                return parser.results, ""
+            elif parser.no_results:
+                return [], ""
+            else:
+                error = "Error: DuckDuckGo returned no recognizable results or no-results marker."
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+            exc.close()
+            error = "Error: the search backend answered HTTP %s." % code
+            if code == 429:
+                return [], error + " Rate limited; retry later."
+            if code < 500:
+                return [], error
+        except ResponseLimitError:
+            return [], "Error: the search backend response exceeds the size limit."
+        except Exception as exc:
+            error = "Error: could not reach or read the search backend (%s)." % type(exc).__name__
+    return [], error
+
+
+def _cached_search(query):
+    key = (query, os.environ.get("WB_WEB_PROXY", ""))
+    deadline = time.monotonic() + HTTP_TIMEOUT
+    if _call_deadline.get() is not None:
+        deadline = min(deadline, _call_deadline.get())
+    with _search_condition:
+        while key in _search_pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return [], "Error: timed out waiting for an ongoing search."
+            _search_condition.wait(remaining)
+        cached = _search_cache.get(key)
+        if cached and cached[0] > time.monotonic():
+            _search_cache.move_to_end(key)
+            return cached[1], cached[2]
+        _search_pending.add(key)
+    try:
+        rows, error = _search_backend(query)
+        with _search_condition:
+            ttl = SEARCH_ERROR_TTL if error else SEARCH_CACHE_TTL
+            _search_cache[key] = (time.monotonic() + ttl, rows, error)
+            _search_cache.move_to_end(key)
+            while len(_search_cache) > SEARCH_CACHE_SIZE:
+                _search_cache.popitem(last=False)
+        return rows, error
+    finally:
+        with _search_condition:
+            _search_pending.discard(key)
+            _search_condition.notify_all()
 
 
 def search(query, num_results=5):
     """DuckDuckGo HTML 版搜尋，回傳要餵給模型的可讀字串。"""
-    query = str(query or "").strip()
+    query = re.sub(r"\s+", " ", str(query or "")).strip()
     if len(query) < 2:
         return ('Error: web_search needs a query of at least 2 characters; '
                 'got %r. Pass it as {"query": "..."}.' % query)
+    if len(query) > MAX_QUERY_CHARS:
+        return "Error: web_search query exceeds %d characters." % MAX_QUERY_CHARS
     try:
         n = int(num_results)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         n = 5
     n = max(1, min(MAX_RESULTS, n))
 
-    url = SEARCH_ENDPOINT + "?" + urllib.parse.urlencode({"q": query})
-    try:
-        page = _http_get(url)
-    except urllib.error.HTTPError as exc:
-        return "Error: the search backend answered HTTP %s for %r." % (exc.code, query)
-    except Exception as exc:
-        return "Error: could not reach the search backend for %r (%s)." % (
-            query, type(exc).__name__)
-
-    blocks = re.split(r'(?is)<div[^>]+class="[^"]*result__body[^"]*"', page)
-    results = []
-    for block in blocks[1:]:
-        m_link = re.search(
-            r'(?is)<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block)
-        if not m_link:
-            continue
-        href = _ddg_target(m_link.group(1))
-        title = _strip_tags(m_link.group(2))
-        m_snip = re.search(r'(?is)class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>', block)
-        snippet = _strip_tags(m_snip.group(1)) if m_snip else ""
-        if not href or not title:
-            continue
-        results.append({"title": title, "url": href, "snippet": snippet})
-        if len(results) >= n:
-            break
+    rows, error = _cached_search(query)
+    if error:
+        return error
+    results = rows[:n]
 
     if not results:
         return ("No results found for: %s%sTry a broader or differently worded query."
@@ -297,22 +501,7 @@ def search(query, num_results=5):
 
 
 def _guard_url(url):
-    """只允許對外的一般 http(s) 網址。"""
-    try:
-        parsed = urllib.parse.urlparse(str(url or ""))
-    except Exception:
-        return None, "Invalid URL."
-    if parsed.scheme.lower() not in ("http", "https"):
-        return None, "Only http:// or https:// URLs are supported."
-    if parsed.username or parsed.password:
-        return None, "Credentials in the URL are not allowed."
-    host = (parsed.hostname or "").lower()
-    if not host or "." not in host or host.endswith(".localhost"):
-        return None, "Private, loopback or single-label hosts are not allowed."
-    if re.match(r"^(127\.|10\.|192\.168\.|169\.254\.|0\.)", host) or \
-            re.match(r"^172\.(1[6-9]|2\d|3[01])\.", host):
-        return None, "Private network addresses are not allowed."
-    return url, ""
+    return wb_webnet.guard_url(url)
 
 
 def fetch(url, start_index=0):
@@ -351,9 +540,16 @@ def sources_from_result(result):
     自己產出的格式反解，不必另外保存狀態。
     """
     out = []
+    text = str(result or "")
+    # Fetch uses a different, paged format from search. Its successful URL
+    # header is also a real source and must reach citation annotations.
+    fetched = re.match(r"^URL: (https?://[^\s]+)\nCharacters: \d+-\d+ of \d+\n", text)
+    if fetched:
+        url = fetched.group(1)
+        return [{"title": url, "url": url}]
     pattern = r"(?m)^\d+\.\s*(.+?)\s*\n\s*(https?://\S+)\s*$"
-    for m in re.finditer(pattern, str(result or "")):
-        url = m.group(2).strip().rstrip(".,;:!?")
+    for m in re.finditer(pattern, text):
+        url = m.group(2).strip()
         title = m.group(1).strip()
         if url and not any(s["url"] == url for s in out):
             out.append({"title": title or url, "url": url})
