@@ -31,15 +31,11 @@ assert.ok(start > 0 && end > start,
   'dashboard.html 里找不到主题块，测试需要跟着改（找的是 var THEME_KEY / // 3. Tab 初始化）');
 const source = html.slice(start, end);
 
-// 页面里所有内联属性引用到的函数名（与 _test_dashboard_handlers.js 同一套口径）
-const HANDLER_ATTR = /\son(?:click|change|input|submit|keydown|keyup|blur|focus)\s*=\s*"([^"]*)"/g;
-const CALL = /(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g;
-const handlers = new Set();
-for (const [, body] of html.matchAll(HANDLER_ATTR)) {
-  for (const [, name] of body.matchAll(CALL)) handlers.add(name);
-}
-assert.ok(handlers.size >= 30,
-  `只扫到 ${handlers.size} 个内联处理器，是提取坏了不是页面变了`);
+// 页面里所有点击型 data-action 名称（D3 nonce CSP 后不再有 inline 属性）。
+const ACTION_ATTR = /\sdata-action="([A-Za-z_$][\w$]*)"[^>]*?\sdata-on="click"/g;
+const handlers = new Set([...html.matchAll(ACTION_ATTR)].map((m) => m[1]));
+assert.ok(handlers.size >= 70,
+  `只扫到 ${handlers.size} 个 data-action，是提取坏了不是页面变了`);
 
 function makeElement(id) {
   const classes = new Set();
@@ -158,7 +154,7 @@ assert.strictEqual(sysDark.documentElement.getAttribute('data-theme'), 'dark',
 assert.strictEqual(sysDark.documentElement.getAttribute('data-theme-pref'), 'system',
   '偏好本身要记成 system，不能塌成具体档位');
 
-// 系统偏好变化时，跟随系统的那一档要即时跟上
+// 系统偏好变化时，跟随系统的那一档要实时跟上
 sysDark.win.initThemeSystem();
 sysDark.media.matches = false;
 sysDark.mediaListeners.forEach((fn) => fn({}));

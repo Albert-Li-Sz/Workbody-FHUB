@@ -207,6 +207,7 @@ a:hover{text-decoration:underline}
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
   padding:14px 18px;box-shadow:var(--shadow);cursor:pointer;transition:all .15s ease;
   position:relative;display:flex;flex-direction:column;justify-content:space-between;min-height:104px;
+  color:var(--fg);font:inherit;text-align:left;width:100%;
 }
 .realm-card:hover{border-color:var(--line-hover);transform:translateY(-1px);box-shadow:var(--shadow-md)}
 .realm-card.active{
@@ -317,10 +318,20 @@ a:hover{text-decoration:underline}
 .log-tag.tag-accounts{background:rgba(14,165,233,.18);color:#38bdf8}
 .log-tag.tag-auth{background:rgba(244,63,94,.18);color:#fb7185}
 .log-tag.tag-system{background:rgba(100,116,139,.18);color:#94a3b8}
+.log-tag.tag-catalog{background:rgba(14,116,144,.18);color:#22d3ee}
+.log-tag.tag-settings{background:rgba(168,85,247,.18);color:#d8b4fe}
 .log-msg{color:#cbd5e1;flex:1;word-break:break-all;white-space:pre-wrap}
 .log-empty{padding:48px 24px;text-align:center;color:#64748b;font-size:13px;font-family:inherit}
 /* ===== Phone: ≤640px ===== */
 @media (max-width: 640px){
+  #accounts .id-btn{min-height:30px;min-width:32px}
+  #logTagFilters{flex-wrap:wrap;max-width:100%}
+  /* The run-information table contains absolute Windows paths. Without
+     table-layout:fixed those unbroken strings force a 2px horizontal scroll
+     at 390px on browsers that reserve a scrollbar. */
+  #pageSettings table:not(.data-cards){table-layout:fixed;width:100%}
+  #pageSettings table:not(.data-cards) td{white-space:normal;word-break:break-all;padding-left:8px;padding-right:8px}
+  #pageSettings table:not(.data-cards) td:first-child{width:96px}
   header{padding:10px 12px;gap:8px}
   .header-left{width:auto;flex:1;gap:8px;min-width:0}
   .header-right{display:flex;align-items:center;gap:6px;order:2}
@@ -410,6 +421,56 @@ a:hover{text-decoration:underline}
   #cards .card .v{font-size:16px}
   table.data-cards tr{padding:10px}
   .log-ts{font-size:11px}
+}
+
+/* ===== 2026-10-07 UI optimization: information architecture ===== */
+.page-hero{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  background:linear-gradient(135deg,var(--panel) 0%,var(--panel2) 100%);
+  border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin-bottom:18px;
+  box-shadow:var(--shadow);
+}
+.page-hero .eyebrow{
+  font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--accent);margin-bottom:6px;
+}
+.page-hero h2{margin:0;font-size:20px;letter-spacing:-.3px;color:var(--fg)}
+.page-hero p{margin:6px 0 0;color:var(--dim);font-size:13px;max-width:760px;line-height:1.65}
+.page-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.quick-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:18px}
+.quick-card{
+  text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:13px;
+  padding:14px 16px;color:var(--fg);cursor:pointer;box-shadow:var(--shadow-sm);
+  transition:all .15s ease;display:flex;flex-direction:column;gap:5px;font:inherit;
+}
+.quick-card:hover{transform:translateY(-1px);border-color:var(--accent);box-shadow:var(--shadow-md)}
+.quick-card b{font-size:14px}
+.quick-card span{font-size:12px;color:var(--dim);line-height:1.5}
+.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.section-head h2{margin:0}
+.section-note{font-size:12px;color:var(--dim);margin-top:4px;line-height:1.55}
+.settings-subnav{
+  position:sticky;top:74px;z-index:8;display:flex;gap:6px;flex-wrap:wrap;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:8px;margin-bottom:16px;box-shadow:var(--shadow-sm);
+}
+.settings-subnav a{
+  font-size:12px;color:var(--dim);text-decoration:none;padding:6px 10px;
+  border-radius:8px;border:1px solid transparent;
+}
+.settings-subnav a:hover{color:var(--fg);background:var(--panel2);border-color:var(--line);text-decoration:none}
+#pageSettings section[id], #pageSettings [id^="settings-"]{scroll-margin-top:132px}
+@media (max-width: 760px){
+  .page-hero{padding:15px;border-radius:14px}
+  .page-hero h2{font-size:18px}
+  .quick-grid{grid-template-columns:1fr}
+  .settings-subnav{top:8px;overflow-x:auto;flex-wrap:nowrap}
+  .settings-subnav a{white-space:nowrap}
+}
+@media (max-width: 700px){
+  .main-nav{overflow-x:auto;justify-content:flex-start;scrollbar-width:none}
+  .main-nav::-webkit-scrollbar{display:none}
+  .main-nav-btn{flex:0 0 auto;min-width:58px;padding:8px 8px;font-size:12px}
 }
 </style>
 <script>
@@ -525,7 +586,7 @@ a:hover{text-decoration:underline}
   };
 
   // 3. Tab 初始化
-  var TABS = ['gateway','analytics','logs','settings'];
+  var TABS = ['gateway','accounts','tasks','analytics','models','logs','settings'];
   var pick = null;
   try {
     var q = new URLSearchParams(location.search).get('tab');
@@ -551,18 +612,13 @@ a:hover{text-decoration:underline}
   <div class="header-left" style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
     <h1><span class="dot" id="statusDot"></span>WorkBuddy 网关看板</h1>
     <nav class="main-nav">
-      <button class="main-nav-btn active" id="btnNavGateway" onclick="switchMainTab('gateway')">
-        网关与运维
-      </button>
-      <button class="main-nav-btn" id="btnNavAnalytics" onclick="switchMainTab('analytics')">
-        数据指标看板
-      </button>
-      <button class="main-nav-btn" id="btnNavLogs" onclick="switchMainTab('logs')">
-        运行日志
-      </button>
-      <button class="main-nav-btn" id="btnNavSettings" onclick="switchMainTab('settings')">
-        设置
-      </button>
+      <button class="main-nav-btn active" id="btnNavGateway" data-action="switchMainTab" data-on="click" data-arg="gateway" title="总览">总览</button>
+      <button class="main-nav-btn" id="btnNavAccounts" data-action="switchMainTab" data-on="click" data-arg="accounts" title="账号池与运维">账号</button>
+      <button class="main-nav-btn" id="btnNavTasks" data-action="switchMainTab" data-on="click" data-arg="tasks" title="任务中心">任务</button>
+      <button class="main-nav-btn" id="btnNavAnalytics" data-action="switchMainTab" data-on="click" data-arg="analytics" title="用量与成本">用量</button>
+      <button class="main-nav-btn" id="btnNavModels" data-action="switchMainTab" data-on="click" data-arg="models" title="模型与档位">模型</button>
+      <button class="main-nav-btn" id="btnNavLogs" data-action="switchMainTab" data-on="click" data-arg="logs" title="运行日志">日志</button>
+      <button class="main-nav-btn" id="btnNavSettings" data-action="switchMainTab" data-on="click" data-arg="settings" title="设置">设置</button>
     </nav>
     <a class="gh-link" href="https://github.com/ardeyouxipianyi/workbuddy2api-hub" target="_blank" rel="noopener noreferrer"
        title="查看 GitHub 项目仓库" aria-label="GitHub 项目仓库">
@@ -573,12 +629,13 @@ a:hover{text-decoration:underline}
   </div>
   <div class="header-right">
     <div class="meta" id="meta"></div>
+    <button type="button" class="theme-btn" id="langToggleBtn" data-action="toggleLanguage" data-on="click" title="切换简体/繁體">简</button>
     <div class="theme-dropdown-wrap" id="themeDropdownWrap">
-      <button type="button" class="theme-btn" id="themeToggleBtn" onclick="toggleThemeMenu(event)" title="颜色主题" aria-label="切换颜色主题" aria-haspopup="true" aria-expanded="false">
+      <button type="button" class="theme-btn" id="themeToggleBtn" data-action="toggleThemeMenu" data-on="click" title="颜色主题" aria-label="切换颜色主题" aria-haspopup="true" aria-expanded="false">
         <span id="themeToggleIcon" class="theme-btn-icon"></span>
       </button>
       <div class="theme-dropdown" id="themeDropdown" role="menu" aria-label="选择颜色主题">
-        <button type="button" class="theme-option" id="themeOptLight" onclick="selectTheme('light', event)" role="menuitem">
+        <button type="button" class="theme-option" id="themeOptLight" data-action="selectTheme" data-on="click" data-arg="light" role="menuitem">
           <svg class="theme-opt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="4"></circle>
             <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
@@ -586,14 +643,14 @@ a:hover{text-decoration:underline}
           <span class="theme-opt-text">浅色</span>
           <svg class="theme-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
         </button>
-        <button type="button" class="theme-option" id="themeOptDark" onclick="selectTheme('dark', event)" role="menuitem">
+        <button type="button" class="theme-option" id="themeOptDark" data-action="selectTheme" data-on="click" data-arg="dark" role="menuitem">
           <svg class="theme-opt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
           </svg>
           <span class="theme-opt-text">深色</span>
           <svg class="theme-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
         </button>
-        <button type="button" class="theme-option" id="themeOptSystem" onclick="selectTheme('system', event)" role="menuitem">
+        <button type="button" class="theme-option" id="themeOptSystem" data-action="selectTheme" data-on="click" data-arg="system" role="menuitem">
           <svg class="theme-opt-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <rect x="2" y="3" width="20" height="14" rx="2"></rect>
             <line x1="8" y1="21" x2="16" y2="21"></line>
@@ -613,11 +670,11 @@ a:hover{text-decoration:underline}
     <div style="font-size:16px;font-weight:700;margin-bottom:6px">WorkBuddy 网关看板</div>
     <div style="font-size:12px;color:var(--dim);margin-bottom:18px">请输入面板访问密码</div>
     <input id="panelPwdInput" type="password" placeholder="面板密码" autocomplete="current-password"
-           onkeydown="if(event.key==='Enter') submitPanelLogin()"
+            data-action="submitPanelLoginOnEnter" data-on="keydown"
            style="width:100%;background:var(--panel2);border:1px solid var(--line);
                   border-radius:8px;padding:9px 12px;color:var(--fg);font:inherit">
     <div id="panelLoginMsg" style="font-size:12px;color:var(--bad);min-height:17px;margin:8px 0 12px"></div>
-    <button onclick="submitPanelLogin()" style="width:100%;padding:9px 12px;font-size:13px">进入面板</button>
+    <button  data-action="submitPanelLogin" data-on="click" style="width:100%;padding:9px 12px;font-size:13px">进入面板</button>
     <div id="panelDefaultHint" style="display:none;font-size:11px;color:var(--warn);margin-top:12px">
       当前仍在使用默认密码 <b>admin</b>，登录后请在「设置」中修改。
     </div>
@@ -625,11 +682,28 @@ a:hover{text-decoration:underline}
 </div>
 <main>
   <div id="pageGateway" class="main-page">
+  <div class="page-hero">
+    <div>
+      <div class="eyebrow">HUB 控制台</div>
+      <h2>总览</h2>
+      <p>出口状态、后台调度器、实时指标与最近请求。账号运维、任务中心、模型与设置都已拆成独立分页。</p>
+    </div>
+    <div class="page-actions">
+      <button class="sec" data-action="triggerSchedulerNow" data-on="click">立即巡检保活</button>
+      <button class="sec" data-action="switchMainTab" data-on="click" data-arg="tasks">任务中心</button>
+    </div>
+  </div>
+  <div class="quick-grid">
+    <button class="quick-card" data-action="switchMainTab" data-on="click" data-arg="accounts"><b>账号池与运维</b><span>账号、积分、治理状态、代理出口</span></button>
+    <button class="quick-card" data-action="switchMainTab" data-on="click" data-arg="tasks"><b>任务中心</b><span>签到、一键任务、猫猫旅行、任务队列</span></button>
+    <button class="quick-card" data-action="switchMainTab" data-on="click" data-arg="models"><b>模型与档位</b><span>模型库、上下文、倍率与输出上限</span></button>
+    <button class="quick-card" data-action="switchMainTab" data-on="click" data-arg="analytics"><b>用量与成本</b><span>Token、积分、API Key 归属与性能</span></button>
+  </div>
   <!-- 版本中枢控制栏 (三列等高对齐网格) -->
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:18px">
-    
+
     <!-- 卡片 1: 国际版 (Global) -->
-    <div id="tabIntl" class="realm-card active" onclick="switchViewRealm('intl')">
+    <button type="button" id="tabIntl" class="realm-card active" data-action="switchViewRealm" data-on="click" data-arg="intl">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <span class="realm-badge-intl">国际版 (Global)</span>
@@ -645,10 +719,10 @@ a:hover{text-decoration:underline}
         </div>
         <span id="tabIntlKeyBadge" class="badge s mini" style="font-weight:600">0 个 Key</span>
       </div>
-    </div>
+    </button>
 
     <!-- 卡片 2: 国内版 (China) -->
-    <div id="tabCn" class="realm-card" onclick="switchViewRealm('cn')">
+    <button type="button" id="tabCn" class="realm-card" data-action="switchViewRealm" data-on="click" data-arg="cn">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <span class="realm-badge-cn">国内版 (China)</span>
@@ -664,7 +738,7 @@ a:hover{text-decoration:underline}
         </div>
         <span id="tabCnKeyBadge" class="badge warn mini" style="font-weight:600">0 个 Key</span>
       </div>
-    </div>
+    </button>
 
     <!-- 卡片 3: 网关出口控制 -->
     <div id="cardGatewayCtrl" class="realm-card gateway-ctrl" style="cursor:default">
@@ -677,7 +751,7 @@ a:hover{text-decoration:underline}
         <span id="activeGatewayName" style="font-size:20px;font-weight:700;color:var(--accent);letter-spacing:-.4px">国际版 (Global)</span>
       </div>
       <div style="margin-top:auto">
-        <button class="toggle-realm-btn" id="btnToggleRealm" onclick="toggleActiveGatewayRealm()" style="cursor:pointer;width:100%;padding:7px 12px;font-size:12px">
+        <button class="toggle-realm-btn" id="btnToggleRealm"  data-action="toggleActiveGatewayRealm" data-on="click" style="cursor:pointer;width:100%;padding:7px 12px;font-size:12px">
           ⇄ 切换默认出口为【国内版】
         </button>
       </div>
@@ -692,37 +766,21 @@ a:hover{text-decoration:underline}
       <span style="color:var(--dim);font-size:11px" id="schedTimes"></span>
     </div>
     <div style="display:flex;gap:8px">
-      <button class="sec mini" id="btnTriggerSched" onclick="triggerSchedulerNow(this)">立即巡检保活</button>
-      <button class="sec mini" id="btnToggleSched" onclick="toggleScheduler(this)">暂停调度</button>
+      <button class="sec mini" id="btnTriggerSched"  data-action="triggerSchedulerNow" data-on="click">立即巡检保活</button>
+      <button class="sec mini" id="btnToggleSched"  data-action="toggleScheduler" data-on="click">暂停调度</button>
     </div>
   </div>
+  <div id="schedulerDetails" style="display:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 14px;margin:-8px 0 16px;font-size:12px;color:var(--dim);line-height:1.7"></div>
 
   <div class="cards" id="cards"></div>
 
-  <section>
-    <h2>账号<em id="acctCount"></em></h2>
-    <div class="toolbar">
-    <button onclick="openLoginModal()">+ 添加账号 (OAuth)</button>
-    <button class="sec" id="btnCheckin" onclick="doCheckin(this)" style="display:none">每日签到 (国内版)</button>
-      <button class="sec" id="btnDailyChat" onclick="doDailyChat(this)" style="display:none">每日活跃打卡 (国际版)</button>
-      <button class="sec" id="btnDailyChatWeb" onclick="doDailyChatWeb(this)" style="display:none">网页通道打卡 (国际版)</button>
-    <!-- 桌面客户端自 2026-09-24 起把 token 改成加密存储（$wbEncrypted 信封）。
-         网关现在会从正在运行的桌面端进程内存里回收静态密钥来解密（只读、密钥
-         只留在内存里，实现见 wb_atrest.py），所以这个入口重新放出来。 -->
-    <button class="sec" id="btnScanDesktop" onclick="scanDesktop(this)">扫描桌面客户端账号</button>
-    <button class="sec" onclick="exportAccounts(this)">导出账号</button>
-    <button class="sec" onclick="openImport()">导入账号</button>
-    <button class="sec" onclick="fetchCredits(this)">刷新积分</button>
-    <button class="sec" onclick="autoAssignSlots()" title="把尚未绑定出口的已启用账号依次分配到已启用的代理槽；已有绑定的账号不受影响">分配代理出口给未绑定账号</button>
-    <button class="sec" onclick="setAll(true, this)">全部启用</button>
-    <button class="sec" onclick="setAll(false, this)">全部停用</button>
-    
-  </div>
-    <div id="accounts"></div>
-  </section>
 
   <!-- 融合后的：模型性能与用量矩阵 -->
-  
+
+
+
+
+
 
   <section>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
@@ -730,10 +788,10 @@ a:hover{text-decoration:underline}
       <div style="display:inline-flex;align-items:center;gap:8px">
         <span style="font-size:12px;color:var(--dim)">显示条数:</span>
         <div style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
-          <button class="range-btn" id="btnRecentLimit10" onclick="setRecentLimit(10)">10</button>
-          <button class="range-btn" id="btnRecentLimit20" onclick="setRecentLimit(20)">20</button>
-          <button class="range-btn" id="btnRecentLimit50" onclick="setRecentLimit(50)">50</button>
-          <button class="range-btn" id="btnRecentLimit100" onclick="setRecentLimit(100)">100</button>
+          <button class="range-btn" id="btnRecentLimit10"  data-action="setRecentLimit" data-on="click" data-arg="10">10</button>
+          <button class="range-btn" id="btnRecentLimit20"  data-action="setRecentLimit" data-on="click" data-arg="20">20</button>
+          <button class="range-btn" id="btnRecentLimit50"  data-action="setRecentLimit" data-on="click" data-arg="50">50</button>
+          <button class="range-btn" id="btnRecentLimit100"  data-action="setRecentLimit" data-on="click" data-arg="100">100</button>
         </div>
       </div>
     </div>
@@ -741,14 +799,140 @@ a:hover{text-decoration:underline}
     <div id="recentPagination" style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);flex-wrap:wrap;gap:8px">
       <div id="recentPageInfo">第 1 / 1 页 · 共 0 条记录</div>
       <div style="display:inline-flex;gap:5px;align-items:center">
-        <button class="sec mini" id="btnRecentPrev" onclick="changeRecentPage(-1)">上一页</button>
+        <button class="sec mini" id="btnRecentPrev"  data-action="changeRecentPage" data-on="click" data-arg="-1">上一页</button>
         <div id="recentPageButtons" style="display:inline-flex;gap:3px;align-items:center"></div>
-        <button class="sec mini" id="btnRecentNext" onclick="changeRecentPage(1)">下一页</button>
+        <button class="sec mini" id="btnRecentNext"  data-action="changeRecentPage" data-on="click" data-arg="1">下一页</button>
       </div>
     </div>
   </section>
+  </div><!-- /pageGateway -->
+  <div id="pageAccounts" class="main-page">
+    <div class="page-hero">
+      <div>
+        <div class="eyebrow">账号池</div>
+        <h2>账号池与运维</h2>
+        <p>新增、导入、启停与绑定出口；表格徽章显示在途、熔断、降权、402 冷却与 session-dead。这些状态由账号池治理模组实时提供。</p>
+      </div>
+      <div class="page-actions">
+        <button class="sec" data-action="switchMainTab" data-on="click" data-arg="tasks">任务中心</button>
+        <button class="sec" data-action="switchMainTab" data-on="click" data-arg="settings">代理出口设置</button>
+      </div>
+    </div>
+  <section>
+    <h2>账号<em id="acctCount"></em></h2>
+    <div class="toolbar">
+    <button  data-action="openLoginModal" data-on="click">+ 添加账号 (OAuth)</button>
+    <!-- 桌面客户端自 2026-09-24 起把 token 改成加密存储（$wbEncrypted 信封）。
+         网关会从正在运行的桌面端进程内存里回收静态密钥来解密（只读，密钥只留在内存里，见 wb_atrest.py），所以入口重新放出来。 -->
+    <button class="sec" id="btnScanDesktop"  data-action="scanDesktop" data-on="click">扫描桌面客户端账号</button>
+    <button class="sec"  data-action="exportAccounts" data-on="click">导出账号</button>
+    <button class="sec"  data-action="openImport" data-on="click">导入账号</button>
+    <button class="sec"  data-action="fetchCredits" data-on="click">刷新积分</button>
+    <button class="sec"  data-action="autoAssignSlots" data-on="click" title="把尚未绑定出口的已启用账号依次分配到已启用的代理槽；已有绑定的账号不受影响">分配代理出口给未绑定账号</button>
+    <button class="sec"  data-action="setAll" data-on="click" data-arg="1">全部启用</button>
+    <button class="sec"  data-action="setAll" data-on="click" data-arg="0">全部停用</button>
 
-  <!-- 版本模型库与能力清单 -->
+  </div>
+    <div id="accounts"></div>
+  </section>
+  </div>
+
+  <div id="pageTasks" class="main-page">
+    <div class="page-hero">
+      <div>
+        <div class="eyebrow">任务与福利</div>
+        <h2>任务中心</h2>
+        <p>国内版成长任务、每日签到、猫猫旅行、任务队列与国际版每日打卡集中在此页。切换上方视图会实时显示对应操作。</p>
+      </div>
+      <div class="page-actions">
+        <button class="sec" data-action="switchViewRealm" data-on="click" data-arg="cn">切到国内版</button>
+        <button class="sec" data-action="switchViewRealm" data-on="click" data-arg="intl">切到国际版</button>
+      </div>
+    </div>
+    <section class="task-center-hero">
+      <div class="section-head">
+        <div>
+          <h2>每日福利与批量任务</h2>
+          <div class="section-note">国内版：签到、成长任务、猫猫旅行；国际版：每日活跃打卡与网页渠道打卡。</div>
+        </div>
+        <div class="page-actions">
+          <button class="sec" id="btnCheckin" data-action="doCheckin" data-on="click" style="display:none">每日签到 (国内版)</button>
+          <button class="sec" id="btnDailyChat" data-action="doDailyChat" data-on="click" style="display:none">每日活跃打卡 (国际版)</button>
+          <button class="sec" id="btnDailyChatWeb" data-action="doDailyChatWeb" data-on="click" style="display:none">网页渠道打卡 (国际版)</button>
+        </div>
+      </div>
+      <div class="quick-grid">
+        <div class="quick-card"><b>每日签到</b><span>连续打卡、成长能量与每日福利。</span></div>
+        <div class="quick-card"><b>一键做任务领积分</b><span>批量接取、事件上报点亮、领取成长任务奖励。</span></div>
+        <div class="quick-card"><b>猫猫旅行</b><span>派出、领奖、每日次数与旅行状态。</span></div>
+        <div class="quick-card"><b>任务中心队列</b><span>扫描待办、运行队列、查看每个账号的执行状态。</span></div>
+      </div>
+    </section>
+  <section id="sectionGrowthTasks" style="display:none">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+      <div>
+        <h2 style="margin:0">国内版成长任务与日常福利</h2>
+        <div style="font-size:12px;color:var(--dim)">全自动批量接取、事件上报点亮并领取官方成长积分 (+1450分)，以及猫猫日常与打卡</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <select id="growthAcctSelect"  data-action="switchGrowthAccount" data-on="change" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg);font-family:inherit">
+          <option value="all">全部国内账号 (批量)</option>
+        </select>
+        <button class="primary" id="btnRunTasks"  data-action="runGrowthTasks" data-on="click">一键做任务领积分</button>
+        <button id="btnCatTravel"  data-action="triggerCatTravel" data-on="click">猫猫旅行</button>
+      </div>
+    </div>
+
+    <div class="cards" style="margin-bottom:14px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+      <div class="card"><div class="val" id="stkDays">-</div><div class="lbl">连续打卡天数</div></div>
+      <div class="card accent"><div class="val" id="nrgBalance">-</div><div class="lbl">成长能量余额</div></div>
+      <div class="card accent2"><div class="val" id="catState">-</div><div class="lbl" id="catDesc">猫猫日常状态</div></div>
+    </div>
+
+    <div id="taskQueuePanel" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <div>
+          <b>任务中心队列</b>
+          <span id="taskQueueSummary" style="color:var(--dim);margin-left:8px">未扫描</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="sec mini"  data-action="scanTaskQueue" data-on="click">扫描待办</button>
+          <button class="sec mini"  data-action="runTaskQueue" data-on="click">运行队列</button>
+        </div>
+      </div>
+      <div id="taskQueueList" style="margin-top:8px;max-height:220px;overflow:auto;display:none"></div>
+    </div>
+
+    <div style="overflow-x:auto">
+      <table id="growthTable" class="data-cards">
+        <thead>
+          <tr>
+            <th>任务名称 / 代码</th>
+            <th>任务说明</th>
+            <th>进度</th>
+            <th>奖励</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div id="taskLogBox" style="display:none;margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12px;font-family:ui-monospace,monospace;line-height:1.6;max-height:220px;overflow-y:auto"></div>
+  </section>
+  </div>
+
+  <div id="pageModels" class="main-page">
+    <div class="page-hero">
+      <div>
+        <div class="eyebrow">模型目录</div>
+        <h2>模型与档位</h2>
+        <p>当前版本模型库、上下文容量、推理／视觉能力、消费倍率与输出上限钳制标注。</p>
+      </div>
+      <div class="page-actions">
+        <button class="sec" data-action="switchMainTab" data-on="click" data-arg="analytics">查看用量</button>
+      </div>
+    </div>
   <section>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <h2 style="margin:0">当前版本模型库与能力清单 <em id="availModelCount"></em></h2>
@@ -770,49 +954,8 @@ a:hover{text-decoration:underline}
       </table>
     </div>
   </section>
+  </div>
 
-  <!-- 国内版专属成长任务与日常福利 -->
-  <section id="sectionGrowthTasks" style="display:none">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-      <div>
-        <h2 style="margin:0">国内版成长任务与日常福利</h2>
-        <div style="font-size:12px;color:var(--dim)">全自动批量接取、事件上报点亮并领取官方成长积分 (+1450分)，以及猫猫日常与打卡</div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <select id="growthAcctSelect" onchange="switchGrowthAccount(this.value)" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg);font-family:inherit">
-          <option value="all">全部国内账号 (批量)</option>
-        </select>
-        <button class="primary" id="btnRunTasks" onclick="runGrowthTasks(this)">一键做任务领积分</button>
-        <button id="btnCatTravel" onclick="triggerCatTravel(this)">猫猫旅行</button>
-      </div>
-    </div>
-
-    <div class="cards" style="margin-bottom:14px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-      <div class="card"><div class="val" id="stkDays">-</div><div class="lbl">连续打卡天数</div></div>
-      <div class="card accent"><div class="val" id="nrgBalance">-</div><div class="lbl">成长能量余额</div></div>
-      <div class="card accent2"><div class="val" id="catState">-</div><div class="lbl" id="catDesc">猫猫日常状态</div></div>
-    </div>
-
-    <div style="overflow-x:auto">
-      <table id="growthTable" class="data-cards">
-        <thead>
-          <tr>
-            <th>任务名称 / 代码</th>
-            <th>任务说明</th>
-            <th>进度</th>
-            <th>奖励</th>
-            <th>状态</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-
-    <div id="taskLogBox" style="display:none;margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12px;font-family:ui-monospace,monospace;line-height:1.6;max-height:220px;overflow-y:auto"></div>
-  </section>
-
-  
-  </div><!-- /pageGateway -->
   <div id="pageAnalytics" class="main-page">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
       <div>
@@ -822,17 +965,17 @@ a:hover{text-decoration:underline}
         <div style="font-size:12px;color:var(--dim);margin-top:4px">全维度统计输入/输出/推理 Token、缓存节省效益与各账号各模型用量</div>
       </div>
       <div style="display:flex;gap:4px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
-        <button id="btnRangeToday" class="range-btn active" onclick="setAnalyticsRange('today')">今日数据 (Today)</button>
-        <button id="btnRangeWeek" class="range-btn" onclick="setAnalyticsRange('week')">本周 (This Week)</button>
-        <button id="btnRangeMonth" class="range-btn" onclick="setAnalyticsRange('month')">本月 (This Month)</button>
-        <button id="btnRangeAll" class="range-btn" onclick="setAnalyticsRange('all')">全部历史 (All Time)</button>
-        <button id="btnRangeCustom" class="range-btn" onclick="setAnalyticsRange('custom')">自定义 (Custom)</button>
+        <button id="btnRangeToday" class="range-btn active"  data-action="setAnalyticsRange" data-on="click" data-arg="today">今日数据 (Today)</button>
+        <button id="btnRangeWeek" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="week">本周 (This Week)</button>
+        <button id="btnRangeMonth" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="month">本月 (This Month)</button>
+        <button id="btnRangeAll" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="all">全部历史 (All Time)</button>
+        <button id="btnRangeCustom" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="custom">自定义 (Custom)</button>
         <span id="rangeCustomBox" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--dim)">
           <input type="datetime-local" id="rangeCustomSince" class="slot-select" style="padding:4px 6px"
-                 onchange="onRangeCustomChange()">
+                  data-action="onRangeCustomChange" data-on="change">
           <span>~</span>
           <input type="datetime-local" id="rangeCustomUntil" class="slot-select" style="padding:4px 6px"
-                 onchange="onRangeCustomChange()">
+                  data-action="onRangeCustomChange" data-on="change">
           <span style="font-size:11px">留空表示不限</span>
         </span>
       </div>
@@ -871,6 +1014,36 @@ a:hover{text-decoration:underline}
         <div class="s" id="kpiCostDetail">按 OpenRouter 模型价折算的等价 token 花费 <span id="kpiCostToggle"></span></div>
       </div>
     </div>
+
+    <!-- Token 时序 + 积分扣减历史（D5） -->
+    <section style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div>
+          <h2 style="margin:0;font-size:16px;color:var(--fg)">Token 时序 <em id="usageSeriesRange" style="font-style:normal;color:var(--dim);font-size:12px"></em></h2>
+          <div style="font-size:12px;color:var(--dim)">按当前范围自动选择分钟/小时/天粒度；柱高为总 Token，折线为请求数。</div>
+        </div>
+        <div style="font-size:12px;color:var(--dim)" id="usageSeriesSummary">-</div>
+      </div>
+      <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px">
+        <canvas id="usageSeriesChart" height="220" style="width:100%;height:220px;display:block"></canvas>
+      </div>
+    </section>
+
+    <section style="margin-bottom:20px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div>
+          <h2 style="margin:0;font-size:16px;color:var(--fg)">积分扣减历史</h2>
+          <div style="font-size:12px;color:var(--dim)">最近消耗积分的请求（credit &gt; 0），来自请求归档。</div>
+        </div>
+        <button class="sec mini"  data-action="loadCreditHistory" data-on="click">刷新</button>
+      </div>
+      <div style="overflow-x:auto;max-height:260px">
+        <table class="data-cards" id="creditHistoryTable">
+          <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>积分</th><th>Token</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- 表格 1：各账号用量透视与各模型消耗明细 -->
     <section>
@@ -931,14 +1104,14 @@ a:hover{text-decoration:underline}
         <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">
           账号
           <select id="matrixAcctFilter" class="slot-select" style="min-width:150px"
-                  onchange="matrixAcctFilter = this.value; if(cachedMatrixData) renderPerfMatrix(cachedMatrixData.usage, cachedMatrixData.perf);">
+                   data-action="onMatrixAcctFilterChange" data-on="change">
             <option value="">全部账号</option>
           </select>
         </label>
         <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">
           模型
           <select id="matrixModelFilter" class="slot-select" style="min-width:170px"
-                  onchange="matrixModelFilter = this.value; if(cachedMatrixData) renderPerfMatrix(cachedMatrixData.usage, cachedMatrixData.perf);">
+                   data-action="onMatrixModelFilterChange" data-on="change">
             <option value="">全部模型</option>
           </select>
         </label>
@@ -957,11 +1130,28 @@ a:hover{text-decoration:underline}
 
 
   <div id="pageSettings" class="main-page">
-    <div style="margin-bottom:16px">
-      <h2 style="margin:0;font-size:16px;color:var(--fg)">网关设置</h2>
+    <div class="page-hero">
+      <div>
+        <div class="eyebrow">设置</div>
+        <h2>网关设置</h2>
+        <p>存取、出口、额度、计价、行为工具与进阶治理。每一区块独立保存，排程修改会立即重载调度器。</p>
+      </div>
+      <div class="page-actions">
+        <button class="sec" data-action="loadSettings" data-on="click" data-arg="1">重新读取</button>
+      </div>
     </div>
+    <nav class="settings-subnav" aria-label="设置分类">
+      <a href="#settings-access">存取</a>
+      <a href="#settings-keys">API Key</a>
+      <a href="#settings-slots">代理槽</a>
+      <a href="#settings-quota">额度治理</a>
+      <a href="#settings-pricing">计价</a>
+      <a href="#settings-behavior">行为与工具</a>
+      <a href="#settings-advanced">进阶</a>
+      <a href="#settings-runtime">运行信息</a>
+    </nav>
 
-    <section>
+    <section id="settings-access">
       <h2>面板访问密码 <em id="setPwdState"></em></h2>
       <div style="font-size:12px;color:var(--dim);margin-bottom:12px">用于打开本看板。默认密码为 <b>admin</b>，建议立即修改。</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
@@ -975,11 +1165,11 @@ a:hover{text-decoration:underline}
           <input id="setPwdNew" type="password" placeholder="至少 4 位"
                  style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
         </div>
-        <button onclick="savePanelPassword(this)">修改密码</button>
+        <button  data-action="savePanelPassword" data-on="click">修改密码</button>
       </div>
     </section>
 
-    <section>
+    <section id="settings-keys">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div>
           <h2 style="margin:0">API Key 与出口绑定 <em id="setKeyState"></em></h2>
@@ -987,7 +1177,7 @@ a:hover{text-decoration:underline}
             为每个 Key 绑定专属出口。客户端使用该 Key 请求将固定走对应区域，实现双出口并发。
           </div>
         </div>
-        <button onclick="addApiKeyRow()">+ 添加 API Key</button>
+        <button  data-action="addApiKeyRow" data-on="click">+ 添加 API Key</button>
       </div>
       <div id="keyList"></div>
       <!-- 已删除的 Key 只留名字和日期：密钥已抹掉，所以这里没有「复制」。
@@ -995,7 +1185,7 @@ a:hover{text-decoration:underline}
       <div id="deletedKeySection"></div>
     </section>
 
-    <section>
+    <section id="settings-slots">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div>
           <h2 style="margin:0">代理槽 <em id="slotState"></em></h2>
@@ -1004,16 +1194,16 @@ a:hover{text-decoration:underline}
           </div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="sec" onclick="discoverProxySlots(this)">自动发现 mihomo 端口</button>
-          <button class="sec" onclick="addProxySlotRow()">+ 添加槽位</button>
-          <button onclick="saveProxySlots(this)">保存槽位</button>
+          <button class="sec"  data-action="discoverProxySlots" data-on="click">自动发现 mihomo 端口</button>
+          <button class="sec"  data-action="addProxySlotRow" data-on="click">+ 添加槽位</button>
+          <button  data-action="saveProxySlots" data-on="click">保存槽位</button>
         </div>
       </div>
       <div id="slotList"></div>
       <div id="slotDiscover"></div>
     </section>
 
-    <section>
+    <section id="settings-quota">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div>
           <h2 style="margin:0">保留积分 <em id="setReserveState"></em></h2>
@@ -1027,7 +1217,7 @@ a:hover{text-decoration:underline}
             <input id="setReserveCredits" type="number" min="0" step="1" value="0"
                    style="width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
           </div>
-            <button onclick="saveReserveCredits(this)">保存</button>
+            <button  data-action="saveReserveCredits" data-on="click">保存</button>
           </div>
         </div>
       </section>
@@ -1046,7 +1236,7 @@ a:hover{text-decoration:underline}
               <input id="setDailyTokenLimit" type="number" min="0" step="1000000" value="0"
                      style="width:170px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
             </div>
-            <button onclick="saveDailyTokenLimit(this)">保存</button>
+            <button  data-action="saveDailyTokenLimit" data-on="click">保存</button>
           </div>
         </div>
       </section>
@@ -1065,7 +1255,7 @@ a:hover{text-decoration:underline}
               <input id="setDailyCreditLimit" type="number" min="0" step="1" value="0"
                      style="width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
             </div>
-            <button onclick="saveDailyCreditLimit(this)">保存</button>
+            <button data-action="saveDailyCreditLimit" data-on="click">保存</button>
           </div>
         </div>
       </section>
@@ -1084,12 +1274,12 @@ a:hover{text-decoration:underline}
               <input id="setModelDailyTokenLimit" type="number" min="0" step="1000000" value="0"
                      style="width:190px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
             </div>
-            <button onclick="saveModelDailyTokenLimit(this)">保存</button>
+            <button data-action="saveModelDailyTokenLimit" data-on="click">保存</button>
           </div>
         </div>
       </section>
 
-      <section>
+      <section id="settings-pricing">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
             <h2 style="margin:0">定价刷新 <em id="setPricingState"></em></h2>
@@ -1108,23 +1298,23 @@ a:hover{text-decoration:underline}
               <input id="setPricingMinutes" type="number" min="0" step="1" value="5"
                      style="width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
             </div>
-            <button onclick="savePricingMinutes(this)">保存</button>
-            <button onclick="refreshPricingNow(this)">立即取价</button>
+            <button data-action="savePricingMinutes" data-on="click">保存</button>
+            <button data-action="refreshPricingNow" data-on="click">立即取价</button>
             <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
               <input id="setPricingVariant" type="checkbox" style="width:16px;height:16px">
               变体后缀继承
             </label>
-            <button onclick="savePricingVariant(this)">保存</button>
+            <button data-action="savePricingVariant" data-on="click">保存</button>
           </div>
         </div>
       </section>
 
-      <section>
+      <section id="settings-behavior">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
             <h2 style="margin:0">429 自动切换出站身份 <em id="setAutoSwitchState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额通道，开启后 429 会少一些。默认关闭。
+              某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额渠道，开启后 429 会少一些。默认关闭。
             </div>
             <div style="font-size:12px;color:var(--warn);margin-top:4px">
               注意：切换后的身分会被保存，重启后继续沿用，不会自动回到 WB。
@@ -1135,7 +1325,7 @@ a:hover{text-decoration:underline}
               <input id="setAutoSwitch" type="checkbox" style="width:16px;height:16px">
               启用自动切换
             </label>
-            <button onclick="saveAutoSwitchProduct(this)">保存</button>
+            <button  data-action="saveAutoSwitchProduct" data-on="click">保存</button>
           </div>
         </div>
       </section>
@@ -1145,18 +1335,18 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页通道的会话（在 console/as 下建一个带 prompt 的会话）。实测只有网页端对话会被计入官方「每日活跃」，桌面身分的对话不计入。默认开启。
+              国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页渠道的会话（在 console/as 下建一个带 prompt 的会话）。实测只有网页端对话会被计入官方「每日活跃」，桌面身分的对话不计入。默认开启。
             </div>
             <div style="font-size:12px;color:var(--warn);margin-top:4px">
-              注意：网页通道会真的起一次任务，消耗该账号少量积分，换来的是每日 30/50 积分活跃奖励。
+              注意：网页渠道会真的起一次任务，消耗该账号少量积分，换来的是每日 30/50 积分活跃奖励。
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
             <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
               <input id="setDailyChatWeb" type="checkbox" style="width:16px;height:16px">
-              走网页通道
+              走网页渠道
             </label>
-            <button onclick="saveDailyChatWeb(this)">保存</button>
+            <button  data-action="saveDailyChatWeb" data-on="click">保存</button>
           </div>
         </div>
       </section>
@@ -1177,12 +1367,26 @@ a:hover{text-decoration:underline}
               <input id="setLocalWebTools" type="checkbox" style="width:16px;height:16px">
               由网关代跑
             </label>
-            <button onclick="saveLocalWebTools(this)">保存</button>
+            <button  data-action="saveLocalWebTools" data-on="click">保存</button>
           </div>
         </div>
       </section>
 
-      <section>
+      <span id="settings-advanced"></span>
+      <section id="advancedSettingsSection">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+          <div>
+            <h2 style="margin:0">进阶设置</h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              账号池治理、排程、Upstash 镜像、上游超时、系统提示词与日志归档。所有修改都会经过后端严格校验；排程修改会立即重载调度器。
+            </div>
+          </div>
+          <button class="sec" data-action="loadSettings" data-on="click" data-arg="1">重新读取</button>
+        </div>
+        <div id="advancedSettingsCards"></div>
+      </section>
+
+      <section id="settings-runtime">
         <h2>运行信息</h2>
       <table>
         <tbody>
@@ -1190,11 +1394,13 @@ a:hover{text-decoration:underline}
           <tr><td>账号存储目录</td><td class="mono" id="setAccountsDir">-</td></tr>
           <tr><td>用量日志目录</td><td class="mono" id="setUsageDir">-</td></tr>
           <tr><td>设置文件</td><td class="mono" id="setFile">-</td></tr>
+          <tr><td>全局并发上限</td><td class="mono" id="setMaxConcurrent">-</td></tr>
+          <tr><td>并发等待秒数</td><td class="mono" id="setChatSlotWait">-</td></tr>
         </tbody>
       </table>
       <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="sec" onclick="loadSettings(true)">刷新</button>
-        <button class="sec" onclick="panelLogout()">退出面板登录</button>
+        <button class="sec"  data-action="loadSettings" data-on="click" data-arg="1">刷新</button>
+        <button class="sec"  data-action="panelLogout" data-on="click">退出面板登录</button>
       </div>
     </section>
   </div>
@@ -1207,36 +1413,39 @@ a:hover{text-decoration:underline}
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span id="logStatsBadge" style="font-size:12px;color:var(--dim);margin-right:6px">加载中...</span>
-        <button class="sec mini" onclick="fetchNewLogs(true)" title="立即拉取最新日志">刷新</button>
-        <button class="sec mini" id="btnToggleLogAuto" onclick="toggleLogAuto()" style="color:var(--accent2);font-weight:600">实时监听中</button>
-        <button class="sec mini" id="btnToggleLogScroll" onclick="toggleLogScroll()">自动滚屏: 开</button>
-        <button class="sec mini" onclick="copyFilteredLogs()" title="复制当前视图显示的日志">复制</button>
-        <button class="sec mini" onclick="exportLogsFile()" title="下载为 .log 文件">导出</button>
-        <button class="danger mini" onclick="clearServerLogs()" title="清空所有日志">清空</button>
+        <button class="sec mini"  data-action="fetchNewLogs" data-on="click" data-arg="1" title="立即拉取最新日志">刷新</button>
+        <button class="sec mini" id="btnToggleLogAuto"  data-action="toggleLogAuto" data-on="click" style="color:var(--accent2);font-weight:600">实时监听中</button>
+        <button class="sec mini" id="btnToggleLogScroll"  data-action="toggleLogScroll" data-on="click">自动滚屏: 开</button>
+        <button class="sec mini"  data-action="copyFilteredLogs" data-on="click" title="复制当前视图显示的日志">复制</button>
+        <button class="sec mini"  data-action="exportLogsFile" data-on="click" title="下载为 .log 文件">导出</button>
+        <button class="danger mini"  data-action="clearServerLogs" data-on="click" title="清空所有日志">清空</button>
       </div>
     </div>
 
     <!-- 筛选控制工具栏 -->
     <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;box-shadow:var(--shadow)">
       <div style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
-        <button class="range-btn active" id="btnLogLvlAll" onclick="setLogFilterLevel('')">全部级别</button>
-        <button class="range-btn" id="btnLogLvlInfo" onclick="setLogFilterLevel('INFO')">INFO</button>
-        <button class="range-btn" id="btnLogLvlWarn" onclick="setLogFilterLevel('WARN')">WARN</button>
-        <button class="range-btn" id="btnLogLvlError" onclick="setLogFilterLevel('ERROR')">ERROR</button>
+        <button class="range-btn active" id="btnLogLvlAll"  data-action="setLogFilterLevel" data-on="click" data-arg="">全部级别</button>
+        <button class="range-btn" id="btnLogLvlInfo"  data-action="setLogFilterLevel" data-on="click" data-arg="INFO">INFO</button>
+        <button class="range-btn" id="btnLogLvlWarn"  data-action="setLogFilterLevel" data-on="click" data-arg="WARN">WARN</button>
+        <button class="range-btn" id="btnLogLvlError"  data-action="setLogFilterLevel" data-on="click" data-arg="ERROR">ERROR</button>
       </div>
 
-      <div style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
-        <button class="range-btn active" id="btnLogTagAll" onclick="setLogFilterTag('')">全部模块</button>
-        <button class="range-btn" id="btnLogTagChat" onclick="setLogFilterTag('chat')">对话</button>
-        <button class="range-btn" id="btnLogTagTasks" onclick="setLogFilterTag('tasks')">任务福利</button>
-        <button class="range-btn" id="btnLogTagSched" onclick="setLogFilterTag('scheduler')">调度器</button>
-        <button class="range-btn" id="btnLogTagAcct" onclick="setLogFilterTag('accounts')">账号</button>
-        <button class="range-btn" id="btnLogTagSys" onclick="setLogFilterTag('system')">系统</button>
+      <div id="logTagFilters" style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
+        <button class="range-btn active" id="btnLogTagAll"  data-action="setLogFilterTag" data-on="click" data-arg="">全部模块</button>
+        <button class="range-btn" id="btnLogTagChat"  data-action="setLogFilterTag" data-on="click" data-arg="chat">对话</button>
+        <button class="range-btn" id="btnLogTagTasks"  data-action="setLogFilterTag" data-on="click" data-arg="tasks">任务福利</button>
+        <button class="range-btn" id="btnLogTagSched"  data-action="setLogFilterTag" data-on="click" data-arg="scheduler">调度器</button>
+        <button class="range-btn" id="btnLogTagAcct"  data-action="setLogFilterTag" data-on="click" data-arg="accounts">账号</button>
+        <button class="range-btn" id="btnLogTagSys"  data-action="setLogFilterTag" data-on="click" data-arg="system">系统</button>
+        <button class="range-btn" id="btnLogTagCatalog"  data-action="setLogFilterTag" data-on="click" data-arg="catalog">模型目录</button>
+        <button class="range-btn" id="btnLogTagAuth"  data-action="setLogFilterTag" data-on="click" data-arg="auth">认证</button>
+        <button class="range-btn" id="btnLogTagSettings"  data-action="setLogFilterTag" data-on="click" data-arg="settings">设置</button>
       </div>
 
       <div style="flex:1;min-width:180px;position:relative">
         <input id="logSearchInput" type="text" placeholder="过滤关键字 (如 deepseek, 11128, 401, error)..."
-               oninput="onLogSearchInput()"
+                data-action="onLogSearchInput" data-on="input"
                style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-size:12px;color:var(--fg);outline:none">
       </div>
     </div>
@@ -1252,31 +1461,82 @@ a:hover{text-decoration:underline}
         </div>
         <div id="logTerminalStatus" style="font-size:11px;color:#64748b;font-family:monospace">就绪</div>
       </div>
-      <div id="logTerminalBody" style="height:620px;overflow-y:auto;padding:10px 12px;background:#090d16;color:#cbd5e1" onscroll="handleLogTerminalScroll()">
+      <div id="logTerminalBody" style="height:620px;overflow-y:auto;padding:10px 12px;background:#090d16;color:#cbd5e1"  data-action="handleLogTerminalScroll" data-on="scroll">
         <div class="log-empty">正在拉取网关日志...</div>
       </div>
     </div>
+
+    <!-- 请求归档（D1/D2）：指标 + 最近请求表 -->
+    <section style="margin-top:18px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <div>
+          <h2 style="margin:0;font-size:16px;color:var(--fg)">请求归档</h2>
+          <div style="font-size:12px;color:var(--dim)">每请求一行 JSONL；默认保留 7 天 / 100MB（可在设置调整）。IP/UA 默认不记录。</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">
+            模型 <input id="reqFilterModel" class="slot-input" style="width:150px" placeholder="全部">
+          </label>
+          <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">
+            <input type="checkbox" id="reqFilterErrors" style="margin:0"> 只看失败
+          </label>
+          <select id="reqFilterLimit" class="slot-select" style="min-width:90px">
+            <option value="100">100 条</option>
+            <option value="200" selected>200 条</option>
+            <option value="500">500 条</option>
+            <option value="1000">1000 条</option>
+            <option value="5000">5000 条</option>
+          </select>
+          <button class="sec"  data-action="loadRequestArchive" data-on="click">刷新归档</button>
+          <details id="reqFiltersMore" style="flex-basis:100%">
+            <summary style="cursor:pointer;font-size:12px;color:var(--accent)">更多筛选</summary>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+              <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">账号 <input id="reqFilterAccount" class="slot-input" style="width:180px" placeholder="uid / 昵称"></label>
+              <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">状态码 <input id="reqFilterStatus" class="slot-input" style="width:90px" placeholder="502"></label>
+              <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">结果 <input id="reqFilterOutcome" class="slot-input" style="width:140px" placeholder="failed / completed"></label>
+              <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">路径 <input id="reqFilterPath" class="slot-input" style="width:210px" placeholder="/v1/chat/completions"></label>
+              <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">请求 ID <input id="reqFilterRequestId" class="slot-input" style="width:180px" placeholder="exact id"></label>
+              <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">起 <input id="reqFilterSince" type="datetime-local" class="slot-input" style="width:190px"></label>
+              <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">迄 <input id="reqFilterUntil" type="datetime-local" class="slot-input" style="width:190px"></label>
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="cards" style="margin-bottom:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+        <div class="card"><div class="val" id="reqMRequests">-</div><div class="lbl">请求数</div></div>
+        <div class="card accent"><div class="val" id="reqMCompletion">-</div><div class="lbl">完成成功率</div></div>
+        <div class="card accent"><div class="val" id="reqMHttp">-</div><div class="lbl">HTTP 成功率</div></div>
+        <div class="card accent2"><div class="val" id="reqMElapsed">-</div><div class="lbl">平均耗时 / P95</div></div>
+        <div class="card accent2"><div class="val" id="reqMTtfb">-</div><div class="lbl">TTFB 平均 / P95</div></div>
+      </div>
+      <div style="overflow-x:auto;max-height:420px">
+        <table class="data-cards" id="requestTable">
+          <thead><tr><th>时间</th><th>模型</th><th>状态</th><th>结果</th><th>耗时</th><th>TTFB</th><th>账号</th><th>请求 ID</th><th>错误 / 提示</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
-  <footer>每 5 秒自动刷新 · 数据来自本机反代 <span class="mono" id="logfile"></span></footer>
+  <footer>每 5 秒自动刷新 · 数据来自本地反代 <span class="mono" id="logfile"></span></footer>
 </main>
 
 <div class="modal-mask" id="loginModal">
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modal-hd">
       <h2>添加 WorkBuddy 账号 (OAuth 授权)</h2>
-      <button class="modal-x" onclick="closeLogin()" aria-label="关闭">×</button>
+      <button class="modal-x"  data-action="closeLogin" data-on="click" aria-label="关闭">×</button>
     </div>
     <div class="modal-bd">
       <div style="background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px">
         <div style="font-size:12px;color:var(--dim);margin-bottom:8px;font-weight:600">选择要登录的版本：</div>
         <div style="display:flex;gap:18px;flex-wrap:wrap">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-            <input type="radio" name="loginRealm" value="cn" id="radioCn" onchange="switchLoginRealm(this.value)">
+            <input type="radio" name="loginRealm" value="cn" id="radioCn"  data-action="switchLoginRealm" data-on="change">
             <span><b>国内版</b> (copilot.tencent.com)</span>
           </label>
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
-            <input type="radio" name="loginRealm" value="intl" id="radioIntl" onchange="switchLoginRealm(this.value)">
+            <input type="radio" name="loginRealm" value="intl" id="radioIntl"  data-action="switchLoginRealm" data-on="change">
             <span><b>国际版</b> (www.workbuddy.ai)</span>
           </label>
         </div>
@@ -1288,8 +1548,8 @@ a:hover{text-decoration:underline}
       <p class="hint" id="loginStatus" style="font-weight:500"></p>
     </div>
     <div class="modal-ft">
-      <button class="sec" onclick="closeLogin()">关闭</button>
-      <button onclick="restartLogin()">重新生成链接</button>
+      <button class="sec"  data-action="closeLogin" data-on="click">关闭</button>
+      <button  data-action="restartLogin" data-on="click">重新生成链接</button>
     </div>
   </div>
 </div>
@@ -1297,19 +1557,19 @@ a:hover{text-decoration:underline}
 <div class="modal-mask" id="desktopScanModal">
   <div class="modal" role="dialog" aria-modal="true" style="width:min(720px,100%)">
     <div class="modal-hd">
-      <h2>本机桌面客户端账号</h2>
-      <button class="modal-x" onclick="closeDesktopScan()" aria-label="关闭">×</button>
+      <h2>本地桌面客户端账号</h2>
+      <button class="modal-x"  data-action="closeDesktopScan" data-on="click" aria-label="关闭">×</button>
     </div>
     <div class="modal-bd">
       <p class="hint" style="margin-top:0">
-        下面是本机桌面客户端里已登录的账号（只读检测，点击「导入」才会加入网关）。
+        下面是本地桌面客户端里已登录的账号（只读检测，点击「导入」才会加入网关）。
         国际版账号归入国际版列表，国内版账号归入国内版列表。
       </p>
       <div id="desktopScanBody"><p class="hint">正在检测…</p></div>
     </div>
     <div class="modal-ft">
-      <button class="sec" onclick="refreshDesktopScan(this)">重新扫描</button>
-      <button class="sec" onclick="closeDesktopScan()">关闭</button>
+      <button class="sec"  data-action="refreshDesktopScan" data-on="click">重新扫描</button>
+      <button class="sec"  data-action="closeDesktopScan" data-on="click">关闭</button>
     </div>
   </div>
 </div>
@@ -1318,7 +1578,7 @@ a:hover{text-decoration:underline}
   <div class="modal" role="dialog" aria-modal="true" style="width:min(720px,100%)">
     <div class="modal-hd">
       <h2>导入账号</h2>
-      <button class="modal-x" onclick="closeImport()" aria-label="关闭">×</button>
+      <button class="modal-x"  data-action="closeImport" data-on="click" aria-label="关闭">×</button>
     </div>
     <div class="modal-bd">
       <p class="hint" style="margin-top:0">
@@ -1333,13 +1593,13 @@ a:hover{text-decoration:underline}
         覆盖同 UID 账号
       </label>
       <span style="flex:1"></span>
-      <button class="sec" onclick="closeImport()">取消</button>
-      <button id="btnImportCommit" class="primary" onclick="commitImport(this)" disabled>确认导入</button>
+      <button class="sec"  data-action="closeImport" data-on="click">取消</button>
+      <button id="btnImportCommit" class="primary"  data-action="commitImport" data-on="click" disabled>确认导入</button>
     </div>
   </div>
 </div>
 
-<div class="modal-mask" id="creditsDetailModal" onclick="if(event.target===this) closeCreditsDetail()">
+<div class="modal-mask" id="creditsDetailModal" data-action="closeCreditsDetailBackdrop" data-on="click">
   <div class="modal" role="dialog" aria-modal="true" style="width:min(960px,96vw);max-height:92vh;display:flex;flex-direction:column">
     <div class="modal-hd">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -1347,7 +1607,7 @@ a:hover{text-decoration:underline}
         <span id="creditsModalRealm" class="badge mini"></span>
         <span id="creditsModalTier" class="badge mini" style="display:none"></span>
       </div>
-      <button class="modal-x" onclick="closeCreditsDetail()" aria-label="关闭">×</button>
+      <button class="modal-x" data-action="closeCreditsDetail" data-on="click" aria-label="关闭">×</button>
     </div>
     <div class="modal-bd" style="overflow-y:auto;flex:1">
       <div id="creditsModalLoading" style="display:none;text-align:center;padding:30px 0">
@@ -1399,13 +1659,13 @@ a:hover{text-decoration:underline}
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
             <div class="realm-filter" style="margin:0">
-              <button type="button" class="active" data-filter="all" onclick="filterCreditsPackages('all', this)">全部</button>
-              <button type="button" data-filter="active" onclick="filterCreditsPackages('active', this)">有剩余</button>
-              <button type="button" data-filter="expiring" onclick="filterCreditsPackages('expiring', this)">即将到期</button>
-              <button type="button" data-filter="exhausted" onclick="filterCreditsPackages('exhausted', this)">已用完/过期</button>
+              <button type="button" class="active" data-filter="all" data-action="filterCreditsPackages" data-on="click" data-arg="all">全部</button>
+              <button type="button" data-filter="active" data-action="filterCreditsPackages" data-on="click" data-arg="active">有剩余</button>
+              <button type="button" data-filter="expiring" data-action="filterCreditsPackages" data-on="click" data-arg="expiring">即将到期</button>
+              <button type="button" data-filter="exhausted" data-action="filterCreditsPackages" data-on="click" data-arg="exhausted">已用完/过期</button>
             </div>
-            <input id="cmPkgSearch" type="text" placeholder="搜索包名/代码/来源…" oninput="onCreditsSearchInput(this.value)" style="padding:3px 8px;font-size:11px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);width:140px">
-            <select id="cmPkgSort" onchange="onCreditsSortChange(this.value)" style="padding:3px 6px;font-size:11px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)">
+            <input id="cmPkgSearch" type="text" placeholder="搜索包名/代码/来源…" data-action="onCreditsSearchInput" data-on="input" style="padding:3px 8px;font-size:11px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);width:140px">
+            <select id="cmPkgSort" data-action="onCreditsSortChange" data-on="change" style="padding:3px 6px;font-size:11px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)">
               <option value="expiry_asc">最快到期优先</option>
               <option value="remain_desc">剩余额度最大</option>
               <option value="used_desc">已用额度最多</option>
@@ -1434,15 +1694,97 @@ a:hover{text-decoration:underline}
       </div>
     </div>
     <div class="modal-ft">
-      <button id="btnRefreshCreditsDetail" class="sec" onclick="reloadCreditsDetail(this)">刷新明细</button>
+      <button id="btnRefreshCreditsDetail" class="sec" data-action="reloadCreditsDetail" data-on="click">刷新明细</button>
       <span style="flex:1"></span>
-      <button class="sec" onclick="closeCreditsDetail()">关闭</button>
+      <button class="sec" data-action="closeCreditsDetail" data-on="click">关闭</button>
     </div>
   </div>
 </div>
 
 <script>
 let loginState = null, loginTimer = null;
+const I18N_S2T = {"网关会从正在运行的桌面端进程内存里回收静态密钥来解密":"閘道會從正在執行的桌面端程式記憶體裡回收靜態金鑰來解密","把尚未绑定出口的已启用账号依次分配到已启用的代理槽":"把尚未繫結出口的已啟用帳號依次分配到已啟用的代理槽","支持查看各账号的总消耗及调用的每个具体模型细分占比":"支援檢視各帳號的總消耗及呼叫的每個具體模型細分佔比","上游新上架的名字无需改代码就会进入下一轮取价":"上游新上架的名字無需改程式碼就會進入下一輪取價","将为每个已启用的国际版账号各建一个网页端会话":"將為每個已啟用的國際版帳號各建一個網頁端會話","串行排队时后面那些毫秒级的用量接口全被它堵着":"序列排隊時後面那些毫秒級的用量介面全被它堵著","那时代理返回的积分是两个价格体系相加的结果":"那時代理返回的積分是兩個價格體系相加的結果","看板里它已经产生的历史用量仍会保留这个名字":"看板裡它已經產生的歷史用量仍會保留這個名字","输入框里是操作者按日历读到的本地墙上时间":"輸入框裡是操作者按日曆讀到的本地牆上時間","秒的成长任务接口把首屏的用量卡片拖在后面":"秒的成長任務介面把首屏的用量卡片拖在後面","权限不足时可以管理员身份运行网关再试一次":"許可權不足時可以管理員身份執行閘道再試一次","它的积分由国际版与国内版两套价格相加而来":"它的積分由國際版與國內版兩套價格相加而來","窗口比采样更宽时它们只覆盖最新的那一段":"視窗比取樣更寬時它們只覆蓋最新的那一段","这会真的起一次任务并消耗该账号少量积分":"這會真的起一次任務並消耗該帳號少量積分","在浏览器里打开下方链接并完成登录授权":"在瀏覽器裡開啟下方連結並完成登入授權","登录完成后本窗口会自动检测并完成入池":"登入完成後本視窗會自動檢測並完成入池","客户端自己声明的搜索工具照常拿到调用":"客戶端自己宣告的搜尋工具照常拿到呼叫","只会把上一个窗口的数字挂到新标签下面":"只會把上一個視窗的數字掛到新標籤下面","请确认后端代理服务已重启以加载新代码":"請確認後端代理服務已重啟以載入新程式碼","导入时就把探测到的出口信息一起带上":"匯入時就把探測到的出口資訊一起帶上","正在向上游同步最新积分与权益包明细":"正在向上遊同步最新積分與權益包明細","每条请求按它发生时生效的那一条计价":"每條請求按它發生時生效的那一條計價","点击上方链接在浏览器里完成登录授权":"點選上方連結在瀏覽器裡完成登入授權","避免余额被用尽后触发上游的短信提醒":"避免餘額被用盡後觸發上游的簡訊提醒","下面是本地桌面客户端里已登录的账号":"下面是本地桌面客戶端裡已登入的帳號","带渠道后缀的模型按基准模型继承定价":"帶通道字尾的模型按基準模型繼承定價","某个账号被上游拒绝时自动切到下一个":"某個帳號被上游拒絕時自動切到下一個","检查已缓存的数据是否包含有效期字段":"檢查已快取的資料是否包含有效期欄位","任务队列与国际版每日打卡集中在此页":"任務佇列與國際版每日打卡集中在此頁","需要花费积分的模型自动切到其他账号":"需要花費積分的模型自動切到其他帳號","保存时要把探测到的出口字段一起送回":"儲存時要把探測到的出口欄位一起送回","开启后网关会主动出网抓取模型给出的":"開啟後閘道會主動出網抓取模型給出的","此操作将清空内存中的全部日志缓冲":"此操作將清空記憶體中的全部日誌緩衝","得先从客户端进程内存里把静态密钥":"得先從客戶端程式記憶體裡把靜態金鑰","这些状态由账号池治理模组实时提供":"這些狀態由帳號池治理模組即時提供","三者对应不同的出站指纹与配额渠道":"三者對應不同的出站指紋與配額通道","按积分比例与闲置补偿加权抽取账号":"按積分比例與閒置補償加權抽取帳號","统一预处理各套餐包的有效期与数值":"統一預處理各套餐包的有效期與數值","切账号那一下如果正好撞上轮询在飞":"切帳號那一下如果正好撞上輪詢在飛","未在本地检测到桌面客户端登录凭证":"未在本地檢測到桌面客戶端登入憑證","上面的美元单价按它折算成人民币":"上面的美元單價按它折算成人民幣","定时刷新积分并解锁余额恢复账号":"定時重新整理積分並解鎖餘額恢復帳號","事件上报点亮并领取官方成长积分":"事件上報點亮並領取官方成長積分","实测只有网页端对话会被计入官方":"實測只有網頁端對話會被計入官方","第一次点开时把起点填成今天零点":"第一次點開時把起點填成今天零點","每个账号固定绑定一个出口代理槽":"每個帳號固定繫結一個出口代理槽","当前版本暂无模型请求或性能数据":"當前版本暫無模型請求或效能資料","遇到上游软限流后的基础冷却秒数":"遇到上游軟限流後的基礎冷卻秒數","切换上方视图会实时显示对应操作":"切換上方檢視會即時顯示對應操作","速度列只覆盖日志末尾的部分请求":"速度列只覆蓋日誌末尾的部分請求","所以之后调价不会改写之前的数字":"所以之後調價不會改寫之前的數字","全部流量都落在下面的未归属行里":"全部流量都落在下面的未歸屬行裡","上游一旦调价面板会继续宣传免费":"上游一旦調價面板會繼續宣傳免費","缓存节省效益与各账号各模型用量":"快取節省效益與各帳號各模型用量","后端按权威定价快照把每条请求的":"後端按權威定價快照把每條請求的","各账号用量透视与各模型消耗明细":"各帳號用量透視與各模型消耗明細","展开查看每个模型当前生效的策略":"展開檢視每個模型當前生效的策略","所选范围已覆盖日志中的全部请求":"所選範圍已覆蓋日誌中的全部請求","每个模型每份不同的价格存成一条":"每個模型每份不同的價格存成一條","所有已启用账号都已绑定代理出口":"所有已啟用帳號都已繫結代理出口","连续未知错误达到此数后临时出池":"連續未知錯誤達到此數後臨時出池","短名单内尽量避免刚用过同一账号":"短名單內儘量避免剛用過同一帳號","网关默认上游已切换并永久保存为":"閘道預設上游已切換並永久儲存為","槽位地址变化时绑定账号自动跟随":"槽位地址變化時繫結帳號自動跟隨","三个取数端点共用同一个查询串":"三個取數端點共用同一個查詢串","维度只从本次升级之后开始记录":"維度只從本次升級之後開始記錄","所有修改都会经过后端严格校验":"所有修改都會經過後端嚴格校驗","账号当日消费的积分达到该值后":"帳號當日消費的積分達到該值後","其他行里还没保存的输入都还在":"其他行裡還沒儲存的輸入都還在","每个窗口都是服务端的一段切片":"每個視窗都是服務端的一段切片","老行与没有档位的模型都没有它":"老行與沒有檔位的模型都沒有它","覆盖该账号在所选区间内的请求":"覆蓋該帳號在所選區間內的請求","展示当前视图下官方对话大模型":"展示當前檢視下官方對話大模型","两次取价之间就被调用的新模型":"兩次取價之間就被呼叫的新模型","比让局部数字冒充整个窗口要好":"比讓區域性數字冒充整個視窗要好","轮转窗口与大小上限在这里配置":"輪轉視窗與大小上限在這裡配置","各账号用量透视与模型消耗分布":"各帳號用量透視與模型消耗分佈","用之后第一次取到的价补算并标":"用之後第一次取到的價補算並標","这条请求发生在该策略取到之前":"這條請求發生在該策略取到之前","重绘会让正在输入的那个框失焦":"重繪會讓正在輸入的那個框失焦","消费倍率与输出上限钳制标注":"消費倍率與輸出上限鉗制標註","又已经不作数的策略会被清掉":"又已經不作數的策略會被清掉","且每轮代跑都会多跑一次上游":"且每輪代跑都會多跑一次上游","不必为每处维护一份数据副本":"不必為每處維護一份資料副本","服务端已把出口信息写进槽位":"服務端已把出口資訊寫進槽位","套餐权益包筛选与排序控制条":"套餐權益包篩選與排序控制條","连续失败达到此数后进入熔断":"連續失敗達到此數後進入熔斷","内存中最多保存的会话路由数":"記憶體中最多儲存的會話路由數","同一会话固定账号的缓存窗口":"同一會話固定帳號的快取視窗","第一笔请求即按内存里的目录":"第一筆請求即按記憶體裡的目錄","每日自动扫描并执行成长任务":"每日自動掃描並執行成長任務","只有覆盖表与同名匹配才定价":"只有覆蓋表與同名匹配才定價","自定义区间的输入框初始为空":"自定義區間的輸入框初始為空","给无气泡的场合与单元测试用":"給無氣泡的場合與單元測試用","取数期间又发起了更新的一轮":"取數期間又發起了更新的一輪","否则一次保存就把它们抹掉了":"否則一次儲存就把它們抹掉了","悬停里说清这个数是怎么来的":"懸停裡說清這個數是怎麼來的","暂无任务或未登录国内版账号":"暫無任務或未登入國內版帳號","国家名由查询服务直接给中文":"國家名由查詢服務直接給中文","请求只记它引用的是哪条策略":"請求只記它引用的是哪條策略","载荷永远按当前选中的窗口取":"載荷永遠按當前選中的視窗取","每日活跃打卡与网页渠道打卡":"每日活躍打卡與網頁通道打卡","某账号在某模型上被上游限流":"某帳號在某模型上被上游限流","补注册地区并激活国际版账号":"補註冊地區並啟用國際版帳號","模型与设置都已拆成独立分页":"模型與設定都已拆成獨立分頁","同一账号的其他模型不受影响":"同一帳號的其他模型不受影響","账号在单个模型上当日消耗的":"帳號在單個模型上當日消耗的","官方每日活跃只认网页端对话":"官方每日活躍只認網頁端對話","不同身分对应不同的出站指纹":"不同身分對應不同的出站指紋","本次请求实际使用的推理强度":"本次請求實際使用的推理強度","编辑器有未保存改动时不动它":"編輯器有未儲存改動時不動它","删掉这一行会让那些请求变成":"刪掉這一行會讓那些請求變成","所以两张表的请求数应当相等":"所以兩張表的請求數應當相等","基准名是原始名去掉尾部一段":"基準名是原始名去掉尾部一段","账号余额低于该值时不再接单":"帳號餘額低於該值時不再接單","顶部右侧区域与主题切换组件":"頂部右側區域與主題切換元件","连续失效达到阈值后自动停用":"連續失效達到閾值後自動停用","不会因某个模型不推理就缩短":"不會因某個模型不推理就縮短","桌面客户端正在运行并已登录":"桌面客戶端正在執行並已登入","正在检测本地桌面客户端账号":"正在檢測本地桌面客戶端帳號","编辑器里有未保存改动时为":"編輯器裡有未儲存改動時為","国际版打卡只发桌面端对话":"國際版打卡只發桌面端對話","同一批请求按调用方使用的":"同一批請求按呼叫方使用的","免得把旧区域的数字画上去":"免得把舊區域的數字畫上去","也就是这张表要展示的口径":"也就是這張表要展示的口徑","分配代理出口给未绑定账号":"分配代理出口給未繫結帳號","三条身分走不同的配额渠道":"三條身分走不同的配額通道","手填的映射存在数据目录的":"手填的對映存在資料目錄的","将该账号的出站身份切换为":"將該帳號的出站身份切換為","网关实时目录里新增的模型":"閘道即時目錄裡新增的模型","国内版的成长任务一次要约":"國內版的成長任務一次要約","带后缀的名字不再自动取价":"帶字尾的名字不再自動取價","个未绑定账号分配代理出口":"個未繫結帳號分配代理出口","排程修改会立即重载调度器":"排程修改會立即重新載入排程器","当前版本模型库与能力清单":"當前版本模型庫與能力清單","模型看到工具却没有执行器":"模型看到工具卻沒有執行器","国内版成长任务与日常福利":"國內版成長任務與日常福利","按模型达日限额的模型清单":"按模型達日限額的模型清單","前两步决定下面各自查什么":"前兩步決定下面各自查什麼","名称留空时按出口自动显示":"名稱留空時按出口自動顯示","网页渠道会真的起一次任务":"網頁通道會真的起一次任務","国内版账号归入国内版列表":"國內版帳號歸入國內版列表","用于费用卡片与表格标题区":"用於費用卡片與表格標題區","会补全出口信息并据此命名":"會補全出口資訊並據此命名","之后相关请求都会走该账号":"之後相關請求都會走該帳號","密钥只留在网关进程内存里":"金鑰只留在閘道程式記憶體裡","连续出现多少次才停用账号":"連續出現多少次才停用帳號","除桌面端身分的轻量对话外":"除桌面端身分的輕量對話外","这次请求实际跑在哪个档位":"這次請求實際跑在哪個檔位","那时模型拿到的是错误文本":"那時模型拿到的是錯誤文字","左侧卡片账号数与积分统计":"左側卡片帳號數與積分統計","先秒开渲染本地已缓存数据":"先秒開渲染本地已快取資料","用之后第一次取到的价补算":"用之後第一次取到的價補算","三个数字应该在一行内读完":"三個數字應該在一行內讀完","含国际版与国内版全部渠道":"含國際版與國內版全部通道","与费用估算的展示口径一致":"與費用估算的展示口徑一致","出口变了也还显示旧的国家":"出口變了也還顯示舊的國家","重画后把气泡复位到同一行":"重畫後把氣泡復位到同一行","速度列取自日志末尾的采样":"速度列取自日誌末尾的取樣","每日活跃与成长队列的时点":"每日活躍與成長佇列的時點","国际版账号归入国际版列表":"國際版帳號歸入國際版列表","桶就是第一列要展示的数字":"桶就是第一列要展示的數字","把声明换成自己的同名函数":"把宣告換成自己的同名函式","勾选要导入为槽位的出口":"勾選要匯入為槽位的出口","保号任务覆盖已禁用账号":"保號任務覆蓋已禁用帳號","更早的请求未纳入这三列":"更早的請求未納入這三列","渲染套餐权益包明细表格":"渲染套餐權益包明細表格","点击上方选项卡即可查看":"點選上方選項卡即可檢視","该模型自动切到其他账号":"該模型自動切到其他帳號","两个字区分不了不同槽位":"兩個字區分不了不同槽位","模型用量透视与响应指标":"模型用量透視與響應指標","正在启动全自动任务接取":"正在啟動全自動任務接取","会被服务端的旧列表顶掉":"會被服務端的舊列表頂掉","已有绑定的账号不受影响":"已有繫結的帳號不受影響","都不该覆盖正在填的内容":"都不該覆蓋正在填的內容","仅在上方开关开启时生效":"僅在上方開關開啟時生效","进程内存里回收静态密钥":"程式記憶體裡回收靜態金鑰","每账号同时处理的请求数":"每帳號同時處理的請求數","这里只把这一行同步过来":"這裡只把這一行同步過來","复制当前视图显示的日志":"複製當前檢視顯示的日誌","再走一次网页渠道的会话":"再走一次網頁通道的會話","把带费用的视图就地重画":"把帶費用的檢視就地重畫","请填写当前密码和新密码":"請填寫當前密碼和新密碼","那行正是用来兜住差额的":"那行正是用來兜住差額的","按当前范围自动选择分钟":"按當前範圍自動選擇分鐘","转换用浏览器自己的时区":"轉換用瀏覽器自己的時區","已关闭自动切换出站身份":"已關閉自動切換出站身份","模型性能指标与用量一览":"模型效能指標與用量一覽","更早的请求没有这个字段":"更早的請求沒有這個欄位","候选只是字面相似度建议":"候選只是字面相似度建議","到期倒计时与周期格式化":"到期倒計時與週期格式化","无符合条件的套餐权益包":"無符合條件的套餐權益包","才能对齐单价并截图验收":"才能對齊單價並截圖驗收","每隔多久搭车探索未知号":"每隔多久搭車探索未知號","停用账号会自动释放槽位":"停用帳號會自動釋放槽位","点击查看积分与套餐明细":"點選檢視積分與套餐明細","没有可自动化的待办任务":"沒有可自動化的待辦任務","事件上报与奖励领取流水":"事件上報與獎勵領取流水","查看每个账号的执行状态":"檢視每個帳號的執行狀態","现在取不到就不显示数字":"現在取不到就不顯示數字","登记后立即触发一次取价":"登記後立即觸發一次取價","而上游没有对应的执行器":"而上游沒有對應的執行器","密钥会被抹掉且无法恢复":"金鑰會被抹掉且無法恢復","公布的模型价折算的等价":"公佈的模型價折算的等價","所以出口换了名字跟着换":"所以出口換了名字跟著換","槽位还没有填写代理地址":"槽位還沒有填寫代理地址","放不下就翻到单元格下面":"放不下就翻到單元格下面","第一列的口径随范围切换":"第一列的口徑隨範圍切換","的历史用量仍然显示名字":"的歷史用量仍然顯示名字","货币切换按钮挂在这里":"貨幣切換按鈕掛在這裡","系统提示词与日志归档":"系統提示詞與日誌歸檔","稳定派生的专属设备码":"穩定派生的專屬裝置碼","账号闲置越久权重越高":"帳號閒置越久權重越高","浏览器拒绝了复制操作":"瀏覽器拒絕了複製操作","留空提交即删除该映射":"留空提交即刪除該對映","国际版区域总在途上限":"國際版區域總在途上限","没有国家就不自动命名":"沒有國家就不自動命名","一个能看懂的默认窗口":"一個能看懂的預設視窗","保留这条记录是为了让":"保留這條記錄是為了讓","内容相同就复用同一条":"內容相同就重用同一條","积分后仅免费模型可用":"積分後僅免費模型可用","交给排队的那一轮渲染":"交給排隊的那一輪渲染","请求将固定走对应区域":"請求將固定走對應區域","三档单价与匹配来源见":"三檔單價與匹配來源見","每账号每模型每日上限":"每帳號每模型每日上限","截图验收时根本截不到":"截圖驗收時根本截不到","正在申请授权登录链接":"正在申請授權登入連結","桌面身分的对话不计入":"桌面身分的對話不計入","口径与账号表完全一致":"口徑與帳號表完全一致","国际版账号每日打卡时":"國際版帳號每日打卡時","后台定时调度器状态栏":"後台定時排程器狀態列","各拼一份而漏掉自定义":"各拼一份而漏掉自定義","它可能两个出口都用过":"它可能兩個出口都用過","实时捕获反向代理请求":"即時捕獲反向代理請求","支持本网关导出的文件":"支援本閘道匯出的檔案","服务端并不知道它存在":"服務端並不知道它存在","请求自动切到其他账号":"請求自動切到其他帳號","确定要清空网关日志吗":"確定要清空閘道日誌嗎","未筛选时取出口级汇总":"未篩選時取出口級彙總","单价要按列对齐才好读":"單價要按列對齊才好讀","客户端最后只拿到一句":"客戶端最後只拿到一句","撞上正在飞的那一轮时":"撞上正在飛的那一輪時","国际版打卡走网页渠道":"國際版打卡走網頁通道","提示词前缀命中复用比":"提示詞字首命中重用比","读取积分扣减历史失败":"讀取積分扣減歷史失敗","单条请求实际用的策略":"單條請求實際用的策略","任一命中都会暂停接单":"任一命中都會暫停接單","只有该字段存在才显示":"只有該欄位存在才顯示","切换后的身分会被保存":"切換後的身分會被儲存","命不中照旧显示未定价":"命不中照舊顯示未定價","密钥只留在网关内存里":"金鑰只留在閘道記憶體裡","当前范围没有请求数据":"當前範圍沒有請求資料","实测成本层的有效秒数":"實測成本層的有效秒數","取价时还没有价的模型":"取價時還沒有價的模型","禁用或删除后回退直连":"禁用或刪除後回退直連","归一化同名且唯一命中":"歸一化同名且唯一命中","当前仍在使用默认密码":"當前仍在使用預設密碼","卡片与表格口径不一致":"卡片與表格口徑不一致","用自绘气泡而不是原生":"用自繪氣泡而不是原生","若包含且无需强制刷新":"若包含且無需強制重新整理","计算当前绑定与生效的":"計算當前繫結與生效的","桶就是当前选中的范围":"桶就是當前選中的範圍","删除后它们将回退直连":"刪除後它們將回退直連","重新启用后需重新绑定":"重新啟用後需重新繫結","成长任务流水执行完成":"成長任務流水執行完成","若要覆盖已存在的账号":"若要覆蓋已存在的帳號","个虚拟别名不参与统计":"個虛擬別名不參與統計","二选一的切换按钮组":"二選一的切換按鈕組","行为工具与进阶治理":"行為工具與進階治理","指数退避的封顶秒数":"指數退避的封頂秒數","不支持进程内存回收":"不支援程式記憶體回收","国际版每日活跃打卡":"國際版每日活躍打卡","前端一个价都不重算":"前端一個價都不重算","模型性能与用量矩阵":"模型效能與用量矩陣","实时指标与最近请求":"即時指標與最近請求","重启后保留账号路由":"重啟後保留帳號路由","重置过滤器按钮高亮":"重置過濾器按鈕高亮","任务打卡与异常告警":"任務打卡與異常告警","与它自己的时钟比较":"與它自己的時鐘比較","不存在的账号回退到":"不存在的帳號回退到","请确认已安装并登录":"請確認已安裝並登入","已经渲染出来的表格":"已經渲染出來的表格","加密凭据可直接导入":"加密憑據可直接匯入","来源记录是个人数据":"來源記錄是個人資料","已关闭每日积分限额":"已關閉每日積分限額","账号单模型当日超过":"帳號單模型當日超過","成长能量与每日福利":"成長能量與每日福利","网关每隔这段时间去":"閘道每隔這段時間去","开启后由本网关代跑":"開啟後由本閘道代跑","后端定价快照里的值":"後端定價快照裡的值","该模型暂无定价数据":"該模型暫無定價資料","出口信息的展示口径":"出口資訊的展示口徑","未检测到该版本账号":"未檢測到該版本帳號","两种渲染共用这一份":"兩種渲染共用這一份","多个账号按会话粘性":"多個帳號按會話粘性","重新拉取的代价很小":"重新拉取的代價很小","消耗该账号少量积分":"消耗該帳號少量積分","以及猫猫日常与打卡":"以及貓貓日常與打卡","自动保活与凭证常驻":"自動保活與憑證常駐","暂无临期生效套餐包":"暫無臨期生效套餐包","差值就是被剥的那截":"差值就是被剝的那截","该模型今日已达限额":"該模型今日已達限額","文件里没有找到账号":"檔案裡沒有找到帳號","可选的会话粘性镜像":"可選的會話粘性映象","积分扣减历史已刷新":"積分扣減歷史已重新整理","小额保留更多小数位":"小額保留更多小數位","变体继承当前已关闭":"變體繼承當前已關閉","已全部停用所有账号":"已全部停用所有帳號","最近消耗积分的请求":"最近消耗積分的請求","套餐权益包明细表格":"套餐權益包明細表格","多消耗该账号的额度":"多消耗該帳號的額度","每日福利与批量任务":"每日福利與批次任務","该账号仅此模型受限":"該帳號僅此模型受限","扫描桌面客户端账号":"掃描桌面客戶端帳號","现在生效的是哪一条":"現在生效的是哪一條","新增的行还没有填写":"新增的行還沒有填寫","视觉能力及在售倍率":"視覺能力及在售倍率","调用的模型分布明细":"呼叫的模型分佈明細","所以入口重新放出来":"所以入口重新放出來","这条价是怎么匹配到":"這條價是怎麼匹配到","变体继承剥掉的后缀":"變體繼承剝掉的字尾","控制台同步最新昵称":"控制檯同步最新暱稱","删除时密钥已被抹掉":"刪除時金鑰已被抹掉","时只能更新这段文字":"時只能更新這段文字","消耗与推理指标透视":"消耗與推理指標透視","时自动切换出站身份":"時自動切換出站身份","展示货币默认人民币":"展示貨幣預設人民幣","输入长度阈值或时段":"輸入長度閾值或時段","只允许请求免费模型":"只允許請求免費模型","本地桌面客户端账号":"本地桌面客戶端帳號","每日次数与旅行状态":"每日次數與旅行狀態","关闭时声明原样透传":"關閉時宣告原樣透傳","行数据按本次渲染的":"行資料按本次渲染的","所以这里不提供复制":"所以這裡不提供複製","达到该值后暂停接单":"達到該值後暫停接單","用于把消耗归属到人":"用於把消耗歸屬到人","缺失时前端自动推导":"缺失時前端自動推導","已全部启用所有账号":"已全部啟用所有帳號","找回来才能解密导入":"找回來才能解密匯入","请输入面板访问密码":"請輸入面板訪問密碼","请先登录或导入一个":"請先登入或匯入一個","暂无匹配的日志记录":"暫無匹配的日誌記錄","每个模型至少留一条":"每個模型至少留一條","积分保底与粘性路由":"積分保底與粘性路由","直接注入请求头的值":"直接注入請求頭的值","有实测钳制时标注":"有實測鉗制時標註","没有启用的代理槽":"沒有啟用的代理槽","列的形状因此固定":"列的形狀因此固定","每一区块独立保存":"每一區塊獨立儲存","禁用号不参与选号":"禁用號不參與選號","没有积分扣减记录":"沒有積分扣減記錄","公布的模型价折算":"公佈的模型價折算","标题旁的状态提示":"標題旁的狀態提示","本行按该档单价计":"本行按該檔單價計","未发现国际版账号":"未發現國際版帳號","未发现国内版账号":"未發現國內版帳號","一键做任务领积分":"一鍵做任務領積分","没有可导入的账号":"沒有可匯入的帳號","没有勾选任何出口":"沒有勾選任何出口","别让国内版那条约":"別讓國內版那條約","三列等高对齐网格":"三列等高對齊網格","这批结果已经过期":"這批結果已經過期","不影响请求主路径":"不影響請求主路徑","等待授权回调完成":"等待授權回撥完成","内存大时要十几秒":"記憶體大時要十幾秒","模型价折算的等价":"模型價折算的等價","网页渠道打卡失败":"網頁通道打卡失敗","数据来自本地反代":"資料來自本地反代","按当前映射表推断":"按當前對映表推斷","领取成长任务奖励":"領取成長任務獎勵","静默到期释放租约":"靜默到期釋放租約","表格徽章显示在途":"表格徽章顯示在途","点击查询积分明细":"點選查詢積分明細","每账号每模型每天":"每帳號每模型每天","国际版账号已激活":"國際版帳號已啟用","正在拉取网关日志":"正在拉取閘道日誌","失败会降级回内存":"失敗會降級回記憶體","暂无账号用量数据":"暫無帳號用量資料","设置里还没有任何":"設定裡還沒有任何","加权随机前先取前":"加權隨機前先取前","工具声明原样透传":"工具宣告原樣透傳","窗口变多之后一个":"視窗變多之後一個","变体名未命中基准":"變體名未命中基準","别让它悬在旧位置":"別讓它懸在舊位置","按条件定价的模型":"按條件定價的模型","拉取积分明细失败":"拉取積分明細失敗","自动切换出站身分":"自動切換出站身分","以及桌面客户端的":"以及桌面客戶端的","再把结果喂回模型":"再把結果餵回模型","只影响列出的模型":"隻影響列出的模型","只统计已启用账号":"只統計已啟用帳號","置位期间跳过刷新":"置位期間跳過重新整理","需要从正在运行的":"需要從正在執行的","此时回退显示槽位":"此時回退顯示槽位","口径不会两处走样":"口徑不會兩處走樣","以前这里还按模型":"以前這裡還按模型","对不上是数据问题":"對不上是資料問題","选择要登录的版本":"選擇要登入的版本","会真的起一次任务":"會真的起一次任務","上下文缓存命中率":"上下文快取命中率","也无法再用于请求":"也無法再用於請求","不必等下一轮轮询":"不必等下一輪輪詢","账号凭证刷新成功":"帳號憑證重新整理成功","哪条定价策略算的":"哪條定價策略算的","重渲染缓存就够了":"重渲染快取就夠了","读取请求归档失败":"讀取請求歸檔失敗","只挡字面私网地址":"只擋字面私網地址","卡片就地换算重画":"卡片就地換算重畫","点了要过几秒才变":"點了要過幾秒才變","每日活跃对话打卡":"每日活躍對話打卡","降权指数退避封顶":"降權指數退避封頂","密钥只留在内存里":"金鑰只留在記憶體裡","猫猫旅行结算完成":"貓貓旅行結算完成","气泡的结构化内容":"氣泡的結構化內容","网关平均生成速度":"閘道平均生成速度","系统运行日志模块":"系統執行日誌模組","在网关页账号表的":"在閘道頁帳號表的","闲置补偿最大点数":"閒置補償最大點數","超出后仅免费模型":"超出後僅免費模型","账号池与流量治理":"帳號池與流量治理","立即拉取最新日志":"立即拉取最新日誌","熔断指数退避封顶":"熔斷指數退避封頂","优先取后端计算的":"優先取後端計算的","刚取到的那批不动":"剛取到的那批不動","两张卡片口径相同":"兩張卡片口徑相同","里那条的悬停提示":"裡那條的懸停提示","填过就按填的显示":"填過就按填的顯示","与上面的数字同源":"與上面的數字同源","等价花费的汇率随":"等價花費的匯率隨","保存成功后清零":"儲存成功後清零","策略记录的汇率":"策略記錄的匯率","回落单账号上限":"回落單帳號上限","重启后继续沿用":"重啟後繼續沿用","关掉开关即恢复":"關掉開關即恢復","账号列显示昵称":"帳號列顯示暱稱","单账号最大在途":"單帳號最大在途","于是刚加的那行":"於是剛加的那行","开关和余额巡检":"開關和餘額巡檢","请重新输入密码":"請重新輸入密碼","之间换身分重试":"之間換身分重試","个需要人工关注":"個需要人工關注","多个用逗号分隔":"多個用逗號分隔","探测到出口后按":"探測到出口後按","待导入的账号行":"待匯入的帳號行","当前为默认密码":"當前為預設密碼","签到与会员信息":"簽到與會員資訊","需要先回收密钥":"需要先回收金鑰","贴着列尾右对齐":"貼著列尾右對齊","仅免费模型可用":"僅免費模型可用","兜底显示写死的":"兜底顯示寫死的","倍率与输出上限":"倍率與輸出上限","解码密钥已就绪":"解碼金鑰已就緒","网关日志已清空":"閘道日誌已清空","每账号每日上限":"每帳號每日上限","国内版成长任务":"國內版成長任務","同时带回两个桶":"同時帶回兩個桶","先扫描展示弹窗":"先掃描展示彈窗","套餐权益包明细":"套餐權益包明細","标签必须跟着走":"標籤必須跟著走","用于打开本看板":"用於開啟本看板","而是跟着模型走":"而是跟著模型走","本出口累计消耗":"本出口累計消耗","请求归档已刷新":"請求歸檔已重新整理","按每条请求取档":"按每條請求取檔","统一成倍率写法":"統一成倍率寫法","输入自定义密钥":"輸入自定義金鑰","展示货币切换后":"展示貨幣切換後","独立桌面客户端":"獨立桌面客戶端","按出口自动命名":"按出口自動命名","切换默认出口为":"切換預設出口為","最近套餐包将于":"最近套餐包將於","固定国际版出口":"固定國際版出口","已关闭保留积分":"已關閉保留積分","名字带渠道后缀":"名字帶通道字尾","全维度统计输入":"全維度統計輸入","请输入面板密码":"請輸入面板密碼","或点击右侧生成":"或點選右側生成","启停与绑定出口":"啟停與繫結出口","桌面客户端账号":"桌面客戶端帳號","只能干等下一个":"只能乾等下一個","已关闭变体继承":"已關閉變體繼承","而不是直接丢掉":"而不是直接丟掉","已成功刷新当前":"已成功重新整理當前","固定国内版出口":"固定國內版出口","筛选控制工具栏":"篩選控制工具欄","与冷却并列展示":"與冷卻並列展示","检测到加密凭据":"檢測到加密憑據","切过去看着就是":"切過去看著就是","还没有请求记录":"還沒有請求記錄","导入勾选的出口":"匯入勾選的出口","只建网页端会话":"只建網頁端會話","平均每秒吐字数":"平均每秒吐字數","提示词文件路径":"提示詞檔案路徑","面板密码已更新":"面板密碼已更新","上游与设备令牌":"上游與裝置令牌","请求数与成功率":"請求數與成功率","还没有取到策略":"還沒有取到策略","继续重渲染缓存":"繼續重渲染快取","当前版本模型库":"當前版本模型庫","例如刚切了区域":"例如剛切了區域","当前是默认密码":"當前是預設密碼","刷新就没了下文":"重新整理就沒了下文","也不是单个账号":"也不是單個帳號","全部模型都有价":"全部模型都有價","防多号关联风控":"防多號關聯風控","关闭则恢复轮询":"關閉則恢復輪詢","国际版在途上限":"國際版在途上限","今日次数已用尽":"今日次數已用盡","里且不会再增长":"裡且不會再增長","各接口有服务端":"各介面有服務端","账号当日消耗的":"帳號當日消耗的","没有匹配的请求":"沒有匹配的請求","这类服务端工具":"這類服務端工具","无法读取的凭证":"無法讀取的憑證","账号列表是空的":"帳號列表是空的","仅在唯一命中时":"僅在唯一命中時","策略早于该字段":"策略早於該欄位","已触发巡检保活":"已觸發巡檢保活","所以先确认一次":"所以先確認一次","调用的模型分布":"呼叫的模型分佈","不隐藏任何一行":"不隱藏任何一行","派出与领奖闭环":"派出與領獎閉環","已成功删除账号":"已成功刪除帳號","进度条与利用率":"進度條與利用率","只有厂商声称值":"只有廠商聲稱值","不内嵌整份价格":"不內嵌整份價格","已复制到剪贴板":"已複製到剪貼簿","端点和配额渠道":"端點和配額通道","版本中枢控制栏":"版本中樞控制欄","全自动批量接取":"全自動批次接取","积分与套餐明细":"積分與套餐明細","表示不自动刷新":"表示不自動重新整理","装不下所有窗口":"裝不下所有視窗","切换即重新取数":"切換即重新取數","已关闭自动取价":"已關閉自動取價","账号已成功启用":"帳號已成功啟用","实现双出口并发":"實現雙出口併發","上游未返回昵称":"上游未返回暱稱","暂无日志可导出":"暫無日誌可匯出","后台定时调度器":"後台定時排程器","下拉中调整绑定":"下拉中調整繫結","这里只负责展示":"這裡只負責展示","随时可出发旅行":"隨時可出發旅行","留空即关闭镜像":"留空即關閉映象","主题切换核心与":"主題切換核心與","与顶部导航同行":"與頂部導航同行","秒整体重画一次":"秒整體重畫一次","的账号暂停接单":"的帳號暫停接單","的数字会被当成":"的數字會被當成","时间为本地时间":"時間為本地時間","向基准模型取价":"向基準模型取價","仍可手动取一次":"仍可手動取一次","绑定专属出口":"繫結專屬出口","暂用出厂快照":"暫用出廠快照","待解码的凭证":"待解碼的憑證","任务中心队列":"任務中心佇列","内容全部来自":"內容全部來自","夜猫窗口时点":"夜貓視窗時點","剩余可用积分":"剩餘可用積分","导出日志失败":"匯出日誌失敗","换来的是每日":"換來的是每日","平均首字延迟":"平均首字延遲","正在打开文件":"正在開啟檔案","的夜间注记在":"的夜間註記在","退出面板登录":"退出面板登入","用量日志目录":"用量日誌目錄","启用国际活跃":"啟用國際活躍","积分活跃奖励":"積分活躍獎勵","点后自动恢复":"點後自動恢復","账号当日超过":"帳號當日超過","密钥已被抹掉":"金鑰已被抹掉","刷新一次槽位":"重新整理一次槽位","上游两个接口":"上游兩個介面","价估算的合计":"價估算的合計","服务运行平稳":"服務執行平穩","正在重新扫描":"正在重新掃描","全部模型合计":"全部模型合計","内存保留最新":"記憶體保留最新","激活请求失败":"啟用請求失敗","不能重绘表格":"不能重繪表格","留下的基准名":"留下的基準名","气泡只此一个":"氣泡只此一個","顶部指标卡片":"頂部指標卡片","会话粘性容量":"會話粘性容量","活跃打卡成功":"活躍打卡成功","没有绑定出口":"沒有繫結出口","全局并发上限":"全域性併發上限","拉服务端列表":"拉服務端列表","抓页面抓这个":"抓頁面抓這個","测试请求失败":"測試請求失敗","无法连接反代":"無法連線反代","返回内容不是":"返回內容不是","改名后免重登":"改名後免重登","账号加载失败":"帳號載入失敗","跟随范围切换":"跟隨範圍切換","桌面客户端自":"桌面客戶端自","剩余额度最大":"剩餘額度最大","但不作为一个":"但不作為一個","清空所有日志":"清空所有日誌","积分扣减历史":"積分扣減歷史","免费层垄断时":"免費層壟斷時","仅此模型受限":"僅此模型受限","后台调度器已":"後台排程器已","就是这么来的":"就是這麼來的","当前选中范围":"當前選中範圍","文件不是合法":"檔案不是合法","当前账号正常":"當前帳號正常","尚未选择文件":"尚未選擇檔案","全部国内账号":"全部國內帳號","单个账号对象":"單個帳號物件","必须是不小于":"必須是不小於","读取设置失败":"讀取設定失敗","首次降权时长":"首次降權時長","活跃流会续命":"活躍流會續命","分页信息架构":"分頁資訊架構","仅桌面端对话":"僅桌面端對話","启用成长队列":"啟用成長佇列","面板访问密码":"面板訪問密碼","选择颜色主题":"選擇顏色主題","余额刷新恢复":"餘額重新整理恢復","网关运行日志":"閘道執行日誌","后台刷新余额":"後台重新整理餘額","个达积分限额":"個達積分限額","猫猫旅行失败":"貓貓旅行失敗","启用猫猫旅行":"啟用貓貓旅行","最小重复间隔":"最小重複間隔","未知的设置组":"未知的設定組","这一行还没有":"這一行還沒有","目录中标记为":"目錄中標記為","猫猫日常状态":"貓貓日常狀態","筛选结果合计":"篩選結果合計","来自请求归档":"來自請求歸檔","按接口返回的":"按介面返回的","最快到期优先":"最快到期優先","闲置补偿上限":"閒置補償上限","批量操作失败":"批次操作失敗","无需重新请求":"無需重新請求","只保存在本地":"只儲存在本地","不会自动回到":"不會自動回到","连续打卡天数":"連續打卡天數","成长队列时点":"成長佇列時點","所以这里没有":"所以這裡沒有","已用额度最多":"已用額度最多","最低保留积分":"最低保留積分","切换颜色主题":"切換顏色主題","启用自动切换":"啟用自動切換","国际活跃时点":"國際活躍時點","早先的实现是":"早先的實現是","加油包已领取":"加油包已領取","预计稍后归来":"預計稍後歸來","已加入账号池":"已加入帳號池","还没有代理槽":"還沒有代理槽","积分即将到期":"積分即將到期","同步更新全局":"同步更新全域性","余额刷新间隔":"餘額重新整理間隔","本地网络工具":"本機網路工具","跟随面板切换":"跟隨面板切換","刷新积分失败":"重新整理積分失敗","账号池与运维":"帳號池與運維","归档大小上限":"歸檔大小上限","过几秒才刷新":"過幾秒才重新整理","三档单价多少":"三檔單價多少","按未命中价计":"按未命中價計","不影响旧行为":"不影響舊行為","首次熔断时长":"首次熔斷時長","展开逐条查看":"展開逐條檢視","立即保活刷新":"立即保活重新整理","暂无可用模型":"暫無可用模型","启用粘性镜像":"啟用粘性映象","每日活跃打卡":"每日活躍打卡","重新生成链接":"重新生成連結","记录调用来源":"記錄呼叫來源","成长能量余额":"成長能量餘額","选择一个账号":"選擇一個帳號","猫猫旅行时点":"貓貓旅行時點","每日积分限额":"每日積分限額","个账号的积分":"個帳號的積分","自动发现失败":"自動發現失敗","后该模型切走":"後該模型切走","代理出口设置":"代理出口設定","事件上报点亮":"事件上報點亮","才会加入网关":"才會加入閘道","内置快照兜底":"內建快照兜底","变体后缀继承":"變體字尾繼承","并发等待秒数":"併發等待秒數","落在哪个条件":"落在哪個條件","任务执行失败":"任務執行失敗","账号存储目录":"帳號儲存目錄","不会回显明文":"不會回顯明文","客户端使用该":"客戶端使用該","出口更新失败":"出口更新失敗","确定删除账号":"確定刪除帳號","上游余额不足":"上游餘額不足","折算成人民币":"折算成人民幣","建议立即修改":"建議立即修改","的模型默认按":"的模型預設按","桌面客户端把":"桌面客戶端把","明说覆盖范围":"明說覆蓋範圍","网关默认出口":"閘道預設出口","流中空闲超时":"流中空閒超時","只能当量级看":"只能當量級看","项目仓库入口":"專案倉庫入口","改成加密存储":"改成加密儲存","用于计入官方":"用於計入官方","融合首字延迟":"融合首字延遲","可在设置调整":"可在設定調整","有调用的模型":"有呼叫的模型","集中刷新凭证":"集中重新整理憑證","价格悬停气泡":"價格懸停氣泡","网页渠道打卡":"網頁通道打卡","无法启动队列":"無法啟動佇列","会员等级徽章":"會員等級徽章","立即巡检保活":"立即巡檢保活","终点留空表示":"終點留空表示","也不提供恢复":"也不提供恢復","网关出口控制":"閘道出口控制","成本探索窗口":"成本探索視窗","客户端后追加":"客戶端後追加","折线为请求数":"折線為請求數","分钟取一次价":"分鐘取一次價","昵称已同步":"暱稱已同步","默认不记录":"預設不記錄","已设为不限":"已設為不限","请求成功率":"請求成功率","个账号绑定":"個帳號繫結","或直接填写":"或直接填寫","每行自带的":"每行自帶的","像按钮坏了":"像按鈕壞了","单独抽出来":"單獨抽出來","人工映射表":"人工對映表","放宽或收窄":"放寬或收窄","提示词模式":"提示詞模式","账号不存在":"帳號不存在","过滤关键字":"過濾關鍵字","刷新槽位是":"重新整理槽位是","通常几秒钟":"通常幾秒鐘","用量与成本":"用量與成本","之后就并行":"之後就並行","模型与档位":"模型與檔位","变体未命中":"變體未命中","密钥已抹掉":"金鑰已抹掉","添加并保存":"新增並儲存","行为与工具":"行為與工具","今日已签到":"今日已簽到","声明送上去":"宣告送上去","达到该值后":"達到該值後","登录后请在":"登入後請在","已有包过期":"已有包過期","是只读历史":"是隻讀歷史","今日已消费":"今日已消費","上下文窗口":"上下文視窗","可能连不上":"可能連不上","已消耗积分":"已消耗積分","登录新账号":"登入新帳號","候选短名单":"候選短名單","必须说出来":"必須說出來","请勾选下方":"請勾選下方","缓存未命中":"快取未命中","初始化主题":"初始化主題","走网页渠道":"走網頁通道","非实体模型":"非實體模型","是不是补算":"是不是補算","任务与福利":"任務與福利","客户端后点":"客戶端後點","最近请求表":"最近請求表","已暂停监听":"已暫停監聽","活目录优先":"活目錄優先","额度利用率":"額度利用率","实时监听中":"即時監聽中","后台调度器":"後台排程器","首字节超时":"首位元組超時","领取一次性":"領取一次性","面板可见性":"面板可見性","设置已刷新":"設定已重新整理","还没有配置":"還沒有配置","缺失时还会":"缺失時還會","可用账号池":"可用帳號池","重绘不会丢":"重繪不會丟","账号已停用":"帳號已停用","按原样显示":"按原樣顯示","还没有账号":"還沒有帳號","最近将过期":"最近將過期","模式才读取":"模式才讀取","与出口绑定":"與出口繫結","客户端取消":"客戶端取消","个保留积分":"個保留積分","点击右上角":"點選右上角","进本地列表":"進本地列表","在本地执行":"在本機執行","就成了前缀":"就成了字首","再分一次组":"再分一次組","部分客户端":"部分客戶端","的现有账号":"的現有帳號","归属与性能":"歸屬與效能","账号透视表":"帳號透視表","加密存储了":"加密儲存了","取价间隔以":"取價間隔以","总容量最大":"總容量最大","由网关代跑":"由閘道代跑","已进入面板":"已進入面板","会一直留在":"會一直留在","是因为标记":"是因為標記","已开始抓取":"已開始抓取","软冷却上限":"軟冷卻上限","再逐条导入":"再逐條匯入","队列已启动":"佇列已啟動","手动取一次":"手動取一次","的复发路径":"的復發路徑","来源与属性":"來源與屬性","下建一个带":"下建一個帶","必须是整数":"必須是整數","密钥已回收":"金鑰已回收","个达日限额":"個達日限額","后暂停接单":"後暫停接單","重绘整张表":"重繪整張表","地址算机房":"地址算機房","其余算住宅":"其餘算住宅","每请求一行":"每請求一行","当前不校验":"當前不校驗","的消耗归属":"的消耗歸屬","剥的是后缀":"剝的是字尾","该账号属于":"該帳號屬於","但仍可签到":"但仍可簽到","软冷却基数":"軟冷卻基數","当前账号池":"當前帳號池","秒自动刷新":"秒自動重新整理","国内版签到":"國內版簽到","今日请求数":"今日請求數","总额度容量":"總額度容量","切到国际版":"切到國際版","控件不存在":"控制元件不存在","国内网络下":"國內網路下","倍率与折扣":"倍率與折扣","清除旧代理":"清除舊代理","到期倒计时":"到期倒計時","今日未签到":"今日未簽到","个可用出口":"個可用出口","的美元原价":"的美元原價","缓存命中率":"快取命中率","未定价模型":"未定價模型","以及可选的":"以及可選的","账号池治理":"帳號池治理","默认密码为":"預設密碼為","自定义区间":"自定義區間","任务执行中":"任務執行中","切到国内版":"切到國內版","次异常拦截":"次異常攔截","占比进度条":"佔比進度條","不整表重载":"不整表重新載入","会话已失效":"會話已失效","剥掉的后缀":"剝掉的字尾","每账号每天":"每帳號每天","端到端耗时":"端到端耗時","系统提示词":"系統提示詞","网关调用量":"閘道呼叫量","还没取过价":"還沒取過價","不自动采用":"不自動採用","切到设置页":"切到設定頁","历史用量按":"歷史用量按","当前版本":"當前版本","出口状态":"出口狀態","积分限额":"積分限額","弹性看板":"彈性看板","到期时间":"到期時間","启动参数":"啟動引數","网关写入":"閘道寫入","模型目录":"模型目錄","剩余积分":"剩餘積分","或正整数":"或正整數","随机生成":"隨機生成","积分保底":"積分保底","不能为空":"不能為空","符合规范":"符合規範","用量占比":"用量佔比","定价依据":"定價依據","不改源码":"不改原始碼","长期有效":"長期有效","出厂快照":"出廠快照","当前生效":"當前生效","批量接取":"批次接取","添加槽位":"新增槽位","不绑出口":"不綁出口","查看用量":"檢視用量","显示条数":"顯示條數","全部模块":"全部模組","治理状态":"治理狀態","猫猫旅行":"貓貓旅行","回收失败":"回收失敗","触发失败":"觸發失敗","保存槽位":"儲存槽位","加密存储":"加密儲存","集中巡检":"集中巡檢","只读检测":"只讀檢測","都显示成":"都顯示成","设置分类":"設定分類","也写出来":"也寫出來","逗号分隔":"逗號分隔","最大输出":"最大輸出","只看失败":"只看失敗","账号数组":"帳號陣列","刷新完成":"重新整理完成","顶层核心":"頂層核心","等价花费":"等價花費","项目仓库":"專案倉庫","当前深色":"當前深色","闲置补偿":"閒置補償","实测上限":"實測上限","在途租约":"在途租約","模型名称":"模型名稱","请求次数":"請求次數","暂无数据":"暫無資料","熔断上限":"熔斷上限","任务中心":"任務中心","刷新明细":"重新整理明細","操作失败":"操作失敗","画面会和":"畫面會和","导入失败":"匯入失敗","付费模型":"付費模型","视觉能力":"視覺能力","付费用户":"付費使用者","每日活跃":"每日活躍","进阶设置":"進階設定","运行队列":"執行佇列","自动滚屏":"自動滾屏","任务名称":"任務名稱","取一次价":"取一次價","切换失败":"切換失敗","余额低于":"餘額低於","队列为空":"佇列為空","将覆盖同":"將覆蓋同","服务端拿":"服務端拿","与服务端":"與服務端","测试通过":"測試透過","虚拟别名":"虛擬別名","格里复用":"格里重用","默认名称":"預設名稱","无法恢复":"無法恢復","窗口任务":"視窗任務","刷新失败":"重新整理失敗","无需登记":"無需登記","保留天数":"保留天數","推理强度":"推理強度","上次取价":"上次取價","会少一些":"會少一些","不写日志":"不寫日誌","平均耗时":"平均耗時","同步昵称":"同步暱稱","秒会顺带":"秒會順帶","备注名称":"備註名稱","定价刷新":"定價重新整理","今日领取":"今日領取","签到时点":"簽到時點","降权上限":"降權上限","签到奖励":"簽到獎勵","整体替换":"整體替換","纯文本版":"純文字版","默认关闭":"預設關閉","签到失败":"簽到失敗","时间范围":"時間範圍","网关自有":"閘道自有","限时免费":"限時免費","任务福利":"任務福利","每日签到":"每日簽到","创建时间":"建立時間","设置出口":"設定出口","刷新间隔":"重新整理間隔","剩余可用":"剩餘可用","体验用户":"體驗使用者","申请授权":"申請授權","匹配来源":"匹配來源","本地测试":"本地測試","每次现算":"每次現算","条件档位":"條件檔位","确认导入":"確認匯入","确定继续":"確定繼續","三个数字":"三個數字","字段更新":"欄位更新","已切换为":"已切換為","已删除的":"已刪除的","积分余额":"積分餘額","运行信息":"執行資訊","消耗积分":"消耗積分","缓存命中":"快取命中","旅行归来":"旅行歸來","默认保留":"預設保留","运行日志":"執行日誌","柱高为总":"柱高為總","首字延迟":"首字延遲","更新时间":"更新時間","全部级别":"全部級別","启用夜猫":"啟用夜貓","让它不会":"讓它不會","面板密码":"面板密碼","默认出口":"預設出口","出口绑定":"出口繫結","用户名称":"使用者名稱稱","重新扫描":"重新掃描","自动检测":"自動檢測","执行出错":"執行出錯","生效时间":"生效時間","清空失败":"清空失敗","颜色主题":"顏色主題","表示关闭":"表示關閉","上游中断":"上游中斷","后台排程":"後台排程","读取失败":"讀取失敗","加权选号":"加權選號","全部启用":"全部啟用","斜杠分隔":"斜槓分隔","同步失败":"同步失敗","登记失败":"登記失敗","绑定账号":"繫結帳號","发起失败":"發起失敗","昵称取自":"暱稱取自","修改失败":"修改失敗","分钟热读":"分鐘熱讀","天内到期":"天內到期","消费倍率":"消費倍率","刷新归档":"重新整理歸檔","永久优先":"永久優先","终端视窗":"終端視窗","导入账号":"匯入帳號","个代理槽":"個代理槽","普通用户":"普通使用者","每轮最多":"每輪最多","添加账号":"新增帳號","数据来自":"資料來自","极简线条":"極簡線條","确定删除":"確定刪除","扫描待办":"掃描待辦","内置默认":"內建預設","默认开启":"預設開啟","会话粘性":"會話粘性","不重复写":"不重複寫","周期已过":"週期已過","累计消耗":"累計消耗","文件兜底":"檔案兜底","思考档位":"思考檔位","名称留空":"名稱留空","更多筛选":"更多篩選","扣减积分":"扣減積分","被显示成":"被顯示成","激活失败":"啟用失敗","国家未知":"國家未知","领取失败":"領取失敗","请求归档":"請求歸檔","导入完成":"匯入完成","启用调度":"啟用排程","跟随系统":"跟隨系統","自动命名":"自動命名","进入面板":"進入面板","保存失败":"儲存失敗","内置目录":"內建目錄","重新读取":"重新讀取","任务队列":"任務佇列","补充说明":"補充說明","最近请求":"最近請求","日志归档":"日誌歸檔","含其凭证":"含其憑證","刷新凭证":"重新整理憑證","当前系统":"當前系統","流式转发":"流式轉發","密码错误":"密碼錯誤","已自定义":"已自定義","上次失败":"上次失敗","任务说明":"任務說明","登录成功":"登入成功","暂停调度":"暫停排程","登录失败":"登入失敗","签到成功":"簽到成功","刷新积分":"重新整理積分","回收密钥":"回收金鑰","请求失败":"請求失敗","的归属表":"的歸屬表","立即取价":"立即取價","载荷更新":"載荷更新","尚未运行":"尚未執行","设置文件":"設定檔案","调度巡检":"排程巡檢","获得奖励":"獲得獎勵","排队补跑":"排隊補跑","该槽位被":"該槽位被","成本账本":"成本帳本","活跃打卡":"活躍打卡","阶段超时":"階段超時","扫描失败":"掃描失敗","全部账号":"全部帳號","账号导出":"帳號匯出","修改密码":"修改密碼","必须先行":"必須先行","三档单价":"三檔單價","按需补价":"按需補價","不要逐个":"不要逐個","没人引用":"沒人引用","整点排程":"整點排程","启动失败":"啟動失敗","融合后的":"融合後的","同步逻辑":"同步邏輯","全部历史":"全部歷史","测试失败":"測試失敗","当前浅色":"當前淺色","抢走鼠标":"搶走滑鼠","纯文字行":"純文字行","打卡失败":"打卡失敗","状态健康":"狀態健康","取价输入":"取價輸入","删除失败":"刪除失敗","降权基础":"降權基礎","导出失败":"匯出失敗","复制失败":"複製失敗","暂停接单":"暫停接單","导出账号":"匯出帳號","积分明细":"積分明細","各自独立":"各自獨立","搜索包名":"搜尋包名","额度治理":"額度治理","防止闪烁":"防止閃爍","今日数据":"今日資料","轮询使用":"輪詢使用","产品描述":"產品描述","正在扫描":"正在掃描","并行发起":"並行發起","等待签到":"等待簽到","一模一样":"一模一樣","当前视图":"當前檢視","保留积分":"保留積分","定价策略":"定價策略","熔断基础":"熔斷基礎","即将到期":"即將到期","状态标签":"狀態標籤","扫描完成":"掃描完成","扩展状态":"擴充套件狀態","启用签到":"啟用簽到","上游超时":"上游超時","用量数据":"用量資料","本地时间":"本地時間","当前密码":"當前密碼","已建会话":"已建會話","网关设置":"閘道設定","连接中断":"連線中斷","模型库的":"模型庫的","余额刷新":"餘額重新整理","自动续费":"自動續費","熔断阈值":"熔斷閾值","成长任务":"成長任務","未知错误":"未知錯誤","表格已经":"表格已經","网关看板":"閘道看板","正在检测":"正在檢測","降权阈值":"降權閾值","账号运维":"帳號運維","会员类型":"會員型別","网络异常":"網路異常","自动发现":"自動發現","重画后按":"重畫後按","所属区域":"所屬區域","保活时点":"保活時點","两步确认":"兩步確認","连续打卡":"連續打卡","切换按钮":"切換按鈕","无法解析":"無法解析","黑白单色":"黑白單色","一键任务":"一鍵任務","由浏览器":"由瀏覽器","不可达":"不可達","首字节":"首位元組","已过期":"已過期","标签由":"標籤由","刷新中":"重新整理中","看起来":"看起來","未归属":"未歸屬","秒轮询":"秒輪詢","价估算":"價估算","自定义":"自定義","未查询":"未查詢","每百万":"每百萬","搜索走":"搜尋走","未扫描":"未掃描","签到中":"簽到中","故这里":"故這裡","由账号":"由帳號","账号池":"帳號池","已导出":"已匯出","必须是":"必須是","思考为":"思考為","人民币":"人民幣","消耗总":"消耗總","未探测":"未探測","个槽位":"個槽位","测试中":"測試中","下载为":"下載為","激活中":"啟用中","模型库":"模型庫","已开启":"已開啟","汇率由":"匯率由","导出中":"匯出中","已复制":"已複製","既没有":"既沒有","未保存":"未儲存","上一页":"上一頁","已达成":"已達成","领取中":"領取中","无调用":"無呼叫","继承自":"繼承自","已暂停":"已暫停","为每个":"為每個","调度器":"排程器","并声明":"並宣告","未定价":"未定價","会宣告":"會宣告","请求数":"請求數","自动在":"自動在","里这些":"裡這些","空名称":"空名稱","已领过":"已領過","条记录":"條記錄","行时的":"行時的","行明细":"行明細","下一页":"下一頁","不限额":"不限額","的数字":"的數字","当前为":"當前為","行日志":"行日誌","无对应":"無對應","设备码":"裝置碼","不补齐":"不補齊","旧代理":"舊代理","已启用":"已啟用","探测中":"探測中","请填写":"請填寫","软冷却":"軟冷卻","个账号":"個帳號","巡检中":"巡檢中","总额度":"總額度","覆盖同":"覆蓋同","有剩余":"有剩餘","文本与":"文字與","进行中":"進行中","总积分":"總積分","切区域":"切區域","未启用":"未啟用","国际版":"國際版","不落盘":"不落盤","已关闭":"已關閉","将新增":"將新增","将覆盖":"將覆蓋","的会话":"的會話","国内版":"國內版","已保存":"已儲存","导入中":"匯入中","已筛选":"已篩選","秒周期":"秒週期","写死了":"寫死了","已删除":"已刪除","新密码":"新密碼","为空的":"為空的","标识行":"標識行","运行中":"執行中","或正数":"或正數","开启后":"開啟後","已记录":"已記錄","将跳过":"將跳過","已结束":"已結束","到现在":"到現在","加载中":"載入中","条目的":"條目的","轮询与":"輪詢與","未公布":"未公佈","个生效":"個生效","控制台":"控制檯","日限额":"日限額","切换前":"切換前","请改用":"請改用","个停用":"個停用","记得点":"記得點","冷却与":"冷卻與","耗时与":"耗時與","已领取":"已領取","扫描中":"掃描中","建议到":"建議到","请确认":"請確認","待领奖":"待領獎","里修改":"裡修改","个模型":"個模型","状态码":"狀態碼","原始价":"原始價","点恢复":"點恢復","请先在":"請先在","按该行":"按該行","未设置":"未設定","已导入":"已匯入","候选":"候選","活跃":"活躍","过滤":"過濾","关系":"關係","批量":"批次","会被":"會被","类型":"型別","缓存":"快取","声称":"聲稱","明细":"明細","来源":"來源","就绪":"就緒","冷却":"冷卻","发现":"發現","恢复":"恢復","记账":"記帳","统计":"統計","任务":"任務","删除":"刪除","耗时":"耗時","三个":"三個","添加":"新增","内置":"內建","互转":"互轉","只读":"只讀","熔断":"熔斷","内容":"內容","连续":"連續","继续":"繼續","复制":"複製","区间":"區間","绘制":"繪製","激活":"啟用","这次":"這次","状态":"狀態","降权":"降權","查询":"查詢","本周":"本週","设置":"設定","优惠":"優惠","花费":"花費","美国":"美國","关闭":"關閉","基准":"基準","无效":"無效","镜像":"映象","指标":"指標","选填":"選填","视觉":"視覺","暂无":"暫無","代码":"程式碼","签到":"簽到","直连":"直連","名称":"名稱","浅色":"淺色","阈值":"閾值","点击":"點選","异常":"異常","达限":"達限","进阶":"進階","结果":"結果","已为":"已為","导入":"匯入","日志":"日誌","小时":"小時","支持":"支援","汇率":"匯率","领奖":"領獎","单价":"單價","刚刚":"剛剛","系统":"系統","总览":"總覽","幂等":"冪等","区域":"區域","进度":"進度","等价":"等價","机房":"機房","项目":"專案","文本":"文字","内存":"記憶體","数组":"陣列","成长":"成長","刷新":"重新整理","临期":"臨期","并发":"併發","标签":"標籤","授权":"授權","补算":"補算","透传":"透傳","编辑":"編輯","为准":"為準","实测":"實測","输出":"輸出","跳过":"跳過","暂停":"暫停","自绘":"自繪","否则":"否則","请求":"請求","夜间":"夜間","测试":"測試","文件":"檔案","样式":"樣式","数量":"數量","密钥":"金鑰","不变":"不變","导出":"匯出","延迟":"延遲","端口":"埠","失败":"失敗","计价":"計價","夜猫":"夜貓","打断":"打斷","错误":"錯誤","复位":"復位","低于":"低於","插件":"外掛","过期":"過期","登记":"登記","默认":"預設","当前":"當前","覆盖":"覆蓋","认证":"認證","挂在":"掛在","昵称":"暱稱","国家":"國家","百万":"百萬","只挡":"只擋","时序":"時序","积分":"積分","额度":"額度","时间":"時間","待办":"待辦","启用":"啟用","账号":"帳號","保存":"儲存","奖励":"獎勵","查看":"檢視","钳制":"鉗制","限额":"限額","输入":"輸入","分钟":"分鐘","对话":"對話","路径":"路徑","视图":"檢視","跟随":"跟隨","说明":"說明","创建":"建立","剩余":"剩餘","写进":"寫進","累计":"累計","数字":"數字","点":"點","里":"裡","总":"總","见":"見","档":"檔","时":"時","开":"開","关":"關","项":"項","吗":"嗎","与":"與","从":"從","计":"計","条":"條","读":"讀","页":"頁","个":"個","登录":"登入","网络":"網路","软件":"軟體","视频":"影片","信息":"資訊","优化":"最佳化","调用":"呼叫","队列":"佇列","数据":"資料","网关":"閘道","后台":"後台","程序":"程式","渠道":"通道","实时":"即時","本地":"本機","用户":"使用者","运行":"執行","执行":"執行","页面":"頁面","归档":"歸檔","筛选":"篩選","模型":"模型","档位":"檔位","调度":"排程","配置":"設定","开启":"開啟"};
+
+const WB_LANG_KEY = 'wb-lang';
+function wbCurrentLang(){
+  try {
+    const q = new URLSearchParams(location.search).get('lang');
+    if(q === 'zh-TW' || q === 'zh-CN') return q;
+    return localStorage.getItem(WB_LANG_KEY) || 'zh-CN';
+  } catch(e) { return 'zh-CN'; }
+}
+function wbToggleLanguage(){
+  const next = wbCurrentLang() === 'zh-CN' ? 'zh-TW' : 'zh-CN';
+  try { localStorage.setItem(WB_LANG_KEY, next); } catch(e){}
+  try {
+    const url = new URL(location.href);
+    url.searchParams.set('lang', next);
+    location.href = url.toString();
+  } catch(e) { location.reload(); }
+}
+const WB_I18N_TERMS = Object.keys(I18N_S2T).sort((a,b) => b.length - a.length);
+let wbI18nApplying = false;
+function wbTranslateText(value){
+  let out = String(value || '');
+  for(const term of WB_I18N_TERMS){
+    if(out.indexOf(term) !== -1) out = out.split(term).join(I18N_S2T[term]);
+  }
+  return out;
+}
+function wbTranslatable(node){
+  const el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+  if(!el) return true;
+  const tag = (el.tagName || '').toLowerCase();
+  return tag !== 'script' && tag !== 'style' && tag !== 'template' && tag !== 'noscript';
+}
+function wbTranslateElement(el){
+  if(!el || !wbTranslatable(el)) return;
+  if(el.nodeType === 3){
+    const n = wbTranslateText(el.nodeValue);
+    if(n !== el.nodeValue) el.nodeValue = n;
+    return;
+  }
+  if(el.nodeType !== 1) return;
+  for(const attr of ['title','placeholder','aria-label']){
+    const v = el.getAttribute(attr);
+    if(v){ const n = wbTranslateText(v); if(n !== v) el.setAttribute(attr, n); }
+  }
+  for(const child of Array.from(el.childNodes)) wbTranslateElement(child);
+}
+function wbApplyLanguage(){
+  const lang = wbCurrentLang();
+  document.documentElement.lang = lang === 'zh-TW' ? 'zh-Hant-TW' : 'zh-CN';
+  const btn = document.getElementById('langToggleBtn');
+  if(btn){
+    btn.textContent = lang === 'zh-TW' ? '繁' : '简';
+    btn.title = lang === 'zh-TW' ? '当前繁體（台灣），点击切换简体' : '当前简体，点击切换繁體（台灣）';
+  }
+  if(lang !== 'zh-TW') return;
+  if(wbI18nApplying) return;
+  wbI18nApplying = true;
+  try { wbTranslateElement(document.body); } finally { wbI18nApplying = false; }
+}
+const wbI18nObserver = typeof MutationObserver !== 'undefined' ? new MutationObserver(mutations => {
+  if(wbI18nApplying || wbCurrentLang() !== 'zh-TW') return;
+  wbI18nApplying = true;
+  try {
+    for(const m of mutations){
+      if(m.type === 'childList'){
+        m.addedNodes.forEach(n => wbTranslateElement(n));
+      } else if(m.type === 'characterData'){
+        if(wbTranslatable(m.target)){
+          const n = wbTranslateText(m.target.nodeValue);
+          if(n !== m.target.nodeValue) m.target.nodeValue = n;
+        }
+      } else if(m.type === 'attributes' && m.attributeName){
+        const v = m.target.getAttribute(m.attributeName);
+        if(v){ const n = wbTranslateText(v); if(n !== v) m.target.setAttribute(m.attributeName, n); }
+      }
+    }
+  } finally { wbI18nApplying = false; }
+}) : null;
+wbApplyLanguage();
+if(wbI18nObserver) wbI18nObserver.observe(document.body, {childList:true, subtree:true, characterData:true, attributes:true, attributeFilter:['title','placeholder','aria-label']});
 
 function openLogin(){
   const m = document.getElementById("loginModal");
@@ -1743,8 +2085,26 @@ function renderAvailableModels(){
       ctx = '<b>' + m.context_windows.map(fmtK).join(' / ') + '</b>';
     }
 
-    // 4. 最大输出
-    const maxOut = m.max_output_tokens ? ('<b>' + fmtK(m.max_output_tokens) + '</b>') : '-';
+    // 4. 最大输出（M5 E2：有实测钳制时标注「钳制 N×」，数据来自 output_probes.json）
+    let maxOut = m.max_output_tokens ? ('<b>' + fmtK(m.max_output_tokens) + '</b>') : '-';
+    const clamp = Number(m.output_clamp || 0);
+    if(clamp > 0){
+      const claimed = Number(m.max_output_tokens || 0);
+      const tip = '声称 ' + (claimed ? fmtK(claimed) : '?') + ' · 实测 ' + fmtK(clamp);
+      if(!claimed){
+        maxOut = '<b style="color:var(--warn)">' + fmtK(clamp) + ' ⚠</b>'
+          + '<div style="font-size:11px;color:var(--warn);margin-top:2px" title="' + esc(tip) + '">实测上限</div>';
+      }else if(clamp < claimed){
+        const ratio = claimed / clamp;
+        const xs = (ratio >= 10 ? Math.round(ratio) : Math.round(ratio * 10) / 10) + '×';
+        maxOut = '<b style="color:var(--warn)">' + fmtK(clamp) + ' ⚠</b>'
+          + '<div style="font-size:11px;color:var(--warn);margin-top:2px" title="' + esc(tip) + '">钳制 ' + xs + '</div>';
+      }else{
+        maxOut = '<b>' + fmtK(clamp) + '</b> <span style="color:var(--accent2)">✓</span>';
+      }
+    } else if(m.max_output_tokens){
+      maxOut += '<div style="font-size:11px;color:var(--dim);margin-top:2px" title="尚未运行 scripts/probe_max_tokens.py，只有厂商声称值">未探测</div>';
+    }
 
     // 5. 思考档位
     let effort = '<span style="color:var(--dim)">—</span>';
@@ -1783,10 +2143,9 @@ async function switchGrowthAccount(uid){
 async function loadGrowthTasks(){
   const sec = document.getElementById("sectionGrowthTasks");
   if(!sec) return;
-  if(window.VIEW_REALM !== 'cn'){
-    sec.style.display = 'none';
-    return;
-  }
+  // The task center is its own page now. Always show the CN growth block so
+  // the buttons remain discoverable even while the realm view is intl; the
+  // table itself explains when there is no CN account to operate on.
   sec.style.display = 'block';
   try{
     const q = (CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all') ? ('?uid=' + encodeURIComponent(CURRENT_GROWTH_UID)) : '';
@@ -1895,6 +2254,150 @@ async function runGrowthTasks(btn){
   }
 }
 
+let TASK_QUEUE_TIMER = null;
+
+async function scanTaskQueue(btn){
+  if(btn) btn.disabled = true;
+  try{
+    const payload = {};
+    if(CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all') payload.uid = CURRENT_GROWTH_UID;
+    const r = await postJSON('/tasks/queue/scan', payload);
+    const accounts = r.accounts || [];
+    const rows = [];
+    accounts.forEach(a => {
+      (a.growth || []).forEach(t => {
+        rows.push('<div>[' + esc(a.nickname || (a.uid || '').slice(0,8)) + '] ' + esc(t.name || t.task_code)
+          + ' <span style="color:var(--dim)">' + esc(t.task_code) + ' ' + (t.current || 0) + '/' + (t.target || 1) + '</span></div>');
+      });
+      if(a.growth_error){
+        rows.push('<div style="color:var(--warn)">[' + esc(a.nickname || (a.uid || '').slice(0,8)) + '] ' + esc(a.growth_error) + '</div>');
+      }
+    });
+    const list = document.getElementById('taskQueueList');
+    if(list){
+      list.style.display = 'block';
+      list.innerHTML = rows.length ? rows.join('') : '<div style="color:var(--dim)">没有可自动化的待办任务</div>';
+    }
+    const summary = document.getElementById('taskQueueSummary');
+    if(summary) summary.textContent = '待办 ' + (r.pending_count || 0) + ' 项';
+    toast('扫描完成: 待办 ' + (r.pending_count || 0) + ' 项', 'ok');
+  }catch(e){
+    toast('扫描失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function runTaskQueue(btn){
+  if(btn) btn.disabled = true;
+  try{
+    const payload = {};
+    if(CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all') payload.uid = CURRENT_GROWTH_UID;
+    const r = await postJSON('/tasks/queue/start', payload);
+    if(!r.started){ toast(r.msg || '无法启动队列', 'warn'); return; }
+    toast('队列已启动: ' + r.total + ' 项（并发 ' + (r.concurrency || 1) + '）', 'ok');
+    if(TASK_QUEUE_TIMER) clearInterval(TASK_QUEUE_TIMER);
+    TASK_QUEUE_TIMER = setInterval(pollTaskQueue, 2000);
+    pollTaskQueue();
+  }catch(e){
+    toast('启动失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function pollTaskQueue(){
+  try{
+    const r = await postJSON('/tasks/queue/status', {});
+    const summary = document.getElementById('taskQueueSummary');
+    const counts = r.counts || {};
+    if(summary){
+      summary.textContent = (r.running ? '运行中' : '已结束') + ' · 完成 '
+        + (counts.done || 0) + ' / 失败 ' + (counts.error || 0) + ' / 共 ' + ((r.items || []).length);
+    }
+    const list = document.getElementById('taskQueueList');
+    if(list){
+      const items = r.items || [];
+      list.style.display = 'block';
+      list.innerHTML = items.length ? items.map(it => {
+        const color = it.status === 'done' ? 'var(--accent2)' : (it.status === 'error' ? 'var(--warn)' : 'var(--dim)');
+        return '<div>[' + esc(it.nickname || (it.uid || '').slice(0,8)) + '] ' + esc(it.code)
+          + ' <span style="color:' + color + '">' + esc(it.status) + '</span> ' + esc(it.message || '') + '</div>';
+      }).join('') : '<div style="color:var(--dim)">队列为空</div>';
+    }
+    if(!r.running && TASK_QUEUE_TIMER){
+      clearInterval(TASK_QUEUE_TIMER);
+      TASK_QUEUE_TIMER = null;
+      loadAccounts();
+    }
+  }catch(e){ /* polling failures are non-fatal */ }
+}
+
+function fmtReqMs(value){
+  return (value === null || value === undefined) ? '-' : (Math.round(value) + ' ms');
+}
+function fmtReqPct(value){
+  return (value === null || value === undefined) ? '-' : (Math.round(value * 1000) / 10 + '%');
+}
+async function loadRequestArchive(btn){
+  if(btn) btn.disabled = true;
+  try{
+    const value = id => { const el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; };
+    const model = value('reqFilterModel');
+    const account = value('reqFilterAccount');
+    const outcome = value('reqFilterOutcome');
+    const path = value('reqFilterPath');
+    const requestId = value('reqFilterRequestId');
+    const errorsOnly = !!(document.getElementById('reqFilterErrors') || {}).checked;
+    const limit = Number(value('reqFilterLimit') || 200);
+    const filters = {limit: limit};
+    if(model) filters.model = model;
+    if(account) filters.account = account;
+    if(outcome) filters.outcome = outcome;
+    if(path) filters.path = path;
+    if(requestId) filters.request_id = requestId;
+    if(errorsOnly) filters.error = true;
+    const status = Number(value('reqFilterStatus'));
+    if(Number.isInteger(status) && status > 0) filters.status = status;
+    const since = value('reqFilterSince');
+    const until = value('reqFilterUntil');
+    if(since){ const ms = new Date(since).getTime(); if(Number.isFinite(ms)) filters.since = ms / 1000; }
+    if(until){ const ms = new Date(until).getTime(); if(Number.isFinite(ms)) filters.until = ms / 1000; }
+    const metricsRes = await postJSON('/requests/metrics', filters);
+    const rowsRes = await postJSON('/requests', filters);
+    const m = metricsRes.metrics || {};
+    const set = (id, value) => { const el = document.getElementById(id); if(el) el.textContent = value; };
+    set('reqMRequests', String(m.requests || 0));
+    set('reqMCompletion', fmtReqPct(m.completion_rate));
+    set('reqMHttp', fmtReqPct(m.http_success_rate));
+    set('reqMElapsed', fmtReqMs(m.avg_elapsed_ms) + ' / ' + fmtReqMs(m.p95_elapsed_ms));
+    set('reqMTtfb', fmtReqMs(m.avg_ttfb_ms) + ' / ' + fmtReqMs(m.p95_ttfb_ms));
+    const tbody = document.querySelector('#requestTable tbody');
+    if(tbody){
+      const rows = rowsRes.rows || [];
+      tbody.innerHTML = rows.map(r => {
+        const hint = r.gateway_hint || (r.error ? (r.message || '') : '');
+        return '<tr>'
+        + '<td>' + esc(r.iso || '') + '</td>'
+        + '<td>' + esc(r.model || '') + '</td>'
+        + '<td>' + esc(String(r.status != null ? r.status : (r.error ? 'ERR' : '200'))) + '</td>'
+        + '<td>' + esc(r.outcome || (r.error ? 'failed' : 'completed')) + '</td>'
+        + '<td>' + fmtReqMs(r.elapsed_ms) + '</td>'
+        + '<td>' + fmtReqMs(r.ttft_ms) + '</td>'
+        + '<td class="mono">' + esc(String(r.account || '').slice(0,8)) + '</td>'
+        + '<td class="mono">' + esc(String(r.request_id || '').slice(0,12)) + '</td>'
+        + '<td title="' + esc(hint) + '" style="max-width:260px;white-space:normal;color:' + (hint && r.error ? 'var(--warn)' : 'var(--dim)') + '">' + esc(hint || '-') + '</td>'
+        + '</tr>';
+      }).join('') || '<tr><td colspan="9" style="color:var(--dim)">没有匹配的请求</td></tr>';
+    }
+    if(btn) toast('请求归档已刷新', 'ok');
+  }catch(e){
+    toast('读取请求归档失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function triggerCatTravel(btn){
   if(btn){ btn.disabled = true; btn.textContent = '旅行中...'; }
   try{
@@ -1921,6 +2424,7 @@ async function loadSchedulerStatus(){
     const dot = document.getElementById("schedDot");
     const txt = document.getElementById("schedStatusText");
     const times = document.getElementById("schedTimes");
+    const details = document.getElementById("schedulerDetails");
     const btn = document.getElementById("btnToggleSched");
     const btnTrig = document.getElementById("btnTriggerSched");
 
@@ -1932,6 +2436,24 @@ async function loadSchedulerStatus(){
     if(times) times.textContent = '上次: ' + (s.last_run_time || '-') + ' · 下次: ' + (s.next_run_time || '-');
     if(btn) btn.textContent = s.enabled ? '暂停调度' : '启用调度';
     if(btnTrig) btnTrig.textContent = (window.VIEW_REALM === 'intl') ? '立即保活刷新' : '立即巡检保活';
+    if(details){
+      const families = [
+        ['签到', s.checkin_hours, s.checkin_enabled],
+        ['旅行', s.travel_hours, s.travel_enabled],
+        ['保活', s.keepalive_hours, s.keepalive_enabled],
+        ['夜猫', s.cat_hours, s.cat_enabled],
+        ['活跃', s.daily_chat_hours, s.daily_chat_enabled],
+        ['成长', s.growth_hours, s.growth_enabled]
+      ].filter(item => item[1] && item[1].length);
+      const bits = families.map(item => item[0] + ' ' + item[1].join('/') + (item[2] === false ? '（关）' : ''));
+      const balance = s.balance_refresh || {};
+      bits.push('余额刷新 ' + (balance.enabled ? ('每 ' + (balance.minutes || 5) + ' 分钟') : '关闭'));
+      if(s.include_disabled_in_tasks) bits.push('保号任务覆盖已禁用账号');
+      const logs = (s.logs || []).slice(-3);
+      details.innerHTML = '<div>' + esc(bits.join(' · ')) + '</div>' +
+        (logs.length ? '<div style="margin-top:4px;max-height:52px;overflow:auto;font-family:monospace;font-size:11px">' + logs.map(line => esc(line)).join('<br>') + '</div>' : '');
+      details.style.display = 'block';
+    }
   }catch(e){}
 }
 
@@ -1959,13 +2481,6 @@ async function toggleScheduler(btn){
   }finally{
     if(btn){ btn.disabled = false; }
   }
-}
-function filterRealm(m){
-  REALM_FILTER = m;
-  document.getElementById("fltAll").className = m === "all" ? "active" : "";
-  document.getElementById("fltIntl").className = m === "intl" ? "active" : "";
-  document.getElementById("fltCn").className = m === "cn" ? "active" : "";
-  renderAccounts();
 }
 async function doCheckin(btn){
   btn.disabled = true; const ot = btn.textContent; btn.textContent = "签到中...";
@@ -1997,7 +2512,7 @@ async function doDailyChat(btn){
   finally { btn.disabled = false; btn.textContent = ot; }
 }
 
-/* 网页通道打卡：只建网页端会话（官方每日活跃只认网页端对话）。
+/* 网页渠道打卡：只建网页端会话（官方每日活跃只认网页端对话）。
  * 会真的起一次任务、消耗该账号少量积分，所以先确认一次。 */
 async function doDailyChatWeb(btn){
   if(!confirm('将为每个已启用的国际版账号各建一个网页端会话。\n\n这会真的起一次任务并消耗该账号少量积分，用于计入官方「每日活跃」。继续？')) return;
@@ -2008,10 +2523,10 @@ async function doDailyChatWeb(btn){
     if(!res.length) toast("未发现国际版账号", "warn");
     else {
       const summary = res.map(x => (x.nickname||x.uid.slice(0,6)) + ": " + (x.ok ? ("已建会话 " + (x.conversation||"")) : (x.error||"失败"))).join("；");
-      toast("网页通道打卡: " + summary, res.some(x => x.ok) ? "ok" : "warn");
+      toast("网页渠道打卡: " + summary, res.some(x => x.ok) ? "ok" : "warn");
     }
     await refreshActiveRealm(); window.updateUI(); loadAccounts(); loadModels();
-  }catch(e){ toast("网页通道打卡失败: " + e.message, "bad"); }
+  }catch(e){ toast("网页渠道打卡失败: " + e.message, "bad"); }
   finally { btn.disabled = false; btn.textContent = ot; }
 }
 
@@ -2227,8 +2742,8 @@ function renderCostToggle(){
 // CNY/USD 二选一的切换按钮组；用于费用卡片与表格标题区。
 function costToggleHtml(){
   return '<span class="cost-toggle" style="display:inline-flex;gap:4px">'
-    + '<button type="button" class="range-btn' + (costCurrency === 'CNY' ? ' active' : '') + '" data-cur="CNY" onclick="setCostCurrency(\'CNY\')">￥ 人民币</button>'
-    + '<button type="button" class="range-btn' + (costCurrency === 'USD' ? ' active' : '') + '" data-cur="USD" onclick="setCostCurrency(\'USD\')">$ 美元</button>'
+    + '<button type="button" class="range-btn' + (costCurrency === 'CNY' ? ' active' : '') + '" data-cur="CNY" data-action="setCostCurrency" data-on="click" data-arg="CNY">￥ 人民币</button>'
+    + '<button type="button" class="range-btn' + (costCurrency === 'USD' ? ' active' : '') + '" data-cur="USD" data-action="setCostCurrency" data-on="click" data-arg="USD">$ 美元</button>'
     + '</span>';
 }
 // 输入 / 输出 / 思考 三个数字，各自一色，斜杠分隔。思考为 0 也写出来，
@@ -2397,13 +2912,22 @@ function accountRow(a){
   const uidAttr = esc(String(a.uid || '').replace(/[^\w.@-]/g, ''));
   const nameAttr = esc(String(a.nickname || '').replace(/["'\\<>]/g, ''));
   const usage = USAGE_BY_ACCOUNT[a.uid] || {};
-  const state = !a.enabled ? '<span class="badge off">已停用</span>'
+  const state = !a.enabled
+              ? (a.sessionDeadFails > 0
+                  ? '<span class="badge bad" title="Session 连续失效达到阈值后自动停用">Session失效 ' + a.sessionDeadFails + '/' + (a.sessionDeadThreshold || 3) + '</span>'
+                  : '<span class="badge off">已停用</span>')
+              : a.balanceCooledFor > 0 ? '<span class="badge bad" title="上游余额不足，等待签到/余额刷新恢复">402冷却 ' + a.balanceCooledFor + 's</span>'
+              : a.breakerFor > 0 ? '<span class="badge bad">熔断 ' + a.breakerFor + 's</span>'
+              : a.degradeFor > 0 ? '<span class="badge warn">降权 ' + a.degradeFor + 's</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
               : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmt(a.dailyTokensToday || 0) + ' / ' + fmt(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
               : a.creditLimitReached ? '<span class="badge warn" title="今日已消费 ' + Number(a.dailyCreditsToday || 0).toFixed(2) + ' / ' + (a.dailyCreditLimit || 0) + ' 积分，仅免费模型可用（本地 0 点恢复）">积分限额</span>'
               : a.inCooldown ? '<span class="badge warn">冷却 ' + (a.cooldownFor||0) + 's</span>'
               : a.expiresIn === 'expired' ? '<span class="badge bad">已过期</span>'
               : '<span class="badge ok">可用</span>';
+  const flight = (a.inFlight || a.maxInFlight)
+              ? '<div style="margin-top:3px"><span class="badge ' + (a.maxInFlight && a.inFlight >= a.maxInFlight ? 'warn' : 's') + ' mini">在途 ' + (a.inFlight || 0) + '/' + (a.maxInFlight || 0) + '</span></div>'
+              : '';
   const pills = coolPills(a);
   const limitPills = modelLimitPills(a);
   const err = a.lastError && !(pills && a.lastError === 'HTTP 429 (model throttled)')
@@ -2423,11 +2947,11 @@ function accountRow(a){
        + '<b style="color:var(--accent2)">' + fmt(cred.remain) + '</b>'
        + '<span style="color:var(--dim)">/ ' + fmt(cred.size) + '</span>'
        + expBadge
-       + '<span class="badge mini" style="font-size:10px;padding:1px 5px;cursor:pointer" onclick="openCreditsDetail(&quot;' + uidAttr + '&quot;)" title="点击查看积分与套餐明细">明细</span>'
+       + '<span class="badge mini" style="font-size:10px;padding:1px 5px;cursor:pointer" data-action="openCreditsDetail" data-on="click" data-uid="' + uidAttr + '" title="点击查看积分与套餐明细">明细</span>'
        + '</div>')
     : ('<div style="display:inline-flex;align-items:center;gap:6px">'
        + '<span style="color:var(--dim)">未查询</span>'
-       + '<span class="badge mini" style="font-size:10px;padding:1px 5px;cursor:pointer" onclick="openCreditsDetail(&quot;' + uidAttr + '&quot;)" title="点击查询积分明细">查询</span>'
+       + '<span class="badge mini" style="font-size:10px;padding:1px 5px;cursor:pointer" data-action="openCreditsDetail" data-on="click" data-uid="' + uidAttr + '" title="点击查询积分明细">查询</span>'
        + '</div>');
   return '<tr>'
     + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + '</td>'
@@ -2436,7 +2960,7 @@ function accountRow(a){
     + '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(a.uid.slice(0,8)) + ' · ' + esc(a.source) + ' · 到期 ' + esc(a.expiresIn || '?') + '</div>'
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
     + err + pills + limitPills + '</td>'
-    + '<td style="text-align:center" data-label="状态">' + state + '</td>'
+    + '<td style="text-align:center" data-label="状态">' + state + flight + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
     + '<td style="text-align:right" data-label="请求">' + fmt(usage.requests) + '</td>'
@@ -2445,18 +2969,21 @@ function accountRow(a){
     + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle">'
     + '<div class="acct-actions-col">'
     +   '<div class="acct-actions-row">'
-    +     '<button class="sec mini" onclick="toggleAccount(&quot;' + uidAttr + '&quot;,' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
-    +     '<button class="sec mini" onclick="testAccount(&quot;' + uidAttr + '&quot;, this)">测试</button>'
-    +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新凭证</button>'
+    +     '<button class="sec mini"  data-action="toggleAccount" data-on="click" data-uid="' + uidAttr + '" data-arg="' + (!a.enabled ? '1' : '0') + '">' + (a.enabled ? '停用' : '启用') + '</button>'
+    +     '<button class="sec mini"  data-action="testAccount" data-on="click" data-uid="' + uidAttr + '">测试</button>'
+    +     '<button class="sec mini"  data-action="refreshOne" data-on="click" data-uid="' + uidAttr + '">刷新凭证</button>'
+    +     '<button class="sec mini"  data-action="syncProfile" data-on="click" data-uid="' + uidAttr + '" title="从 Web 控制台同步最新昵称（改名后免重登）">同步昵称</button>'
+    +     (a.realm === 'intl' ? ('<button class="sec mini"  data-action="activateGlobal" data-on="click" data-uid="' + uidAttr + '" title="补注册地区并激活国际版账号（幂等）">激活</button>'
+    +       '<button class="sec mini"  data-action="claimTrial" data-on="click" data-uid="' + uidAttr + '" title="领取一次性 trial 加油包（幂等）">Trial</button>') : '')
     +   '</div>'
     +   '<div class="acct-actions-row">'
-    +     '<div class="id-btn-group" title="出站身份：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)">'
-    +       '<button class="id-btn' + ((!a.product || a.product === 'workbuddy') ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;workbuddy&quot;, this)">WB</button>'
-    +       '<button class="id-btn' + (a.product === 'vscode' ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;vscode&quot;, this)">VSC</button>'
-    +       '<button class="id-btn' + (a.product === 'cli' ? ' active' : '') + '" onclick="setAccountProduct(&quot;' + uidAttr + '&quot;, &quot;cli&quot;, this)">CLI</button>'
+    +     '<div class="id-btn-group" title="出站身分：默认 WorkBuddy 桌面端 (WB) / 官方 VSCode 插件 (VSC) / 官方 CodeBuddy CLI (CLI)">'
+    +       '<button class="id-btn' + ((!a.product || a.product === 'workbuddy') ? ' active' : '') + '"  data-action="setAccountProduct" data-on="click" data-uid="' + uidAttr + '" data-arg="workbuddy">WB</button>'
+    +       '<button class="id-btn' + (a.product === 'vscode' ? ' active' : '') + '"  data-action="setAccountProduct" data-on="click" data-uid="' + uidAttr + '" data-arg="vscode">VSC</button>'
+    +       '<button class="id-btn' + (a.product === 'cli' ? ' active' : '') + '"  data-action="setAccountProduct" data-on="click" data-uid="' + uidAttr + '" data-arg="cli">CLI</button>'
     +     '</div>'
-    +     '<button class="sec mini" onclick="exportOne(&quot;' + uidAttr + '&quot;)">导出</button>'
-    +     '<button class="danger mini" onclick="deleteAccount(&quot;' + uidAttr + '&quot;,&quot;' + nameAttr + '&quot;, this)">删除</button>'
+    +     '<button class="sec mini"  data-action="exportOne" data-on="click" data-uid="' + uidAttr + '">导出</button>'
+    +     '<button class="danger mini"  data-action="deleteAccount" data-on="click" data-uid="' + uidAttr + '" data-name="' + nameAttr + '">删除</button>'
     +   '</div>'
     + '</div>'
     + '</td></tr>';
@@ -2482,7 +3009,7 @@ function renderAccounts(){
       + '<div style="color:var(--dim);font-size:13px;margin-bottom:18px">'
       +   '请先登录或导入一个 ' + viewName + ' 账号，之后相关请求都会走该账号'
       + '</div>'
-      + '<button onclick="openLoginModal()" style="font-size:14px;padding:10px 22px">'
+      + '<button  data-action="openLoginModal" data-on="click" style="font-size:14px;padding:10px 22px">'
       +   '登录新账号 (OAuth)'
       + '</button>'
       + '</div>';
@@ -2499,7 +3026,7 @@ function renderAccounts(){
     + '<th style="text-align:right;width:80px">缓存</th>'
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
-    + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额通道。</span></div>'
+    + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额渠道。</span></div>'
     + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个</span></div>';
 }
 
@@ -2559,7 +3086,7 @@ async function setAccountProduct(uid, prod, btn){
     'cli': '官方 CodeBuddy CLI (CLI)'
   };
   const label = names[prod] || prod;
-  if(!confirm('将该账号的出站身份切换为 ' + label + '？\n\n不同身分对应不同的出站指纹、端点和配额通道。')) return;
+  if(!confirm('将该账号的出站身份切换为 ' + label + '？\n\n不同身分对应不同的出站指纹、端点和配额渠道。')) return;
   if(btn){ btn.disabled = true; }
   try {
     const r = await postJSON('/accounts/product', {uid: uid, product: prod});
@@ -2584,6 +3111,48 @@ async function refreshOne(uid, btn){
     toast('刷新失败: ' + e.message, 'bad');
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '刷新凭证'; }
+  }
+}
+async function activateGlobal(uid, btn){
+  if(btn){ btn.disabled = true; btn.textContent = '激活中...'; }
+  try{
+    const r = await postJSON('/accounts/global-register', {uid: uid});
+    if(r.ok) toast('国际版账号已激活: ' + (r.detail || ''), 'ok');
+    else toast('激活失败: ' + (r.error || '未知错误'), 'bad');
+    await loadAccounts();
+  }catch(e){
+    toast('激活请求失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '激活'; }
+  }
+}
+async function claimTrial(uid, btn){
+  if(btn){ btn.disabled = true; btn.textContent = '领取中...'; }
+  try{
+    const r = await postJSON('/accounts/trial', {uid: uid});
+    if(!r.ok) toast('Trial 领取失败: ' + (r.error || '未知错误'), 'bad');
+    else toast(r.claimed ? 'Trial 加油包已领取' : 'Trial 已领过（幂等）', r.claimed ? 'ok' : 'warn');
+    await loadAccounts();
+  }catch(e){
+    toast('Trial 请求失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = 'Trial'; }
+  }
+}
+async function syncProfile(uid, btn){
+  if(btn){ btn.disabled = true; btn.textContent = '同步中...'; }
+  try{
+    const r = await postJSON('/accounts/sync-profile', {uid: uid});
+    const item = (r.updated || [])[0];
+    const bad = (r.failed || [])[0];
+    if(item && item.nickname) toast('昵称已同步: ' + item.nickname, 'ok');
+    else if(bad) toast('同步失败: ' + bad.error, 'bad');
+    else toast('同步完成（上游未返回昵称）', 'warn');
+    await loadAccounts();
+  }catch(e){
+    toast('同步失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '同步昵称'; }
   }
 }
 async function testAccount(uid, btn){
@@ -2625,7 +3194,8 @@ async function deleteAccount(uid, name, btn){
   if(!confirm("确定删除账号 " + name + "？")) return;
   if(btn) btn.disabled = true;
   try{
-    await postJSON('/accounts/delete', {uid: uid});
+    const res = await postJSON('/accounts/delete', {uid: uid});
+    if(res.deleted === false) throw new Error('account not found');
     await loadAccounts();
     toast('已成功删除账号 ' + name, 'ok');
   }catch(e){
@@ -3247,7 +3817,7 @@ function closeCreditsDetail(){
 function openDesktopScan(){
   const m = document.getElementById('desktopScanModal');
   const body = document.getElementById('desktopScanBody');
-  if(body) body.innerHTML = '<p class="hint">正在检测本机桌面客户端账号…</p>';
+  if(body) body.innerHTML = '<p class="hint">正在检测本地桌面客户端账号…</p>';
   if(m) m.classList.add('show');
 }
 
@@ -3259,7 +3829,7 @@ function closeDesktopScan(){
 async function refreshDesktopScan(btn){
   if(btn){ btn.disabled = true; btn.textContent = '扫描中...'; }
   const body = document.getElementById('desktopScanBody');
-  if(body) body.innerHTML = '<p class="hint">正在检测本机桌面客户端账号…</p>';
+  if(body) body.innerHTML = '<p class="hint">正在检测本地桌面客户端账号…</p>';
   try{
     const r = await postJSON('/accounts/import/desktop', {});
     renderDesktopScan(r.detected || [], r.atrest || null);
@@ -3307,7 +3877,7 @@ function renderAtrestBar(atrest, list){
     + '桌面客户端把 token 加密存储了，需要从正在运行的 WorkBuddy.exe 进程内存里回收静态密钥'
     + '（只读，密钥只留在网关内存里）。通常几秒钟，内存大时要十几秒。</div>';
   if(atrest.huntSupported){
-    html += '<button class="primary mini" onclick="recoverAtrestKey(this)">回收密钥</button>';
+    html += '<button class="primary mini" data-action="recoverAtrestKey" data-on="click">回收密钥</button>';
   }else{
     html += '<div class="hint" style="color:var(--warn)">当前系统（' + esc(atrest.platform)
       + '）不支持进程内存回收，请改用「+ 添加账号 (OAuth)」。</div>';
@@ -3360,7 +3930,7 @@ function renderDesktopScan(list, atrest){
 
   let html = renderAtrestBar(atrest, list);
   if(!list.length && !html){
-    body.innerHTML = '<p class="hint">未在本机检测到桌面客户端登录凭证。<br>'
+    body.innerHTML = '<p class="hint">未在本地检测到桌面客户端登录凭证。<br>'
       + '请确认已安装并登录 WorkBuddy 客户端后点「重新扫描」。</p>';
     return;
   }
@@ -3391,7 +3961,7 @@ function renderDesktopScan(list, atrest){
     html += '</tbody></table>';
   }
   if(!html){
-    html = '<p class="hint">未在本机检测到桌面客户端登录凭证。<br>'
+    html = '<p class="hint">未在本地检测到桌面客户端登录凭证。<br>'
       + '请确认已安装并登录 WorkBuddy 客户端后点「重新扫描」。</p>';
   }
   body.innerHTML = html;
@@ -3547,7 +4117,7 @@ async function refreshInner(gen){
         return '<span style="color:var(--dim);padding:0 3px">…</span>';
       }
       const active = (p === RECENT_PAGE);
-      return '<button class="range-btn' + (active ? ' active' : '') + '" style="min-width:26px;padding:3px 6px;font-size:11px" onclick="gotoRecentPage(' + p + ')">' + p + '</button>';
+      return '<button class="range-btn' + (active ? ' active' : '') + '" style="min-width:26px;padding:3px 6px;font-size:11px"  data-action="gotoRecentPage" data-on="click" data-arg="' + p + '">' + p + '</button>';
     }).join('');
   }
 
@@ -3669,7 +4239,7 @@ function generatePageList(current, total){
 
 // Tab ids in nav order. One list so the restore path and the nav cannot
 // drift apart.
-const MAIN_TABS = ['gateway', 'analytics', 'logs', 'settings'];
+const MAIN_TABS = ['gateway', 'accounts', 'tasks', 'analytics', 'models', 'logs', 'settings'];
 const MAIN_TAB_STORE = 'wb-proxy-main-tab';
 let currentMainTab = 'gateway';
 let analyticsRange = 'today';
@@ -3803,10 +4373,201 @@ async function startDashboard(){
       if(!PANEL_READY) return;
       if(currentMainTab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
     }, 5000),
+    setInterval(() => {
+      if(!PANEL_READY) return;
+      if(currentMainTab === 'tasks'){ loadGrowthTasks(); }
+    }, 15000),
     setInterval(refresh, 5000),
     setInterval(loadSchedulerStatus, 30000),
     setInterval(loadAccounts, 15000),
   ];
+}
+
+
+/* ---- advanced settings (audit 2026-10-06) --------------------------------
+ * The backend has validated these six groups since M1/M2. Keep the field
+ * descriptions here rather than duplicating 49 static inputs in the markup;
+ * renderAdvancedSettings() redraws the cards from GET /settings and each card
+ * saves one deep-merge patch through /settings/save.
+ */
+const ADVANCED_SETTING_GROUPS = [
+  {
+    id: 'pool', title: '账号池与流量治理',
+    desc: '加权选号、软冷却、熔断、降权、在途租约、成本探索、积分保底与粘性路由。',
+    fields: [
+      {key:'weighted_pick', label:'加权选号', type:'bool', hint:'按积分比例与闲置补偿加权抽取账号，关闭则恢复轮询。'},
+      {key:'soft_rate', label:'软冷却基数（秒）', type:'number', min:0, step:'any', hint:'遇到上游软限流后的基础冷却秒数。'},
+      {key:'soft_rate_max', label:'软冷却上限（秒）', type:'number', min:0, step:'any', hint:'指数退避的封顶秒数。'},
+      {key:'breaker_threshold', label:'熔断阈值', type:'int', min:1, hint:'连续失败达到此数后进入熔断。'},
+      {key:'breaker_cooldown', label:'熔断基础（秒）', type:'number', min:0, step:'any', hint:'首次熔断时长。'},
+      {key:'breaker_cooldown_max', label:'熔断上限（秒）', type:'number', min:0, step:'any', hint:'熔断指数退避封顶。'},
+      {key:'degrade_threshold', label:'降权阈值', type:'int', min:1, hint:'连续未知错误达到此数后临时出池。'},
+      {key:'degrade_cooldown', label:'降权基础（秒）', type:'number', min:0, step:'any', hint:'首次降权时长。'},
+      {key:'degrade_cooldown_max', label:'降权上限（秒）', type:'number', min:0, step:'any', hint:'降权指数退避封顶。'},
+      {key:'idle_weight_per_hour', label:'闲置补偿 / 小时', type:'number', min:0, step:'any', hint:'账号闲置越久权重越高。'},
+      {key:'idle_weight_max', label:'闲置补偿上限', type:'number', min:0, step:'any', hint:'闲置补偿最大点数。'},
+      {key:'max_in_flight', label:'单账号最大在途', type:'int', min:0, hint:'0 = 不限制；每账号同时处理的请求数。'},
+      {key:'max_in_flight_global', label:'国际版在途上限', type:'int', min:0, hint:'国际版区域总在途上限；0 = 回落单账号上限。'},
+      {key:'top_n', label:'候选短名单 Top N', type:'int', min:1, hint:'加权随机前先取前 N 名。'},
+      {key:'cost_ledger_ttl', label:'成本账本 TTL（秒）', type:'int', min:60, hint:'实测成本层的有效秒数。'},
+      {key:'cost_explore_interval', label:'成本探索窗口（秒）', type:'number', min:0, step:'any', hint:'免费层垄断时，每隔多久搭车探索未知号；0 = 关闭。'},
+      {key:'credit_floor', label:'积分保底', type:'int', min:0, hint:'只挡 tier2 付费模型；0 = 关闭。'},
+      {key:'min_pick_gap', label:'最小重复间隔（秒）', type:'number', min:0, step:'any', hint:'短名单内尽量避免刚用过同一账号。'},
+      {key:'affinity_ttl', label:'会话粘性 TTL（秒）', type:'int', min:60, hint:'同一会话固定账号的缓存窗口。'},
+      {key:'affinity_max_entries', label:'会话粘性容量', type:'int', min:100, hint:'内存中最多保存的会话路由数。'},
+      {key:'session_dead_threshold', label:'Session-dead 阈值', type:'int', min:1, hint:'12153/session not found 连续出现多少次才停用账号。'},
+    ]
+  },
+  {
+    id: 'schedule', title: '后台排程',
+    desc: '签到、旅行、保活、夜猫、每日活跃与成长队列的时点、开关和余额巡检。',
+    fields: [
+      {key:'checkin_hours', label:'签到时点（小时）', type:'hours', placeholder:'9, 21', hint:'逗号分隔，0-23；空 = 不跑。'},
+      {key:'travel_hours', label:'猫猫旅行时点（小时）', type:'hours', placeholder:'9, 21', hint:'逗号分隔，0-23。'},
+      {key:'keepalive_hours', label:'Token 保活时点（小时）', type:'hours', placeholder:'22', hint:'逗号分隔，0-23。'},
+      {key:'cat_hours', label:'夜猫窗口时点（小时）', type:'hours', placeholder:'1, 23', hint:'逗号分隔，0-23。'},
+      {key:'daily_chat_hours', label:'国际活跃时点（小时）', type:'hours', placeholder:'9, 21', hint:'逗号分隔，0-23。'},
+      {key:'growth_hours', label:'成长队列时点（小时）', type:'hours', placeholder:'1', hint:'逗号分隔，0-23。'},
+      {key:'checkin_enabled', label:'启用签到', type:'bool', hint:'国内版签到。'},
+      {key:'travel_enabled', label:'启用猫猫旅行', type:'bool', hint:'派出与领奖闭环。'},
+      {key:'keepalive_enabled', label:'启用 Token 保活', type:'bool', hint:'集中刷新凭证。'},
+      {key:'cat_enabled', label:'启用夜猫', type:'bool', hint:'23:00-08:00 窗口任务。'},
+      {key:'daily_chat_enabled', label:'启用国际活跃', type:'bool', hint:'每日活跃对话打卡。'},
+      {key:'growth_enabled', label:'启用成长队列', type:'bool', hint:'每日自动扫描并执行成长任务。'},
+      {key:'include_disabled_in_tasks', label:'保号任务覆盖已禁用账号', type:'bool', hint:'禁用号不参与选号，但仍可签到/保活。'},
+      {key:'balance_refresh_enabled', label:'后台刷新余额', type:'bool', hint:'定时刷新积分并解锁余额恢复账号。'},
+      {key:'balance_refresh_minutes', label:'余额刷新间隔（分钟）', type:'int', min:1, hint:'仅在上方开关开启时生效。'},
+    ]
+  },
+  {
+    id: 'redis', title: 'Upstash Redis 镜像',
+    desc: '可选的会话粘性镜像；失败会降级回内存，不影响请求主路径。',
+    fields: [
+      {key:'url', label:'Upstash REST URL', type:'text', placeholder:'https://...upstash.io', hint:'留空即关闭镜像。'},
+      {key:'token', label:'Upstash Token', type:'secret', placeholder:'token', hint:'只保存在本地 settings.json，不会回显明文。'},
+      {key:'affinity_mirror', label:'启用粘性镜像', type:'bool', hint:'重启后保留账号路由。'},
+      {key:'ttl_seconds', label:'镜像 TTL（秒）', type:'int', min:60, hint:'默认 604800 = 7 天。'},
+    ]
+  },
+  {
+    id: 'upstream', title: '上游与设备令牌',
+    desc: 'SSE 首字节/流中空闲超时，以及可选的 X-Device-Token 文件兜底。',
+    fields: [
+      {key:'header_timeout_seconds', label:'首字节超时（秒）', type:'int', min:1, hint:'聊天 header 阶段超时。'},
+      {key:'idle_timeout_seconds', label:'流中空闲超时（秒）', type:'int', min:1, hint:'活跃流会续命；静默到期释放租约。'},
+      {key:'device_token', label:'X-Device-Token 值', type:'secret', placeholder:'留空 = 不注入', hint:'直接注入请求头的值。'},
+      {key:'device_token_file', label:'X-Device-Token 文件', type:'text', placeholder:'C:/path/to/token', hint:'5 分钟热读；>1KB 忽略。'},
+    ]
+  },
+  {
+    id: 'prompt', title: '系统提示词',
+    desc: 'PANEL parity 的 prompt.mode；默认 passthrough，不影响旧行为。',
+    fields: [
+      {key:'mode', label:'提示词模式', type:'select', options:['passthrough','custom','append'], default:'passthrough', hint:'passthrough = 透传；custom = 网关自有；append = 客户端后追加。'},
+      {key:'file', label:'提示词文件路径', type:'text', placeholder:'留空 = 内置默认', hint:'custom/append 模式才读取。'},
+    ]
+  },
+  {
+    id: 'logging', title: '日志归档',
+    desc: '来源记录是个人数据，默认关闭；轮转窗口与大小上限在这里配置。',
+    fields: [
+      {key:'record_client_info', label:'记录调用来源（IP/UA）', type:'bool', hint:'默认关闭。'},
+      {key:'retention_days', label:'保留天数', type:'int', min:1, hint:'默认 7 天。'},
+      {key:'archive_max_mb', label:'归档大小上限（MB）', type:'int', min:1, hint:'默认 100MB。'},
+    ]
+  }
+];
+let ADVANCED_SETTINGS_DATA = {};
+
+function advancedFieldId(group, key){ return 'adv_' + group + '_' + key; }
+function advancedFieldValue(cfg, key, type){
+  const value = cfg ? cfg[key] : undefined;
+  if(type === 'hours') return Array.isArray(value) ? value.join(', ') : '';
+  if(value === undefined || value === null) return '';
+  return String(value);
+}
+function renderAdvancedSettings(data){
+  ADVANCED_SETTINGS_DATA = data || {};
+  const box = document.getElementById('advancedSettingsCards');
+  if(!box) return;
+  box.innerHTML = ADVANCED_SETTING_GROUPS.map(function(group){
+    const cfg = (data && data[group.id]) || {};
+    const fields = group.fields.map(function(field){
+      const common = 'id="' + advancedFieldId(group.id, field.key) + '" data-adv-group="' + group.id + '" data-adv-key="' + field.key + '" data-adv-type="' + field.type + '"';
+      const label = '<div style="font-size:12px;color:var(--dim);margin-bottom:4px">' + field.label + '</div>';
+      const hint = field.hint ? '<div style="font-size:11px;color:var(--dim);line-height:1.35">' + field.hint + '</div>' : '';
+      const value = advancedFieldValue(cfg, field.key, field.type);
+      let control = '';
+      if(field.type === 'bool'){
+        control = '<label style="display:flex;align-items:center;gap:8px;min-height:40px;font-size:13px;color:var(--fg)"><input type="checkbox" ' + common + (cfg[field.key] ? ' checked' : '') + ' style="width:16px;height:16px"><span>' + field.label + '</span></label>';
+        return '<div style="min-width:190px">' + control + (field.hint ? '<div style="font-size:11px;color:var(--dim);line-height:1.35;margin-left:24px">' + field.hint + '</div>' : '') + '</div>';
+      }
+      if(field.type === 'select'){
+        const options = (field.options || []).map(function(option){
+          return '<option value="' + option + '"' + (String(value || field.default || '') === option ? ' selected' : '') + '>' + option + '</option>';
+        }).join('');
+        control = '<select class="slot-select" style="width:100%;max-width:none" ' + common + '>' + options + '</select>';
+      } else if(field.type === 'hours' || field.type === 'text' || field.type === 'secret'){
+        const inputType = field.type === 'secret' ? 'password' : 'text';
+        control = '<input type="' + inputType + '" class="slot-input" ' + common + ' value="' + esc(value) + '" placeholder="' + esc(field.placeholder || '') + '">';
+      } else {
+        const min = field.min == null ? 0 : field.min;
+        const step = field.type === 'int' ? '1' : (field.step || 'any');
+        control = '<input type="number" class="slot-input" ' + common + ' min="' + min + '" step="' + step + '" value="' + esc(value) + '">';
+      }
+      return '<div style="min-width:190px">' + label + control + hint + '</div>';
+    }).join('');
+    return '<section style="margin-bottom:16px"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px"><div><h2 style="margin:0;font-size:15px">' + group.title + '</h2><div style="font-size:12px;color:var(--dim);margin-top:4px">' + group.desc + '</div></div></div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px">' + fields + '</div><div style="margin-top:12px"><button data-action="saveAdvancedSettings" data-on="click" data-arg="' + group.id + '">保存' + group.title + '</button></div></section>';
+  }).join('');
+}
+function readAdvancedSettingsGroup(groupId){
+  const group = ADVANCED_SETTING_GROUPS.find(function(item){ return item.id === groupId; });
+  if(!group) throw new Error('未知的设置组');
+  const out = {};
+  group.fields.forEach(function(field){
+    const el = document.getElementById(advancedFieldId(groupId, field.key));
+    if(!el) throw new Error(field.label + ' 控件不存在');
+    if(field.type === 'bool'){ out[field.key] = !!el.checked; return; }
+    const raw = String(el.value == null ? '' : el.value).trim();
+    if(field.type === 'int' || field.type === 'number'){
+      const number = Number(raw);
+      const minimum = field.min == null ? 0 : field.min;
+      if(!Number.isFinite(number) || number < minimum){
+        throw new Error(field.label + ' 必须是不小于 ' + minimum + ' 的数字');
+      }
+      if(field.type === 'int' && !Number.isInteger(number)){
+        throw new Error(field.label + ' 必须是整数');
+      }
+      out[field.key] = number;
+    } else if(field.type === 'hours'){
+      const parts = raw ? raw.split(',').map(function(part){ return part.trim(); }).filter(Boolean) : [];
+      const hours = parts.map(function(part){ return Number(part); });
+      if(hours.some(function(hour){ return !Number.isInteger(hour) || hour < 0 || hour > 23; })){
+        throw new Error(field.label + ' 必须是 0-23，逗号分隔');
+      }
+      out[field.key] = hours;
+    } else {
+      out[field.key] = raw;
+    }
+  });
+  return out;
+}
+async function saveAdvancedSettings(btn, ev, groupId){
+  const group = ADVANCED_SETTING_GROUPS.find(function(item){ return item.id === groupId; });
+  if(!group) return;
+  if(btn) btn.disabled = true;
+  try{
+    const payload = {};
+    payload[group.id] = readAdvancedSettingsGroup(group.id);
+    if(group.id === 'schedule') payload.restart_scheduler = true;
+    await postJSON('/settings/save', payload);
+    toast(group.title + '已保存', 'ok');
+    await loadSettings();
+  }catch(e){
+    toast('保存失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
 }
 
 async function loadSettings(showToast){
@@ -3916,6 +4677,7 @@ async function loadSettings(showToast){
       deleted_at: k.deleted_at || '',
     }));
     renderKeyRows();
+    renderAdvancedSettings(data);
     updateUI();
     const set = (id, value) => { const el = document.getElementById(id); if(el) el.textContent = value || '-'; };
     set('setVersion', data.version);
@@ -3923,6 +4685,8 @@ async function loadSettings(showToast){
     set('setUsageDir', data.usage_dir);
     set('setFile', data.settings_file);
     set('setSettingsFile', data.settings_file);
+    set('setMaxConcurrent', data.max_concurrent_chat == null ? '-' : String(data.max_concurrent_chat));
+    set('setChatSlotWait', data.chat_slot_wait_seconds == null ? '-' : String(data.chat_slot_wait_seconds) + 's');
     if(showToast) toast('设置已刷新', 'ok');
   } catch(e) {
     if(showToast) toast('读取设置失败: ' + e.message, 'bad');
@@ -4099,13 +4863,13 @@ function renderPricingGaps(st){
     const label = PRICING_GAP_LABELS[g.reason] || {text: g.reason || '未定价', color: 'var(--dim)'};
     const cands = (g.candidates || []).map(c =>
       '<a href="javascript:void(0)" data-or-id="' + safeModelId(c)
-      + '" onclick="fillPricingMapping(this)" style="color:var(--accent2)">' + esc(c) + '</a>'
+      + '" data-action="fillPricingMapping" data-on="click" style="color:var(--accent2)">' + esc(c) + '</a>'
     ).join('、');
     const editable = g.reason !== 'alias';
     const control = editable
       ? '<input placeholder="vendor/model" style="width:190px;background:var(--panel2);'
         + 'border:1px solid var(--line);border-radius:6px;padding:4px 8px;color:var(--fg);font:inherit;font-size:12px">'
-        + '<button onclick="savePricingMapping(this)" style="font-size:12px;padding:4px 10px">登记</button>'
+        + '<button data-action="savePricingMapping" data-on="click" style="font-size:12px;padding:4px 10px">登记</button>'
       : '<span style="color:var(--dim);font-size:12px">无需登记</span>';
     return '<div data-model="' + model + '" style="display:flex;align-items:center;gap:8px;'
       + 'flex-wrap:wrap;padding:5px 0;border-top:1px solid var(--line)">'
@@ -4201,7 +4965,7 @@ async function saveDailyChatWeb(btn){
   if(btn) btn.disabled = true;
   try {
     await postJSON('/settings/save', {daily_chat_web: value});
-    toast(value ? '已启用：国际版打卡走网页通道' : '已关闭：国际版打卡只发桌面端对话', 'ok');
+    toast(value ? '已启用：国际版打卡走网页渠道' : '已关闭：国际版打卡只发桌面端对话', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -4324,13 +5088,13 @@ function renderKeyRows(){
         +     '<div style="display:flex;gap:8px">'
         +       '<input type="text" id="editKeyValue_' + i + '" value="' + esc(row.key || '') + '" placeholder="' + (row.masked ? '留空表示保持原 Key 不变' : '输入自定义密钥，或点击右侧生成') + '" '
         +         'style="flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
-        +       '<button class="sec mini" style="white-space:nowrap;border-radius:8px;padding:7px 14px" onclick="generateKeyForEdit(' + i + ')">随机生成</button>'
+        +       '<button class="sec mini" style="white-space:nowrap;border-radius:8px;padding:7px 14px"  data-action="generateKeyForEdit" data-on="click" data-arg="' + i + '">随机生成</button>'
         +     '</div>'
         +   '</div>'
         + '</div>'
         + '<div style="display:flex;gap:8px;justify-content:flex-end">'
-        +   '<button class="sec mini" style="border-radius:8px;padding:6px 16px" onclick="cancelEditKey(' + i + ')">取消</button>'
-        +   '<button class="mini" style="border-radius:8px;padding:6px 18px" onclick="saveSingleKey(' + i + ', this)">保存</button>'
+        +   '<button class="sec mini" style="border-radius:8px;padding:6px 16px"  data-action="cancelEditKey" data-on="click" data-arg="' + i + '">取消</button>'
+        +   '<button class="mini" style="border-radius:8px;padding:6px 18px"  data-action="saveSingleKey" data-on="click" data-arg="' + i + '">保存</button>'
         + '</div>'
         + '</div>';
     }
@@ -4367,10 +5131,10 @@ function renderKeyRows(){
       +     '</div>'
       +   '</div>'
       +   '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-      +     '<button class="key-action-btn" id="copyBtn' + i + '" onclick="copyKeyRow(' + i + ')">复制</button>'
-      +     '<button class="key-action-btn" onclick="openEditKey(' + i + ')">编辑</button>'
-      +     '<button class="key-action-btn" onclick="toggleKeyRow(' + i + ')">' + (row.enabled ? '禁用' : '启用') + '</button>'
-      +     '<button class="key-action-btn danger" onclick="removeKeyRow(' + i + ')">删除</button>'
+      +     '<button class="key-action-btn" id="copyBtn' + i + '"  data-action="copyKeyRow" data-on="click" data-arg="' + i + '">复制</button>'
+      +     '<button class="key-action-btn"  data-action="openEditKey" data-on="click" data-arg="' + i + '">编辑</button>'
+      +     '<button class="key-action-btn"  data-action="toggleKeyRow" data-on="click" data-arg="' + i + '">' + (row.enabled ? '禁用' : '启用') + '</button>'
+      +     '<button class="key-action-btn danger"  data-action="removeKeyRow" data-on="click" data-arg="' + i + '">删除</button>'
       +   '</div>'
       + '</div>'
       + '</div>';
@@ -4577,7 +5341,7 @@ function slotSelectHtml(a){
     '<option value="' + esc(s.id) + '"' + (s.id === current ? ' selected' : '') + '>'
     + esc(s.label || s.name || s.id) + (s.enabled === false ? '（停用）' : '') + '</option>'));
   const uidAttr = esc(String(a.uid || '').replace(/[^\w.@-]/g, ''));
-  return '<select class="slot-select" onchange="setAccountSlot(&quot;' + uidAttr + '&quot;, this.value, this)">'
+  return '<select class="slot-select"  data-action="setAccountSlot" data-on="change" data-uid="' + uidAttr + '">'
     + opts.join('') + '</select>';
 }
 
@@ -4684,15 +5448,15 @@ function renderProxySlots(){
     + '</tr></thead><tbody>'
     + PROXY_SLOTS.map((s, i) =>
         '<tr>'
-        + '<td data-label="名称"><input value="' + esc(s.name || '') + '" placeholder="' + esc(s.label || '') + '" oninput="PROXY_SLOTS[' + i + '].name=this.value; markSlotsDirty()" class="slot-input"></td>'
-        + '<td data-label="代理地址"><input value="' + esc(s.url || '') + '" oninput="PROXY_SLOTS[' + i + '].url=this.value; markSlotsDirty()" class="slot-input mono"></td>'
+        + '<td data-label="名称"><input value="' + esc(s.name || '') + '"  data-action="onProxySlotNameInput" data-on="input" data-arg="' + i + '" class="slot-input"></td>'
+        + '<td data-label="代理地址"><input value="' + esc(s.url || '') + '"  data-action="onProxySlotUrlInput" data-on="input" data-arg="' + i + '" class="slot-input mono"></td>'
         + '<td data-label="出口">' + slotExitHtml(s) + '</td>'
         + '<td style="text-align:center" data-label="启用"><input type="checkbox" ' + (s.enabled === false ? '' : 'checked')
-        +   ' onchange="PROXY_SLOTS[' + i + '].enabled=this.checked; markSlotsDirty()"></td>'
+        +   '  data-action="onProxySlotEnabledChange" data-on="change" data-arg="' + i + '"></td>'
         + '<td style="text-align:center" data-label="绑定账号">' + (s.bound || 0) + '</td>'
         + '<td style="text-align:center;white-space:nowrap" data-label="">'
-        +   '<button class="sec mini" onclick="testProxySlot(' + i + ', this)">测试</button> '
-        +   '<button class="danger mini" onclick="removeProxySlot(' + i + ')">删除</button>'
+        +   '<button class="sec mini"  data-action="testProxySlot" data-on="click" data-arg="' + i + '">测试</button> '
+        +   '<button class="danger mini"  data-action="removeProxySlot" data-on="click" data-arg="' + i + '">删除</button>'
         + '</td></tr>'
       ).join('')
     + '</tbody></table></div>'
@@ -4801,7 +5565,7 @@ function renderDiscover(){
                + ' · ' + c.latency_ms + 'ms')
             : '不可达') + '</span>'
         + '</label>').join('')
-    + '<button class="sec" onclick="importDiscovered()" style="margin-top:8px">导入勾选的出口</button></div>';
+    + '<button class="sec"  data-action="importDiscovered" data-on="click" style="margin-top:8px">导入勾选的出口</button></div>';
 }
 
 function importDiscovered(){
@@ -4845,41 +5609,38 @@ async function autoAssignSlots(){
 
 function switchMainTab(tab){
   currentMainTab = tab;
-  // Remember the page across reloads. The URL is updated so the address bar
-  // matches what is on screen and a copied link reopens the same page;
-  // storage covers a plain reload and the ?key= link, which strips the
-  // query string on load.
   try {
     const url = new URL(window.location.href);
     url.searchParams.set('tab', tab);
     history.replaceState(null, '', url.toString());
   } catch(e){}
   try { localStorage.setItem(MAIN_TAB_STORE, tab); } catch(e){}
-  const btnGateway = document.getElementById('btnNavGateway');
-  const btnAnalytics = document.getElementById('btnNavAnalytics');
-  const btnLogs = document.getElementById('btnNavLogs');
-  const btnSettings = document.getElementById('btnNavSettings');
-  const pageGateway = document.getElementById('pageGateway');
-  const pageAnalytics = document.getElementById('pageAnalytics');
-  const pageLogs = document.getElementById('pageLogs');
-  const pageSettings = document.getElementById('pageSettings');
   const tabs = [
-    ['gateway', btnGateway, pageGateway],
-    ['analytics', btnAnalytics, pageAnalytics],
-    ['logs', btnLogs, pageLogs],
-    ['settings', btnSettings, pageSettings]
+    ['gateway', 'btnNavGateway', 'pageGateway'],
+    ['accounts', 'btnNavAccounts', 'pageAccounts'],
+    ['tasks', 'btnNavTasks', 'pageTasks'],
+    ['analytics', 'btnNavAnalytics', 'pageAnalytics'],
+    ['models', 'btnNavModels', 'pageModels'],
+    ['logs', 'btnNavLogs', 'pageLogs'],
+    ['settings', 'btnNavSettings', 'pageSettings']
   ];
-  tabs.forEach(([name, btn, page]) => {
+  tabs.forEach(([name, btnId, pageId]) => {
+    const btn = document.getElementById(btnId);
+    const page = document.getElementById(pageId);
     if(!btn || !page) return;
     const on = (name === tab);
     btn.classList.toggle('active', on);
     page.classList.toggle('active', on);
   });
+  if(tab === 'accounts'){ loadAccounts(); loadProxySlots(); }
+  if(tab === 'tasks'){ loadGrowthTasks(); loadSchedulerStatus(); }
+  if(tab === 'models'){ loadModels(); }
   if(tab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
   if(tab === 'settings'){ loadSettings(); loadProxySlots(); }
   if(tab === 'logs'){
     startLogPolling();
     fetchNewLogs(true);
+    loadRequestArchive();
   } else {
     stopLogPolling();
   }
@@ -4984,7 +5745,10 @@ function setLogFilterTag(tag){
     'tasks': 'Tasks',
     'scheduler': 'Sched',
     'accounts': 'Acct',
-    'system': 'Sys'
+    'system': 'Sys',
+    'catalog': 'Catalog',
+    'auth': 'Auth',
+    'settings': 'Settings'
   };
   Object.keys(tagMap).forEach(k => {
     const btn = document.getElementById('btnLogTag' + tagMap[k]);
@@ -5558,8 +6322,98 @@ async function loadAnalytics(){
     // 载荷永远按当前选中的窗口取，它的 window 桶就是第一列要展示的数字。
     const data = await getJSON('/usage/analytics' + analyticsQuery());
     renderAnalytics(data);
+    loadUsageSeries();
+    loadCreditHistory();
   } catch(err) {
     console.error('loadAnalytics failed:', err);
+  }
+}
+
+function loadUsageSeries(){
+  getJSON('/usage/timeseries' + analyticsQuery()).then(renderUsageSeries).catch(() => {});
+}
+
+function renderUsageSeries(data){
+  const canvas = document.getElementById('usageSeriesChart');
+  if(!canvas) return;
+  const series = (data && data.series) || [];
+  const summary = document.getElementById('usageSeriesSummary');
+  const totalTokens = series.reduce((sum, b) => sum + (b.total_tokens || 0), 0);
+  const totalCredit = series.reduce((sum, b) => sum + (b.credit || 0), 0);
+  if(summary) summary.textContent = '总 Token ' + fmt(totalTokens) + ' · 扣减积分 ' + fmt(totalCredit)
+    + ' · 桶 ' + (data ? data.bucket_seconds : '-') + 's';
+  const ctx = canvas.getContext('2d');
+  const ratio = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 800;
+  const cssH = 220;
+  canvas.width = cssW * ratio;
+  canvas.height = cssH * ratio;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  if(!series.length){
+    ctx.fillStyle = '#64748b';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('当前范围没有请求数据', 12, 24);
+    return;
+  }
+  const pad = {l: 52, r: 16, t: 12, b: 26};
+  const plotW = Math.max(10, cssW - pad.l - pad.r);
+  const plotH = Math.max(10, cssH - pad.t - pad.b);
+  const maxTokens = Math.max(1, ...series.map(b => b.total_tokens || 0));
+  const maxReq = Math.max(1, ...series.map(b => b.requests || 0));
+  const slot = plotW / series.length;
+  const barW = Math.max(1, slot - 2);
+  ctx.strokeStyle = '#1e293b';
+  ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t);
+  ctx.lineTo(pad.l, pad.t + plotH);
+  ctx.lineTo(pad.l + plotW, pad.t + plotH);
+  ctx.stroke();
+  series.forEach((b, i) => {
+    const h = plotH * (b.total_tokens || 0) / maxTokens;
+    const x = pad.l + slot * i + 1;
+    ctx.fillStyle = 'rgba(56,189,248,.55)';
+    ctx.fillRect(x, pad.t + plotH - h, barW, h);
+  });
+  ctx.strokeStyle = '#a78bfa';
+  ctx.beginPath();
+  series.forEach((b, i) => {
+    const x = pad.l + slot * (i + 0.5);
+    const y = pad.t + plotH - plotH * (b.requests || 0) / maxReq;
+    if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = '#64748b';
+  ctx.font = '10px monospace';
+  ctx.fillText(fmt(maxTokens), 4, pad.t + 8);
+  ctx.fillText('0', 4, pad.t + plotH);
+  const tsLabel = t => new Date(t * 1000).toLocaleString();
+  const firstLabel = tsLabel(series[0].at);
+  const lastLabel = tsLabel(series[series.length - 1].at);
+  ctx.fillText(firstLabel, pad.l, cssH - 6);
+  ctx.fillText(lastLabel, Math.max(pad.l, cssW - pad.r - ctx.measureText(lastLabel).width), cssH - 6);
+}
+
+async function loadCreditHistory(btn){
+  if(btn) btn.disabled = true;
+  try{
+    const r = await postJSON('/requests', {limit: 500});
+    const rows = (r.rows || []).filter(x => Number(x.credit || 0) > 0).slice(0, 50);
+    const tbody = document.querySelector('#creditHistoryTable tbody');
+    if(tbody){
+      tbody.innerHTML = rows.map(x => '<tr>'
+        + '<td>' + esc(x.iso || '') + '</td>'
+        + '<td>' + esc(x.model || '') + '</td>'
+        + '<td class="mono">' + esc(String(x.account || '').slice(0,8)) + '</td>'
+        + '<td>' + fmt(x.credit) + '</td>'
+        + '<td>' + fmt(x.total_tokens || 0) + '</td>'
+        + '</tr>').join('') || '<tr><td colspan="5" style="color:var(--dim)">没有积分扣减记录</td></tr>';
+    }
+    if(btn) toast('积分扣减历史已刷新', 'ok');
+  }catch(e){
+    toast('读取积分扣减历史失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
   }
 }
 
@@ -5649,7 +6503,7 @@ function renderAnalytics(data){
         const st = a.window || {};
         const modelsMap = a.window_models || {};
         const entries = Object.entries(modelsMap || {}).sort((x, y) => (y[1].tokens || 0) - (x[1].tokens || 0));
-        
+
         let pills = '<span style="color:var(--dim)">无调用</span>';
         if(entries.length){
           pills = entries.map(([mid, ms]) => {
@@ -5786,6 +6640,148 @@ function renderKeyTable(data){
       + '</tr>';
   }).join('');
 }
+/* M4 D3 stage 2: every former inline handler goes through this delegated
+ * dispatcher, so the page runs under a nonce-based CSP with no
+ * 'unsafe-inline' script allowance. Elements carry
+ *   data-action=<action> data-on=click|change|input|keydown|scroll
+ * plus optional data-arg / data-uid / data-name payloads. */
+const ACTION_HANDLERS = {
+  switchMainTab: (el, ev, arg) => switchMainTab(arg),
+  toggleLanguage: () => wbToggleLanguage(),
+  submitPanelLoginOnEnter: (el, ev) => { if(ev.key === 'Enter') submitPanelLogin(); },
+  submitPanelLogin: () => submitPanelLogin(),
+  switchViewRealm: (el, ev, arg) => switchViewRealm(arg),
+  toggleActiveGatewayRealm: () => toggleActiveGatewayRealm(),
+  triggerSchedulerNow: (el) => triggerSchedulerNow(el),
+  toggleScheduler: (el) => toggleScheduler(el),
+  openLoginModal: () => openLoginModal(),
+  doCheckin: (el) => doCheckin(el),
+  doDailyChat: (el) => doDailyChat(el),
+  doDailyChatWeb: (el) => doDailyChatWeb(el),
+  scanDesktop: (el) => scanDesktop(el),
+  exportAccounts: (el) => exportAccounts(el),
+  openImport: () => openImport(),
+  fetchCredits: (el) => fetchCredits(el),
+  autoAssignSlots: () => autoAssignSlots(),
+  setAll: (el, ev, arg) => setAll(arg === '1', el),
+  setRecentLimit: (el, ev, arg) => setRecentLimit(Number(arg)),
+  changeRecentPage: (el, ev, arg) => changeRecentPage(Number(arg)),
+  switchGrowthAccount: (el) => switchGrowthAccount(el.value),
+  runGrowthTasks: (el) => runGrowthTasks(el),
+  triggerCatTravel: (el) => triggerCatTravel(el),
+  scanTaskQueue: (el) => scanTaskQueue(el),
+  runTaskQueue: (el) => runTaskQueue(el),
+  setAnalyticsRange: (el, ev, arg) => setAnalyticsRange(arg),
+  onRangeCustomChange: () => onRangeCustomChange(),
+  loadCreditHistory: (el) => loadCreditHistory(el),
+  onMatrixAcctFilterChange: (el) => { matrixAcctFilter = el.value; if(cachedMatrixData) renderPerfMatrix(cachedMatrixData.usage, cachedMatrixData.perf); },
+  onMatrixModelFilterChange: (el) => { matrixModelFilter = el.value; if(cachedMatrixData) renderPerfMatrix(cachedMatrixData.usage, cachedMatrixData.perf); },
+  savePanelPassword: (el) => savePanelPassword(el),
+  addApiKeyRow: () => addApiKeyRow(),
+  discoverProxySlots: (el) => discoverProxySlots(el),
+  addProxySlotRow: () => addProxySlotRow(),
+  saveProxySlots: (el) => saveProxySlots(el),
+  saveReserveCredits: (el) => saveReserveCredits(el),
+  saveDailyTokenLimit: (el) => saveDailyTokenLimit(el),
+  saveAutoSwitchProduct: (el) => saveAutoSwitchProduct(el),
+  saveDailyChatWeb: (el) => saveDailyChatWeb(el),
+  saveLocalWebTools: (el) => saveLocalWebTools(el),
+  saveAdvancedSettings: (el, ev, arg) => saveAdvancedSettings(el, ev, arg),
+  loadSettings: (el, ev, arg) => loadSettings(arg === '1'),
+  panelLogout: () => panelLogout(),
+  fetchNewLogs: (el, ev, arg) => fetchNewLogs(arg === '1'),
+  toggleLogAuto: () => toggleLogAuto(),
+  toggleLogScroll: () => toggleLogScroll(),
+  copyFilteredLogs: () => copyFilteredLogs(),
+  exportLogsFile: () => exportLogsFile(),
+  clearServerLogs: () => clearServerLogs(),
+  setLogFilterLevel: (el, ev, arg) => setLogFilterLevel(arg),
+  setLogFilterTag: (el, ev, arg) => setLogFilterTag(arg),
+  onLogSearchInput: () => onLogSearchInput(),
+  loadRequestArchive: (el) => loadRequestArchive(el),
+  closeLogin: () => closeLogin(),
+  switchLoginRealm: (el) => switchLoginRealm(el.value),
+  restartLogin: () => restartLogin(),
+  closeDesktopScan: () => closeDesktopScan(),
+  refreshDesktopScan: (el) => refreshDesktopScan(el),
+  closeImport: () => closeImport(),
+  commitImport: (el) => commitImport(el),
+  handleLogTerminalScroll: () => handleLogTerminalScroll(),
+  toggleAccount: (el, ev, arg) => toggleAccount(el.dataset.uid, arg === '1', el),
+  testAccount: (el) => testAccount(el.dataset.uid, el),
+  refreshOne: (el) => refreshOne(el.dataset.uid, el),
+  syncProfile: (el) => syncProfile(el.dataset.uid, el),
+  activateGlobal: (el) => activateGlobal(el.dataset.uid, el),
+  claimTrial: (el) => claimTrial(el.dataset.uid, el),
+  setAccountProduct: (el, ev, arg) => setAccountProduct(el.dataset.uid, arg, el),
+  exportOne: (el) => exportOne(el.dataset.uid),
+  deleteAccount: (el) => deleteAccount(el.dataset.uid, el.dataset.name, el),
+  gotoRecentPage: (el, ev, arg) => gotoRecentPage(Number(arg)),
+  generateKeyForEdit: (el, ev, arg) => generateKeyForEdit(Number(arg)),
+  cancelEditKey: (el, ev, arg) => cancelEditKey(Number(arg)),
+  saveSingleKey: (el, ev, arg) => saveSingleKey(Number(arg), el),
+  copyKeyRow: (el, ev, arg) => copyKeyRow(Number(arg)),
+  openEditKey: (el, ev, arg) => openEditKey(Number(arg)),
+  toggleKeyRow: (el, ev, arg) => toggleKeyRow(Number(arg)),
+  removeKeyRow: (el, ev, arg) => removeKeyRow(Number(arg)),
+  setAccountSlot: (el) => setAccountSlot(el.dataset.uid, el.value, el),
+  onProxySlotNameInput: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].name = el.value; markSlotsDirty(); },
+  onProxySlotUrlInput: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].url = el.value; markSlotsDirty(); },
+  onProxySlotEnabledChange: (el, ev, arg) => { PROXY_SLOTS[Number(arg)].enabled = el.checked; markSlotsDirty(); },
+  testProxySlot: (el, ev, arg) => testProxySlot(Number(arg), el),
+  removeProxySlot: (el, ev, arg) => removeProxySlot(Number(arg)),
+  importDiscovered: () => importDiscovered(),
+  toggleThemeMenu: (el, ev) => window.toggleThemeMenu(ev),
+  selectTheme: (el, ev, arg) => window.selectTheme(arg, ev),
+  saveDailyCreditLimit: (el) => saveDailyCreditLimit(el),
+  saveModelDailyTokenLimit: (el) => saveModelDailyTokenLimit(el),
+  savePricingMinutes: (el) => savePricingMinutes(el),
+  refreshPricingNow: (el) => refreshPricingNow(el),
+  savePricingVariant: (el) => savePricingVariant(el),
+  closeCreditsDetailBackdrop: (el, ev) => { if(ev.target === el) closeCreditsDetail(); },
+  closeCreditsDetail: () => closeCreditsDetail(),
+  filterCreditsPackages: (el, ev, arg) => filterCreditsPackages(arg, el),
+  onCreditsSearchInput: (el) => onCreditsSearchInput(el.value),
+  onCreditsSortChange: (el) => onCreditsSortChange(el.value),
+  reloadCreditsDetail: (el) => reloadCreditsDetail(el),
+  openCreditsDetail: (el) => openCreditsDetail(el.dataset.uid),
+  recoverAtrestKey: (el) => recoverAtrestKey(el),
+  fillPricingMapping: (el) => fillPricingMapping(el),
+  savePricingMapping: (el) => savePricingMapping(el),
+  setCostCurrency: (el, ev, arg) => setCostCurrency(arg),
+};
+
+function runDashboardAction(el, ev, type){
+  const name = el.dataset ? el.dataset.action : '';
+  const fn = ACTION_HANDLERS[name];
+  if(typeof fn !== 'function') return;
+  try{
+    fn(el, ev, el.dataset ? el.dataset.arg : undefined);
+  }catch(err){
+    console.error('dashboard action "' + name + '" failed:', err);
+  }
+}
+
+function dashboardActionTarget(ev){
+  const node = ev.target;
+  if(!node || typeof node.closest !== 'function') return null;
+  const el = node.closest('[data-action]');
+  if(!el) return null;
+  const type = (ev.type || '').toLowerCase();
+  return (el.dataset && el.dataset.on === type) ? el : null;
+}
+
+['click', 'change', 'input', 'keydown'].forEach(type => {
+  document.addEventListener(type, ev => {
+    const el = dashboardActionTarget(ev);
+    if(el && !el.disabled) runDashboardAction(el, ev, type);
+  });
+});
+// Scroll does not bubble from inner scrollers; capture reaches the target.
+document.addEventListener('scroll', ev => {
+  const el = dashboardActionTarget(ev);
+  if(el) runDashboardAction(el, ev, 'scroll');
+}, true);
 </script>
 </body>
 </html>

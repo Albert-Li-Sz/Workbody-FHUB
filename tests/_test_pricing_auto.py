@@ -646,6 +646,7 @@ class PricingEndpointTests(PricingTestCase):
 
         class Stub(object):
             _handle_settings_save = P.Handler._handle_settings_save
+            _validate_settings_save = P.Handler._validate_settings_save
             _route_pricing_mapping = P.Handler._route_pricing_mapping
 
             def __init__(self):

@@ -50,6 +50,9 @@ class TestHandler(P.Handler):
             time.sleep(P.HTTP_READ_TIMEOUT_SECONDS + 0.1)
         return self._json(200, {"ok": True})
 
+    def _handle_messages(self, payload):
+        return self._dispatch_chat_post("/v1/messages", payload)
+
 
 class TestServer(P.ThreadingHTTPServer):
     def handle_error(self, request, address):
@@ -79,11 +82,13 @@ class ConnectionTests(unittest.TestCase):
         self.addCleanup(sock.close)
         return sock
 
-    def headers(self, key="GOODKEY", length=2, extra=b"", path="/v1/chat/completions"):
+    def headers(self, key="GOODKEY", length=2, extra=b"", path="/v1/chat/completions",
+                auth_header="Authorization"):
         body_header = (b"Transfer-Encoding: chunked\r\n" if length is None
                        else b"Content-Length: %d\r\n" % length)
+        auth = (("Bearer " if auth_header == "Authorization" else "") + key).encode()
         return (b"POST " + path.encode() + b" HTTP/1.1\r\nHost: localhost\r\n"
-                b"Authorization: Bearer " + key.encode() + b"\r\n"
+                + auth_header.encode() + b": " + auth + b"\r\n"
                 + body_header + extra + b"\r\n")
 
     def response(self, sock):
@@ -92,14 +97,19 @@ class ConnectionTests(unittest.TestCase):
         payload = response.read()
         return response, json.loads(payload)
 
-    def assert_immediate_rejection(self, request, status):
+    def assert_immediate_rejection(self, request, status, anthropic=False):
         sock = self.connect()
         started = time.monotonic()
         sock.sendall(request)
         response, payload = self.response(sock)
         self.assertEqual(response.status, status)
         self.assertEqual(response.getheader("Connection"), "close")
-        self.assertEqual(payload["error"]["code"], status)
+        if anthropic:
+            self.assertEqual(payload["type"], "error")
+            self.assertEqual(payload["error"]["type"],
+                             "authentication_error" if status == 401 else "overloaded_error")
+        else:
+            self.assertEqual(payload["error"]["code"], status)
         self.assertLess(time.monotonic() - started, 0.8)
 
     def test_invalid_key_without_content_length_body(self):
@@ -233,6 +243,50 @@ class ConnectionTests(unittest.TestCase):
         response, payload = self.response(sock)
         self.assertEqual(response.status, 503)
         self.assertIn("no usable account", payload["error"]["message"])
+
+    def test_anthropic_invalid_key_rejects_unread_uploads(self):
+        for path in ("/v1/messages", "/messages", "/v1/messages/count_tokens"):
+            for length in (2, None):
+                with self.subTest(path=path, length=length):
+                    self.assert_immediate_rejection(
+                        self.headers(key="BADKEY", path=path, length=length,
+                                     auth_header="x-api-key"), 401, anthropic=True)
+
+    def test_anthropic_expect_continue_rejects_without_waiting(self):
+        self.assert_immediate_rejection(
+            self.headers(key="BADKEY", path="/v1/messages", auth_header="x-api-key",
+                         extra=b"Expect: 100-continue\r\n"), 401, anthropic=True)
+
+    def test_anthropic_receive_timeout_keeps_native_error_and_releases_slot(self):
+        for path in ("/v1/messages", "/v1/messages/count_tokens"):
+            with self.subTest(path=path):
+                sock = self.connect()
+                started = time.monotonic()
+                sock.sendall(self.headers(path=path, auth_header="x-api-key"))
+                response, payload = self.response(sock)
+                self.assertEqual(response.status, 408)
+                self.assertEqual(response.getheader("Connection"), "close")
+                self.assertEqual(payload["type"], "error")
+                self.assertEqual(payload["error"]["type"], "invalid_request_error")
+                self.assertLess(time.monotonic() - started, 2)
+                next_sock = self.connect()
+                next_sock.sendall(self.headers() + b"{}")
+                self.assertEqual(self.response(next_sock)[0].status, 200)
+
+    def test_anthropic_upload_shares_chat_capacity_before_body(self):
+        UPLOAD_STARTED.clear()
+        first = self.connect()
+        first.sendall(self.headers(path="/v1/messages", auth_header="x-api-key"))
+        self.assertTrue(UPLOAD_STARTED.wait(1))
+        self.assert_immediate_rejection(self.headers(), 503)
+        self.assert_immediate_rejection(
+            self.headers(path="/v1/messages", auth_header="x-api-key"),
+            503, anthropic=True)
+        first.sendall(b"{}")
+        self.assertEqual(self.response(first)[0].status, 200)
+        third = self.connect()
+        third.sendall(self.headers(path="/v1/messages", auth_header="x-api-key") + b"{}")
+        self.assertEqual(self.response(third)[0].status, 200)
 
     def test_overlong_request_line_returns_json_414(self):
         sock = self.connect()

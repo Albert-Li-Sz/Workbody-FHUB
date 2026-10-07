@@ -32,6 +32,7 @@ HTTP_READ_TIMEOUT_SECONDS = float(os.environ.get("WB_HTTP_READ_TIMEOUT", 30))
 if not 0 < HTTP_READ_TIMEOUT_SECONDS < float("inf"):
     raise ValueError("WB_HTTP_READ_TIMEOUT must be a positive, finite number")
 import io
+import secrets
 import socket
 import sys
 import threading
@@ -40,6 +41,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wb_accounts
+import wb_pool
 import wb_atrest
 import wb_catalog
 import wb_ipintel
@@ -47,6 +49,12 @@ import wb_pricing
 import wb_settings
 import wb_webtools
 import wb_identity
+import wb_prompt
+import wb_global
+import wb_taskqueue
+import wb_reqlog
+import wb_modelsdev
+import wb_probes
 IS_WINDOWS = os.name == "nt"
 def launcher_hint(port):
     """Platform-appropriate launcher command for starting on another port."""
@@ -245,20 +253,78 @@ def _empty_stats():
             "gen_ms_sum": 0, "gen_samples": 0,
             "wall_ms_sum": 0, "wall_samples": 0}
 _usage = _empty_stats()
+def _best_cached_tokens(usage):
+    """Best cache-hit value across every alias the upstreams emit (E3).
+
+    Order mirrors the panel: prompt_tokens_details.cached_tokens >
+    prompt_cache_hit_tokens > cache_read_input_tokens > cached_tokens >
+    input_tokens_details.cached_tokens > completion_tokens_details.
+    First positive value wins; zero aliases never shadow a real hit.
+    """
+    if not isinstance(usage, dict):
+        return 0
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    input_details = usage.get("input_tokens_details") or {}
+    details = usage.get("completion_tokens_details") or {}
+    for value in (prompt_details.get("cached_tokens"),
+                  usage.get("prompt_cache_hit_tokens"),
+                  usage.get("cache_read_input_tokens"),
+                  usage.get("cached_tokens"),
+                  input_details.get("cached_tokens"),
+                  details.get("cached_tokens")):
+        try:
+            number = float(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            # Token counts must stay integers: the Codex client parses
+            # response.completed strictly and rejects 123.0 (invalid number).
+            return int(number)
+    return 0
+
+
+def normalize_usage_cache_aliases(usage):
+    """Write the best cache-hit value into every alias (panel parity, E3).
+
+    Some responses carry the real hit in prompt_tokens_details.cached_tokens
+    while also emitting cache_read_input_tokens: 0 / cached_tokens: 0
+    compatibility aliases; strict downstream parsers may prefer the zero
+    aliases and lose the hit. Mutates and returns the usage dict.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    best = _best_cached_tokens(usage)
+    if best <= 0:
+        return usage
+    usage["cache_read_input_tokens"] = best
+    usage["cached_tokens"] = best
+    usage["prompt_cache_hit_tokens"] = best
+    prompt_details = dict(usage.get("prompt_tokens_details") or {})
+    prompt_details["cached_tokens"] = best
+    usage["prompt_tokens_details"] = prompt_details
+    if isinstance(usage.get("input_tokens_details"), dict):
+        input_details = dict(usage["input_tokens_details"])
+        input_details["cached_tokens"] = best
+        usage["input_tokens_details"] = input_details
+    return usage
+
+
 def _extract_usage(usage):
     """Normalize the upstream usage block into the fields we track."""
     if not usage:
         return {}
     details = usage.get("completion_tokens_details") or {}
-    prompt_details = usage.get("prompt_tokens_details") or {}
     return {
         "prompt_tokens": usage.get("prompt_tokens") or 0,
         "completion_tokens": usage.get("completion_tokens") or 0,
         "reasoning_tokens": details.get("reasoning_tokens") or 0,
-        "cached_tokens": usage.get("prompt_cache_hit_tokens") or details.get("cached_tokens") \
-            or prompt_details.get("cached_tokens") or 0,
+        "cached_tokens": _best_cached_tokens(usage),
         "total_tokens": usage.get("total_tokens") or 0,
         "credit": usage.get("credit") or 0,
+        # PANEL's hasCredit: a usage block without a credit field means the
+        # cost is unknown (tier 1), not measured-free (tier 0). Only a real
+        # observation may move (account, model) into the cost ledger.
+        "has_credit": "credit" in usage,
     }
 def row_realm(row):
     """The realm a log row belongs to.
@@ -434,6 +500,14 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         row["account"] = account
     acc = POOL.get(account) if (account and POOL) else None
     row["realm"] = acc.realm if acc else CURRENT_REALM
+    row.update(_request_context_fields())
+    if (account and POOL and not usage_missing and fields.get("total_tokens")
+            and fields.get("has_credit")):
+        try:
+            POOL.note_model_cost(account, model, fields.get("credit"))
+        except Exception:
+            pass
+
     # Always written, even when the caller presented no key. The empty value is
     # what separates "ran without a key" from rows written before the field
     # existed; the dashboard reports those as two different buckets, and a
@@ -487,6 +561,54 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     return row
 
 
+# Per-request context (thread-local: one Handler thread per connection).
+_REQ_CONTEXT = threading.local()
+_LOGGING_CFG_CACHE = {"at": 0.0, "cfg": None}
+
+
+def set_request_context(request_id="", client_ip="", user_agent="", path=""):
+    _REQ_CONTEXT.request_id = str(request_id or "")
+    _REQ_CONTEXT.client_ip = str(client_ip or "")
+    _REQ_CONTEXT.user_agent = str(user_agent or "")
+    _REQ_CONTEXT.path = str(path or "")
+
+
+def logging_config_cached():
+    """Read the logging settings at most once a minute (hot-path friendly)."""
+    now = time.time()
+    cfg = _LOGGING_CFG_CACHE.get("cfg")
+    if cfg is None or now - _LOGGING_CFG_CACHE.get("at", 0.0) > 60:
+        try:
+            cfg = wb_settings.logging_config(ACCOUNTS_DIR)
+        except Exception:
+            cfg = dict(wb_settings.LOGGING_DEFAULTS)
+        _LOGGING_CFG_CACHE["at"] = now
+        _LOGGING_CFG_CACHE["cfg"] = cfg
+    return cfg
+
+
+def _request_context_fields():
+    """request_id/path always; IP/UA only when the operator opted in."""
+    fields = {}
+    request_id = getattr(_REQ_CONTEXT, "request_id", "")
+    path = getattr(_REQ_CONTEXT, "path", "")
+    if request_id:
+        fields["request_id"] = request_id
+    if path:
+        fields["path"] = path
+    try:
+        if logging_config_cached().get("record_client_info"):
+            client_ip = getattr(_REQ_CONTEXT, "client_ip", "")
+            user_agent = getattr(_REQ_CONTEXT, "user_agent", "")
+            if client_ip:
+                fields["client_ip"] = client_ip
+            if user_agent:
+                fields["user_agent"] = user_agent[:300]
+    except Exception:
+        pass
+    return fields
+
+
 def _persist_usage(row, fail_label):
     """Append one usage row as a JSONL line.
 
@@ -498,14 +620,24 @@ def _persist_usage(row, fail_label):
     """
     try:
         os.makedirs(USAGE_DIR, exist_ok=True)
-        with open(USAGE_LOG, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # Share wb_reqlog's lock so an append can never race the read->replace
+        # window of a rotation (audit BUG-3).
+        with wb_reqlog.LOCK:
+            with open(USAGE_LOG, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception as exc:
         log("%s: %s" % (fail_label, exc))
+        return
+    try:
+        cfg = logging_config_cached()
+        wb_reqlog.rotate_if_needed(USAGE_LOG, cfg["archive_max_mb"],
+                                   cfg["retention_days"], log=log)
+    except Exception as exc:
+        log("request archive rotation failed: %s" % exc, level="WARN")
 
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
-                 outcome="failed", key=None):
+                 outcome="failed", hint=None, key=None):
     """Record one failed request as exactly one JSONL row.
 
     Passing the account uid records which account the request was bound to, so
@@ -536,6 +668,9 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         "message": str(message)[:200],
         "elapsed_ms": elapsed_ms,
     }
+    hint = gateway_hint(status, message) if hint is None else str(hint or "")
+    if hint:
+        row["gateway_hint"] = hint
     if stream is not None:
         row["stream"] = bool(stream)
     if ttft_ms is not None:
@@ -549,6 +684,7 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         row["account"] = account
         acc = POOL.get(account) if POOL else None
         row["realm"] = acc.realm if acc else CURRENT_REALM
+    row.update(_request_context_fields())
     row["key"] = key or ""
     with _lock:
         _usage["errors"] += 1
@@ -1148,6 +1284,75 @@ def _usage_snapshot_uncached(realm=None, since=None, until=None):
         "accounts_ready": (POOL.count_ready() if POOL else 0),
     }
     return snap
+def usage_timeseries(realm=None, range=None, since=None, until=None,
+                     bucket_seconds=None):
+    """Bucketed token/credit series for the analytics chart (M4 D5).
+
+    Bucket size auto-scales with the window: minute (<=6h), hour (<=14d),
+    day otherwise; an explicit bucket_seconds overrides it. Completed
+    requests contribute tokens; every non-client-aborted row contributes
+    credit (money already spent).
+    """
+    r = realm_scope(realm, CURRENT_REALM)
+    lo, hi = range_window(range, since, until)
+    if hi is None:
+        hi = time.time()
+    if lo is None:
+        lo = hi - 86400
+    span = max(1.0, hi - lo)
+    if bucket_seconds:
+        step = max(60, int(bucket_seconds))
+    elif span <= 6 * 3600:
+        step = 60
+    elif span <= 14 * 86400:
+        step = 3600
+    else:
+        step = 86400
+    buckets = {}
+    try:
+        with open(USAGE_LOG, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if r and not row_matches_realm(row, r):
+                    continue
+                at = row.get("at") or 0
+                if at < lo or at > hi:
+                    continue
+                key = int((at - lo) // step)
+                bucket = buckets.setdefault(key, {
+                    "at": lo + key * step, "requests": 0, "errors": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "reasoning_tokens": 0, "cached_tokens": 0,
+                    "total_tokens": 0, "credit": 0.0,
+                })
+                outcome = row_outcome(row)
+                if outcome == "completed":
+                    bucket["requests"] += 1
+                    for field in ("prompt_tokens", "completion_tokens",
+                                  "reasoning_tokens", "cached_tokens",
+                                  "total_tokens"):
+                        bucket[field] += (row.get(field) or 0)
+                else:
+                    bucket["errors"] += 1
+                if outcome != "client_aborted":
+                    bucket["credit"] += (row.get("credit") or 0)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log("usage timeseries read failed: %s" % exc)
+    return {
+        "ok": True, "realm": r or "all", "bucket_seconds": step,
+        "since": lo, "until": hi,
+        "series": [buckets[key] for key in sorted(buckets)],
+    }
+
+
 def _tail_lines(path, max_lines, chunk=256 * 1024):
     """Return up to the last `max_lines` non-empty lines, oldest first.
 
@@ -1354,6 +1559,7 @@ def recent_usage(limit=100, realm=None, page=1):
     }
 POOL = None
 SCHEDULER = None
+TASK_QUEUE = None
 PRICING = None
 ACCOUNTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
 def realm_state_file():
@@ -2033,12 +2239,14 @@ def runtime_settings_view():
     keys = []
     for entry in configured_keys():
         raw = entry.get("key") or ""
+        stored_models = entry.get("models")
         keys.append({
             "id": entry.get("id") or "",
             "name": entry.get("name") or "",
             "realm": entry.get("realm") or "",
             "models": list(entry.get("models") or []),
             "enabled": entry.get("enabled", True) is not False,
+            "models": list(stored_models) if isinstance(stored_models, list) else [],
             "masked": (raw[:4] + "*" * 6 + raw[-4:]) if len(raw) > 8 else "*" * len(raw),
             "source": entry.get("source") or "panel",
             "created_at": entry.get("created_at") or "",
@@ -2073,9 +2281,17 @@ def runtime_settings_view():
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
+        "pool": wb_settings.pool_config(ACCOUNTS_DIR),
+        "schedule": wb_settings.schedule_config(ACCOUNTS_DIR),
+        "redis": wb_settings.redis_config(ACCOUNTS_DIR),
+        "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
+        "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
+        "logging": wb_settings.logging_config(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
+        "max_concurrent_chat": MAX_CONCURRENT_CHAT,
+        "chat_slot_wait_seconds": CHAT_SLOT_WAIT_SECONDS,
         "version": "1.6.13",
     }
 def current_account():
@@ -2431,12 +2647,24 @@ def model_entry(mid, meta):
         "modality": "+".join(inputs) + "->text",
     }
     # ---- limits ----
-    if meta.get("maxInputTokens"):
-        item["context_length"] = meta["maxInputTokens"]
-        item["max_input_tokens"] = meta["maxInputTokens"]
-    if meta.get("maxOutputTokens"):
-        item["max_output_tokens"] = meta["maxOutputTokens"]
-        item["max_completion_tokens"] = meta["maxOutputTokens"]
+    # Four-level lookup (E1): remote > built-in knowledge table > local
+    # model.json cache > models.dev (asynchronously warmed; never blocks).
+    # context_length always has a value (1M when unknown - a high estimate is
+    # safer than a low one); max_output_tokens is omitted when unknown.
+    ctx_value, out_value, _limit_source = wb_modelsdev.lookup(
+        mid, meta.get("maxInputTokens"), meta.get("maxOutputTokens"),
+        directory=ACCOUNTS_DIR)
+    item["context_length"] = ctx_value
+    item["max_input_tokens"] = ctx_value
+    if out_value:
+        item["max_output_tokens"] = out_value
+        item["max_completion_tokens"] = out_value
+    # E2: annotate the measured upstream clamp (from output_probes.json)
+    # without overriding the model's spec value.
+    clamp = wb_probes.clamp_for(ACCOUNTS_DIR, mid)
+    if clamp:
+        item["output_clamp"] = clamp
+        item["max_output_tokens_clamped"] = clamp
     ctx = (meta.get("contextWindow") or {}).get("supportedLengths")
     if ctx:
         item["context_windows"] = ctx
@@ -2812,6 +3040,11 @@ def clean_chunk(raw):
     except Exception:
         return raw
     changed = False
+    if isinstance(obj.get("usage"), dict):
+        before = dict(obj["usage"])
+        normalize_usage_cache_aliases(obj["usage"])
+        if obj["usage"] != before:
+            changed = True
     for choice in obj.get("choices") or []:
         delta = choice.get("delta")
         if not isinstance(delta, dict):
@@ -3014,6 +3247,91 @@ def sanitize_messages(messages):
 # ---------------------------------------------------------------------------
 # Tool-call pairing repair
 # ---------------------------------------------------------------------------
+def _empty_content(value):
+    """True when an assistant message carries no content at all.
+
+    None / "" / [] all mean "no content": clients disagree on which empty
+    shape they emit, and a batch split into adjacent assistant messages must
+    merge for either shape (a missed [] was the original 11148 case).
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value == ""
+    if isinstance(value, list):
+        return len(value) == 0
+    return False
+
+
+def _merge_reasoning_content(dst, src):
+    """Fold src's reasoning_content into dst, newline-joined when both exist."""
+    rc = src.get("reasoning_content")
+    if not isinstance(rc, str) or not rc:
+        return
+    prev = dst.get("reasoning_content")
+    if isinstance(prev, str) and prev:
+        dst["reasoning_content"] = prev + "\n" + rc
+    else:
+        dst["reasoning_content"] = rc
+
+
+def merge_adjacent_tool_calls(messages):
+    """Merge back-to-back assistant tool_calls messages into one.
+
+    Some OpenAI-compatible agent clients replay a parallel batch as several
+    adjacent assistant messages, each carrying one tool_call. DeepSeek-family
+    upstreams answer 400 / code 11148 (tool_call_sequence_broken) for that
+    shape and retire the conversation, because every retry replays the same
+    history and switching accounts cannot help. Merging the declarations
+    restores the shape the upstream accepts.
+
+    Conditions are strict, so no semantics are invented:
+      - the messages must be adjacent;
+      - the trailing message must have empty content (None/""/[]);
+      - the leading message must already be an assistant with tool_calls.
+
+    A second form folds a plain assistant's string content into a preceding
+    tool_calls assistant that has no content of its own (the same split batch
+    replayed in the other order). reasoning_content is preserved either way,
+    because DeepSeek multi-turn thinking requires it back.
+    """
+    if not isinstance(messages, list) or len(messages) < 2:
+        return messages, False
+    out = []
+    changed = False
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        if m.get("role") == "assistant" and out:
+            prev = out[-1] if isinstance(out[-1], dict) else None
+            if prev is not None and prev.get("role") == "assistant":
+                tcs = m.get("tool_calls")
+                prev_calls = prev.get("tool_calls")
+                # Form 1: this message declares tool calls and has no content.
+                if (isinstance(tcs, list) and tcs
+                        and _empty_content(m.get("content"))
+                        and isinstance(prev_calls, list) and prev_calls):
+                    prev["tool_calls"] = prev_calls + tcs
+                    _merge_reasoning_content(prev, m)
+                    changed = True
+                    continue
+                # Form 2: plain string content folds into a preceding
+                # content-less tool_calls assistant.
+                if ("tool_calls" not in m
+                        and isinstance(m.get("content"), str) and m["content"]
+                        and isinstance(prev_calls, list) and prev_calls
+                        and _empty_content(prev.get("content"))):
+                    prev["content"] = m["content"]
+                    _merge_reasoning_content(prev, m)
+                    changed = True
+                    continue
+        out.append(m)
+    if not changed:
+        return messages, False
+    return out, True
+
+
 def repack_tool_result_blocks(messages):
     """Keep a tool_calls batch and its results adjacent.
 
@@ -3144,6 +3462,45 @@ def cleanup_orphan_tool_calls(messages):
     if not changed:
         return messages, False
     return out, True
+
+
+def is_truncated_arguments(raw):
+    """True when a non-empty tool-arguments string is not valid JSON.
+
+    A stream cut off by max_tokens or a dropped connection leaves the last
+    tool call with half-written JSON. An empty/whitespace string is a legal
+    no-argument tool, and any parseable JSON (including null/scalars/arrays)
+    is the model's own output for the client to validate - only non-empty
+    unparsable strings count as truncation.
+    """
+    if not isinstance(raw, str):
+        return False
+    trimmed = raw.strip()
+    if not trimmed:
+        return False
+    try:
+        json.loads(trimmed)
+        return False
+    except Exception:
+        return True
+
+
+def drop_truncated_tool_calls(calls):
+    """Return the tool calls whose arguments are not half-written JSON."""
+    if not isinstance(calls, list):
+        return calls
+    kept = []
+    for call in calls:
+        if not isinstance(call, dict):
+            kept.append(call)
+            continue
+        fn = call.get("function")
+        if isinstance(fn, dict) and is_truncated_arguments(fn.get("arguments")):
+            continue
+        kept.append(call)
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # DeepSeek Multi-turn Consistency: reasoning_content backfill
 # ---------------------------------------------------------------------------
@@ -3548,6 +3905,48 @@ def key_model_message(entry, model):
             % (name, asked, allowed))
 
 
+# Process-memory degradation window: content-blocked passthrough/append
+# traffic switches to the minimal neutral prompt until the next 00:00 CST
+# (panel degrade.go). Restarts clear it, which is fine - the next rejection
+# re-triggers it.
+PROMPT_DEGRADE = wb_prompt.DegradeGate()
+
+
+def prompt_mode_config():
+    """Prompt mode settings, fail-open to passthrough on any read error."""
+    try:
+        cfg = wb_settings.prompt_config(ACCOUNTS_DIR)
+    except Exception:
+        cfg = None
+    if not isinstance(cfg, dict):
+        cfg = {"mode": "passthrough", "file": ""}
+    return cfg
+
+
+def apply_prompt_mode(messages):
+    """Apply the configured prompt mode to one request's messages.
+
+    passthrough is the legacy behaviour (client system prompts ride through);
+    custom/append are opt-in. While the degrade window is active, passthrough
+    and append switch to the minimal neutral prompt; custom never degrades.
+    An unreadable prompt file fails open to passthrough rather than blocking.
+    """
+    cfg = prompt_mode_config()
+    mode = cfg.get("mode") or "passthrough"
+    degraded = PROMPT_DEGRADE.active()
+    if mode in ("custom", "append"):
+        try:
+            text = wb_prompt.load_prompt(mode, cfg.get("file"))
+        except Exception:
+            text = ""
+        if text:
+            return wb_prompt.apply_mode(messages, mode, text, degraded=degraded)
+        return messages
+    if degraded:
+        return wb_prompt.apply_mode(messages, mode, "", degraded=True)
+    return messages
+
+
 def build_upstream_body(payload):
     model = payload.get("model") or ""
     # Resolve the effective thinking state before the backfill below: while
@@ -3565,6 +3964,9 @@ def build_upstream_body(payload):
         elif thinking_type != "disabled" and str(effort or "").strip().lower() != "none":
             thinking_enabled = True
     messages = normalize_roles(payload.get("messages") or [])
+    # Prompt mode runs before sanitize/backfill so the gateway prompt is the
+    # one the upstream sees, with the client's fingerprint-y system text gone.
+    messages = apply_prompt_mode(messages)
     messages = sanitize_messages(messages)
     messages = backfill_reasoning_content(
         messages, model, thinking_enabled=thinking_enabled
@@ -3582,9 +3984,12 @@ def build_upstream_body(payload):
     body["model"] = model
     body["messages"] = messages
     # Repair tool-call pairing before the body leaves: a call whose result never
-    # came back, or results split from their batch by an interleaved message,
-    # makes the upstream reject every later turn of that conversation.
-    repaired, _repacked = repack_tool_result_blocks(body["messages"])
+    # came back, results split from their batch by an interleaved message, or a
+    # parallel batch split into adjacent assistant messages makes the upstream
+    # reject every later turn of that conversation. Order matters: merge the
+    # split declarations first, so repack sees one complete batch.
+    repaired, _merged = merge_adjacent_tool_calls(body["messages"])
+    repaired, _repacked = repack_tool_result_blocks(repaired)
     repaired, _cleaned = cleanup_orphan_tool_calls(repaired)
     body["messages"] = repaired
     translate_max_completion_tokens(body)
@@ -3759,6 +4164,54 @@ class RateLimited(Exception):
         super().__init__("upstream rate limit: %s" % (self.detail[:200] or "429"))
 
 
+def gateway_hint(status, message):
+    """Panel-parity error.gateway_hint: a gateway-side note beside the raw
+    upstream message (never a replacement). Empty = no hint, not invented.
+
+    Covers the shapes the hub can classify from the upstream body/status:
+    11133 model_param_invalid, 11135 invalid_image_data, rate limits,
+    content review, exhausted credits, dead sessions, missing models,
+    prompt-length rejections and the local no-healthy-account case.
+    """
+    text = str(message or "")
+    lower = text.lower()
+    if status == 503 and "concurrent chat limit" in lower:
+        return "gateway is busy at its concurrency limit; retry shortly"
+    if ("11133" in lower or "model_param_invalid" in lower
+            or "invalid request parameters" in lower):
+        return ("request parameters were rejected by the model provider; "
+                "check message format and model capabilities")
+    if ("11135" in lower or "invalid_image_data" in lower
+            or "replace the image" in lower):
+        return ("image data rejected by upstream; use a real/valid image, "
+                "may need a new conversation")
+    if "no usable account" in lower or "no healthy account" in lower:
+        return "no healthy account available in pool; check /status or retry later"
+    if ("context length" in lower or "context_length" in lower
+            or "prompt too long" in lower or "too many tokens" in lower
+            or "maximum context" in lower):
+        return ("request context exceeds the model's limit; reduce "
+                "history/message size")
+    if status == 429 or "rate limit" in lower or "frequency limit" in lower:
+        return "rate limited by upstream; retry after reset"
+    if status == 402 or ("insufficient" in lower and "credit" in lower):
+        return ("account credits exhausted at upstream; waiting for daily "
+                "check-in to restore")
+    if "session" in lower and ("not found" in lower or "expired" in lower):
+        return ("account session expired at upstream; the account is disabled "
+                "until re-login")
+    if "content" in lower and ("reject" in lower or "policy" in lower):
+        return ("request content was rejected by content policy; adjust the "
+                "prompt and retry")
+    if ("no such model" in lower or "model not found" in lower
+            or "unsupported model" in lower):
+        return ("upstream has no such model on this backend; switch model or "
+                "retry on another account")
+    if status == 403 and "waf" in lower:
+        return "upstream WAF blocked the gateway; retry after the block window"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # 出站身分自動切換
 #
@@ -3883,6 +4336,18 @@ def is_transient(exc):
     return any(m in t for m in markers)
 
 
+def rate_limit_is_account_level(detail, reset_at):
+    """True when a 429 is a soft account limit rather than a model park.
+
+    The upstream names a reset wall clock for the model-scoped form (code
+    6004, "usage exceeds frequency limit"). A 429 without one is a soft
+    limit on the credential, which the panel project cools with an
+    exponential backoff instead of parking just one model. The detail is
+    kept for call-site symmetry and stays available for logging.
+    """
+    return reset_at is None
+
+
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
 
@@ -3909,8 +4374,150 @@ def parse_rate_limit_reset(detail):
         return None
 
 
-def open_upstream(payload, session_key=None, target_realm=None):
-    # Refresh the daily guards before picking. The scan underneath is
+def upstream_timeouts():
+    """(header, idle) seconds for the chat upstream socket.
+
+    header covers connect/TLS/first byte; idle bounds each mid-stream
+    read, so active data keeps the connection alive while a silent
+    stream fails out and releases its in-flight lease. There is no
+    total-duration cap, matching the panel project's semantics.
+    """
+    try:
+        cfg = wb_settings.upstream_config(ACCOUNTS_DIR)
+    except Exception:
+        cfg = None
+    header = 120.0
+    idle = 300.0
+    if isinstance(cfg, dict):
+        try:
+            header = float(cfg.get("header_timeout_seconds") or header)
+        except (TypeError, ValueError):
+            pass
+        try:
+            idle = float(cfg.get("idle_timeout_seconds") or idle)
+        except (TypeError, ValueError):
+            pass
+    return max(1.0, header), max(1.0, idle)
+
+
+def _apply_stream_idle_timeout(response, seconds):
+    """Switch the upstream socket to the mid-stream idle timeout.
+
+    urllib's timeout covers the initial request; the same socket is then
+    read for the whole SSE stream. Setting the socket timeout to the idle
+    value bounds each read instead of the whole stream. Best-effort: an
+    unknown socket shape keeps the header timeout.
+    """
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return False
+    if seconds <= 0:
+        return False
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is None:
+        sock = getattr(fp, "_sock", None)
+    if sock is None:
+        return False
+    try:
+        sock.settimeout(seconds)
+        return True
+    except Exception:
+        return False
+
+
+class _LeasedResponse(object):
+    """Wrap an upstream response so its in-flight lease is released on close.
+
+    Callers use `with upstream:` for both the streaming and the buffered
+    paths, so delegating __enter__/__exit__ (plus close) covers every exit,
+    including a client disconnecting midway through a stream.
+    """
+
+    def __init__(self, response, account):
+        self._response = response
+        self._account = account
+        self._released = False
+
+    def __getattr__(self, name):
+        return getattr(self._response, name)
+
+    def __iter__(self):
+        return iter(self._response)
+
+    def __enter__(self):
+        enter = getattr(self._response, "__enter__", None)
+        if enter is not None:
+            enter()
+        return self
+
+    def __exit__(self, *exc_info):
+        try:
+            exit_fn = getattr(self._response, "__exit__", None)
+            if exit_fn is not None:
+                return exit_fn(*exc_info)
+            return False
+        finally:
+            self.release()
+
+    def close(self):
+        try:
+            close = getattr(self._response, "close", None)
+            if close is not None:
+                close()
+        finally:
+            self.release()
+
+    def read(self, *args, **kwargs):
+        return self._response.read(*args, **kwargs)
+
+    def readline(self, *args, **kwargs):
+        return self._response.readline(*args, **kwargs)
+
+    def release(self):
+        if not self._released:
+            self._released = True
+            try:
+                self._account.release()
+            except Exception:
+                pass
+
+
+def upstream_error_status(message):
+    """The one HTTP status for both the log row and the client reply.
+
+    A genuinely unusable pool is a 503 (retryable, operator action needed);
+    every other open_upstream failure is a 502. The two used to disagree -
+    the row said 502 while the client got 503 - so an audit of the real
+    deployment could not find the 503 in usage.jsonl (audit BUG-5).
+    """
+    return 503 if str(message or "").startswith("no usable account") else 502
+
+
+def no_usable_account_message(realm, accounts):
+    """Explain why no pool candidate was usable.
+
+    A full per-account in-flight cap is called out explicitly: it is the one
+    cause an operator cannot see in the account table, and the audit's
+    real-account 503 was exactly that (audit BUG-5).
+    """
+    busy = [a for a in accounts
+            if int(getattr(a, "max_in_flight", 0) or 0)
+            and getattr(a, "in_flight", 0) >= int(getattr(a, "max_in_flight", 0) or 0)]
+    if busy:
+        why = ("all are busy (in-flight cap reached) or otherwise unavailable: "
+               "disabled, cooling down, expired or parked by the daily token limit")
+    else:
+        why = ("all are disabled, cooling down, expired or parked by the "
+               "daily token limit")
+    return "no usable account for realm '%s': %s" % (realm, why)
+
+
+def open_upstream(payload, session_key=None, target_realm=None,
+                  session_meta=None, inbound_request_id="", trace_id=""):
+    # Refresh the daily token guard before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
     # like any other unusable one.
@@ -3928,6 +4535,12 @@ def open_upstream(payload, session_key=None, target_realm=None):
         if session_key and AFFINITY_DEBUG:
             log("affinity: derived %s for %d msgs"
                 % (session_key, len(upstream_body.get("messages") or [])))
+    # Session header family: computed once per user send, reused by every
+    # retry / account switch / product switch in this loop (panel issue #35).
+    if session_meta is None:
+        session_meta = session_meta_for(payload, session_key=session_key,
+                                        inbound_request_id=inbound_request_id,
+                                        trace_id=trace_id)
     total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
     tried = set()
     last_error = None
@@ -3936,9 +4549,13 @@ def open_upstream(payload, session_key=None, target_realm=None):
     last_429_detail = ""
     last_403_detail = ""
     transient_hits = 0
+    degraded_retried = False
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
     auto_switch = auto_switch_product_enabled()
+    # Panel parity: header/idle timeouts are read once per request, not
+    # once per retry, so a settings read never lands in the retry loop.
+    header_timeout, idle_timeout = upstream_timeouts()
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
     for _attempt in range(max_attempts):
         account = POOL.pick_for_session(realm=realm, session_key=session_key,
@@ -3964,16 +4581,23 @@ def open_upstream(payload, session_key=None, target_realm=None):
         else:
             attempt_body = upstream_body
         attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
-                                     headers=account.headers(purpose="chat"))
+        req = urllib.request.Request(
+            chat_url, data=attempt_data, method="POST",
+            headers=account.headers(purpose="chat", session_meta=session_meta))
         try:
-            resp = wb_accounts.urlopen(req, timeout=600, proxy=account.proxy)
-            account.clear_error(model=model)
+            if not account.acquire():
+                tried.add(account.uid)
+                continue
+            try:
+                resp = wb_accounts.urlopen(req, timeout=header_timeout,
+                                           proxy=account.proxy)
+            except Exception:
+                account.release()
+                raise
+            _apply_stream_idle_timeout(resp, idle_timeout)
+            account.note_success(model=model)
             reset_switch_counter(account, model)
-            # The third element is the reasoning effort this request ran at: the
-            # body is rebuilt per attempt, but the effort is a property of the
-            # model and the request, and the callers record it on the usage row.
-            return resp, account, upstream_effort_of(upstream_body, model)
+            return _LeasedResponse(resp, account), account, upstream_effort_of(upstream_body, model)
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
@@ -3981,6 +4605,16 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 except Exception:
                     detail = ""
                 reset_at = parse_rate_limit_reset(detail)
+                if rate_limit_is_account_level(detail, reset_at):
+                    wait = account.note_soft_rate("HTTP 429 (account soft rate)")
+                    log("account %s soft-rate limited, cooling %.0fs (streak %d)"
+                        % (account.uid[:8], wait, account.soft_streak))
+                    if session_key and POOL:
+                        POOL.affinity.unbind(session_key)
+                    last_error = exc
+                    last_429 = exc
+                    last_429_detail = detail
+                    continue
                 wait = max(1.0, reset_at - time.time()) if reset_at else 60.0
                 # Model-scoped: only this model is throttled for this account,
                 # so sibling models stay serviceable on the same credential.
@@ -4010,24 +4644,62 @@ def open_upstream(payload, session_key=None, target_realm=None):
                     detail = exc.read(400).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
+                # Panel degrade.go: a content rejection in passthrough/append
+                # mode is usually a system-prompt fingerprint false positive.
+                # Switch to the minimal neutral prompt until next 00:00 CST
+                # and retry this turn once; custom mode opted out.
+                if (not degraded_retried
+                        and prompt_mode_config().get("mode") in ("passthrough", "append")):
+                    PROMPT_DEGRADE.trigger()
+                    degraded_retried = True
+                    upstream_body = build_upstream_body(payload)
+                    tried.discard(account.uid)
+                    log("upstream 403 (content review) -> degraded prompt retry")
+                    continue
                 log("upstream 403 for '%s' (content review), passing through" % model)
                 if session_key and POOL:
                     POOL.affinity.unbind(session_key)
                 last_error = exc
                 last_403_detail = detail
                 break
-            if exc.code == 401:
-                log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
+            if exc.code == 402:
+                try:
+                    detail = exc.read(400).decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                account.note_balance_cooled(detail or "HTTP 402 (insufficient credits)")
+                log("account %s out of credits (402), cooling until next 04:00"
+                    % account.uid[:8])
                 if session_key and POOL:
                     POOL.affinity.unbind(session_key)
-                account.note_error("HTTP 401",
-                                   cooldown=60,
-                                   single_account=(total <= 1))
+                last_error = exc
+                continue
+            if exc.code == 401:
+                try:
+                    detail = exc.read(400).decode("utf-8", "replace")
+                except Exception:
+                    detail = ""
+                lowered = detail.lower()
+                if ("12153" in detail or "offline user session" in lowered
+                        or "session not found" in lowered):
+                    disabled = account.note_session_dead("session dead (12153)")
+                    log("account %s session dead (#%d)%s"
+                        % (account.uid[:8], account.session_dead_fails,
+                           " - disabled" if disabled else ", rotating"))
+                else:
+                    log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
+                    account.note_error("HTTP 401",
+                                       cooldown=60,
+                                       single_account=(total <= 1))
+                if session_key and POOL:
+                    POOL.affinity.unbind(session_key)
                 last_error = exc
                 continue
             if exc.code in (500, 502, 503, 504):
                 transient_hits += 1
-                log("upstream %s for '%s', retrying" % (exc.code, model))
+                account.note_failure("HTTP %d" % exc.code)
+                log("upstream %s for '%s', retrying (fails=%d)"
+                    % (exc.code, model, account.fails))
                 if session_key and POOL:
                     POOL.affinity.unbind(session_key)
                 last_error = exc
@@ -4038,11 +4710,13 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 POOL.affinity.unbind(session_key)
             if is_transient(exc):
                 transient_hits += 1
-                log("upstream connection hiccup for '%s' (%s), retrying"
-                    % (model, type(exc).__name__))
+                account.note_unknown_failure("connection: %s" % type(exc).__name__)
+                log("upstream connection hiccup for '%s' (%s), retrying (degrade=%d)"
+                    % (model, type(exc).__name__, account.degrade_count))
                 last_error = exc
                 time.sleep(min(0.6 * transient_hits, 2.0))
                 continue
+            account.note_unknown_failure(str(exc)[:120])
             account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
             last_error = exc
             continue
@@ -4088,8 +4762,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
                   % (model, wb_settings.model_daily_token_limit(ACCOUNTS_DIR)))
         raise RateLimited(None, reason,
                           wait=seconds_until_local_midnight(), message=reason)
-    raise RuntimeError(f"no usable account for realm '{realm}': all are disabled, "
-                       f"cooling down, expired or parked by the daily token limit")
+    raise RuntimeError(no_usable_account_message(realm, enabled))
 def extract_session_key(headers, payload):
     key = (
         headers.get("X-Conversation-Id") or
@@ -4103,6 +4776,113 @@ def extract_session_key(headers, payload):
     if key:
         return str(key).strip()
     return None
+
+
+def resolve_conversation_id(payload):
+    """The client's conversationId from the body only (panel parity).
+
+    Metadata wins over top-level, snake_case over camelCase; no user_id
+    fallback - X-Conversation-ID means a conversation, and inventing one
+    would pollute the upstream's aggregation. Missing -> "" (omit the
+    header rather than fabricate).
+    """
+    if not isinstance(payload, dict):
+        return ""
+    meta = payload.get("metadata")
+    if isinstance(meta, dict):
+        for key in ("conversation_id", "conversationId"):
+            value = meta.get(key)
+            if value:
+                return str(value).strip()
+    for key in ("conversation_id", "conversationId"):
+        value = payload.get(key)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _content_signature(content):
+    """Deterministic signature of a user message's content.
+
+    Strings sign as-is (legacy key values never drift). Multimodal arrays
+    concatenate text parts and add "[type:sha8]" for non-text parts, so two
+    turns that differ only by an image stay distinct without hashing a whole
+    base64 data URL into the key.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    has_non_text = False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type") or ""
+        if ptype in ("", "text"):
+            text = part.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            continue
+        has_non_text = True
+        raw = json.dumps(part, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        parts.append("\n[%s:%s]\n" % (ptype, hashlib.sha256(raw).hexdigest()[:8]))
+    out = "".join(parts)
+    return out.strip() if has_non_text else out
+
+
+def turn_key_from_messages(messages):
+    """Panel-parity turn key: index + signature of the LAST user message.
+
+    The last user message is constant across every upstream call of one user
+    send (tool rounds, retries, account switches) and changes when the user
+    sends the next message - exactly the aggregation unit the upstream
+    backend groups by. The index is part of the key so two turns that repeat
+    the same text ("continue") stay separate.
+    """
+    if not isinstance(messages, list):
+        return ""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        signature = _content_signature(message.get("content"))
+        if not signature:
+            return ""
+        return "u%d:%s" % (index, signature)
+    return ""
+
+
+def session_meta_for(payload, session_key=None, inbound_request_id="", trace_id=""):
+    """Build the per-turn session header family, once per user send.
+
+    conversationRequestID precedence (panel issue #35):
+      inbound passthrough > turn key (mixed with the session key when both
+      exist) > session key > fresh random id. The id is computed outside the
+      retry loop, so every attempt of one turn reuses it and the upstream
+      backend aggregates the turn as one record instead of one per HTTP call.
+    """
+    inbound = str(inbound_request_id or "").strip()
+    if inbound:
+        conversation_request_id = inbound
+    else:
+        messages = payload.get("messages") if isinstance(payload, dict) else None
+        turn_key = turn_key_from_messages(messages)
+        if turn_key and session_key:
+            conversation_request_id = wb_identity.stable_request_id(
+                str(session_key) + ":" + turn_key)
+        elif turn_key:
+            conversation_request_id = wb_identity.stable_request_id(turn_key)
+        elif session_key:
+            conversation_request_id = wb_identity.stable_request_id(str(session_key))
+        else:
+            conversation_request_id = wb_identity.new_message_id()
+    return {
+        "conversation_id": resolve_conversation_id(payload),
+        "conversation_request_id": conversation_request_id,
+        "trace_id": str(trace_id or "").strip(),
+    }
+
 
 def estimate_tokens(text):
     if not text:
@@ -4120,9 +4900,12 @@ def aggregate_stream(raw_iter, model, resp_id):
     usage = None
     started = time.time()
     first_chunk_at = None
+    saw_done = False
     for line in raw_iter:
         data = strip_data_prefix(line.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
+            if data == "[DONE]":
+                saw_done = True
             continue
         try:
             chunk = json.loads(data)
@@ -4204,6 +4987,15 @@ def aggregate_stream(raw_iter, model, resp_id):
             k: v for k, v in tool_calls_map.items()
             if (v.get("function") or {}).get("name")
         }
+    # A stream cut off by max_tokens / a dropped connection leaves the last
+    # tool call with half-written JSON. Drop those calls instead of handing
+    # the client unparsable arguments; only non-empty unparsable strings
+    # count as truncated, so no-argument tools survive.
+    if tool_calls_map and (finish == "length" or not saw_done):
+        tool_calls_map = {
+            k: v for k, v in tool_calls_map.items()
+            if not is_truncated_arguments((v.get("function") or {}).get("arguments"))
+        }
     if tool_calls_map:
         ordered_tcs = [tool_calls_map[k] for k in sorted(tool_calls_map.keys())]
         message["tool_calls"] = ordered_tcs
@@ -4212,6 +5004,8 @@ def aggregate_stream(raw_iter, model, resp_id):
     elif finish == "tool_calls":
         # 占位被全部过滤掉，无实际工具调用，降级为正常结束，防止客户端无限挂起等待
         finish = "stop"
+    if usage:
+        normalize_usage_cache_aliases(usage)
     if usage is None or (usage.get("total_tokens") or 0) == 0:
         full_c = "".join(content)
         full_r = "".join(reasoning)
@@ -4734,7 +5528,8 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
     body["messages"] = convo
     body["stream"] = True
     return open_upstream(body, session_key=session_key,
-                         target_realm=holder.get("realm"))
+                         target_realm=holder.get("realm"),
+                         session_meta=holder.get("session_meta"))
 
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
@@ -5004,6 +5799,658 @@ def responses_to_chat(payload):
         chat["parallel_tool_calls"] = payload["parallel_tool_calls"]
     return chat
 
+
+# ---------------------------------------------------------------------------
+# Anthropic Messages API (/v1/messages) <-> Chat Completions
+# ---------------------------------------------------------------------------
+def anthropic_error_type(status):
+    """Map an HTTP status to the Anthropic error.type vocabulary."""
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        status = 500
+    if status in (400, 422):
+        return "invalid_request_error"
+    if status == 401:
+        return "authentication_error"
+    if status == 403:
+        return "permission_error"
+    if status == 404:
+        return "not_found_error"
+    if status == 429:
+        return "rate_limit_error"
+    if status in (503, 529):
+        return "overloaded_error"
+    return "api_error"
+
+
+def anthropic_error_obj(status, message, error_type=None):
+    return {
+        "type": "error",
+        "error": {
+            "type": error_type or anthropic_error_type(status),
+            "message": str(message or "upstream error"),
+        },
+    }
+
+
+def anthropic_sse_frame(event, payload):
+    body = dict(payload or {})
+    body["type"] = event
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    return ("event: %s\ndata: %s\n\n" % (event, raw)).encode("utf-8")
+
+
+def _anthropic_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return ""
+
+
+def _anthropic_json_text(value):
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return "{}"
+
+
+def _anthropic_parse_tool_input(value):
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        if not value:
+            return {}
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {"raw": value}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"value": parsed}
+    return {"value": value}
+
+
+def _anthropic_content_to_text(value, is_error=None):
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, list):
+        parts = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            typ = str(item.get("type") or "")
+            if typ == "image":
+                part = _anthropic_image_part(item)
+                parts.append(_anthropic_text((part.get("image_url") or {}).get("url")))
+            elif typ == "document":
+                parts.append(_anthropic_document_text(item))
+            else:
+                parts.append(_anthropic_block_text(item))
+        text = "".join(parts)
+    elif isinstance(value, dict):
+        text = _anthropic_block_text(value)
+    else:
+        text = _anthropic_text(value)
+    if is_error is True:
+        return "error: " + text
+    return text
+
+
+def _anthropic_block_text(block):
+    if not isinstance(block, dict):
+        return ""
+    if "text" in block:
+        return _anthropic_text(block.get("text"))
+    if "content" in block:
+        return _anthropic_content_to_text(block.get("content"))
+    return ""
+
+
+def _anthropic_image_part(block):
+    source = block.get("source") if isinstance(block, dict) else None
+    url = ""
+    if isinstance(source, dict):
+        stype = str(source.get("type") or "")
+        if stype == "base64":
+            media = _anthropic_text(source.get("media_type") or "image/png")
+            data = _anthropic_text(source.get("data"))
+            url = "data:%s;base64,%s" % (media, data)
+        elif stype == "url":
+            url = _anthropic_text(source.get("url"))
+        elif stype == "file":
+            url = _anthropic_text(source.get("file_id") or source.get("url"))
+    return {"type": "image_url", "image_url": {"url": url}}
+
+
+def _anthropic_document_text(block):
+    if not isinstance(block, dict):
+        return ""
+    title = _anthropic_text(block.get("title"))
+    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+    stype = str(source.get("type") or "")
+    body = ""
+    if stype == "text":
+        body = _anthropic_text(source.get("data"))
+    elif stype == "content":
+        body = _anthropic_content_to_text(source.get("content"))
+    elif stype == "base64":
+        media = _anthropic_text(source.get("media_type") or "application/octet-stream")
+        body = "[document %s omitted]" % media
+    elif stype == "url":
+        body = _anthropic_text(source.get("url"))
+    elif stype == "file":
+        body = _anthropic_text(source.get("file_id") or source.get("url"))
+    if title:
+        return title + "\n" + body
+    return body
+
+
+def _anthropic_system_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            text = _anthropic_text(item.get("text"))
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
+def _anthropic_tool_choice(value):
+    if isinstance(value, str):
+        val = value.strip().lower()
+        return {"auto": "auto", "any": "required", "none": "none",
+                "required": "required"}.get(val, val)
+    if isinstance(value, dict):
+        typ = str(value.get("type") or "").strip().lower()
+        if typ == "auto":
+            return "auto"
+        if typ == "any":
+            return "required"
+        if typ == "none":
+            return "none"
+        if typ == "tool":
+            return {"type": "function",
+                    "function": {"name": _anthropic_text(value.get("name"))}}
+    return None
+
+
+def anthropic_tools_to_chat(tools):
+    out = []
+    skipped = []
+    if not isinstance(tools, list):
+        return out, skipped
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("function"), dict):
+            out.append(item)
+            continue
+        name = _anthropic_text(item.get("name") or item.get("type"))
+        schema = item.get("input_schema")
+        if schema is None:
+            schema = item.get("parameters")
+        if schema is None:
+            if name:
+                skipped.append(name)
+            continue
+        fn = {"name": name}
+        if item.get("description") is not None:
+            fn["description"] = item.get("description")
+        fn["parameters"] = schema
+        out.append({"type": "function", "function": fn})
+    return out, skipped
+
+
+def anthropic_effort_from_messages(payload):
+    if not isinstance(payload, dict):
+        return None
+    output_config = payload.get("output_config")
+    if isinstance(output_config, dict):
+        effort = _anthropic_text(output_config.get("effort")).strip()
+        if effort:
+            return effort
+    thinking = payload.get("thinking")
+    if not isinstance(thinking, dict):
+        return None
+    typ = _anthropic_text(thinking.get("type")).strip().lower()
+    if typ == "disabled":
+        return "none"
+    if typ != "enabled":
+        return None
+    try:
+        budget = int(thinking.get("budget_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    if budget <= 0:
+        return None
+    if budget >= 32000:
+        return "xhigh"
+    if budget >= 16000:
+        return "high"
+    if budget >= 8000:
+        return "medium"
+    return "low"
+
+
+def _anthropic_blocks_to_messages(role, blocks):
+    tool_calls = []
+    tool_messages = []
+    content_parts = []
+    texts = []
+    has_non_text = False
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        typ = str(block.get("type") or "")
+        if typ in ("thinking", "redacted_thinking"):
+            continue
+        if typ in ("tool_use", "server_tool_use"):
+            tool_calls.append({
+                "id": _anthropic_text(block.get("id")),
+                "type": "function",
+                "function": {
+                    "name": _anthropic_text(block.get("name")),
+                    "arguments": _anthropic_json_text(block.get("input")),
+                },
+            })
+            continue
+        if typ == "tool_result":
+            tool_messages.append({
+                "role": "tool",
+                "tool_call_id": _anthropic_text(block.get("tool_use_id")),
+                "content": _anthropic_content_to_text(block.get("content"),
+                                                      block.get("is_error")),
+            })
+            continue
+        if typ == "image":
+            part = _anthropic_image_part(block)
+            if not (part.get("image_url") or {}).get("url"):
+                continue
+            has_non_text = True
+            content_parts.append(part)
+            continue
+        if typ == "document":
+            has_non_text = True
+            content_parts.append({"type": "text", "text": _anthropic_document_text(block)})
+            continue
+        text = _anthropic_block_text(block)
+        texts.append(text)
+        content_parts.append({"type": "text", "text": text})
+    out = list(tool_messages)
+    if not tool_calls and not texts and not has_non_text:
+        return out
+    msg = {"role": role or "user"}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    if has_non_text:
+        msg["content"] = content_parts
+    elif texts:
+        msg["content"] = "".join(texts)
+    else:
+        msg["content"] = ""
+    out.append(msg)
+    return out
+
+
+def messages_to_chat(payload):
+    """Translate an Anthropic Messages request into Chat Completions."""
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+    model = _anthropic_text(payload.get("model")).strip()
+    if not model:
+        raise ValueError("model is required")
+    messages_in = payload.get("messages")
+    if not isinstance(messages_in, list):
+        raise ValueError("messages must be a list")
+    if not messages_in:
+        raise ValueError("messages must not be empty")
+    chat = {"model": model, "messages": []}
+    for key in ("temperature", "top_p"):
+        if payload.get(key) is not None:
+            chat[key] = payload[key]
+    if payload.get("max_tokens") is not None:
+        chat["max_tokens"] = payload["max_tokens"]
+    else:
+        default_max = model_default_max_output_tokens(model)
+        if default_max:
+            chat["max_tokens"] = default_max
+    if payload.get("stream") is not None:
+        chat["stream"] = bool(payload.get("stream"))
+    stops = payload.get("stop_sequences")
+    if isinstance(stops, list) and stops:
+        chat["stop"] = stops
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("user_id") is not None:
+        chat["user"] = metadata.get("user_id")
+    tools, skipped = anthropic_tools_to_chat(payload.get("tools"))
+    if tools:
+        chat["tools"] = tools
+    choice = _anthropic_tool_choice(payload.get("tool_choice"))
+    if choice is not None:
+        chat["tool_choice"] = choice
+    raw_choice = payload.get("tool_choice")
+    if isinstance(raw_choice, dict) and raw_choice.get("disable_parallel_tool_use") is True:
+        chat["parallel_tool_calls"] = False
+    effort = anthropic_effort_from_messages(payload)
+    if effort:
+        chat["reasoning_effort"] = effort
+    messages = []
+    system = _anthropic_system_text(payload.get("system"))
+    if skipped:
+        note = ("These Anthropic server tools are not available here: "
+                + ", ".join(skipped) + ". Do not call them.")
+        system = (system + "\n" + note) if system else note
+    if system:
+        messages.append({"role": "system", "content": system})
+    for item in messages_in:
+        if not isinstance(item, dict):
+            continue
+        role = _anthropic_text(item.get("role")).strip() or "user"
+        if role not in ("user", "assistant"):
+            raise ValueError(
+                "messages[].role must be user or assistant; "
+                "pass a system prompt in the top-level system field")
+        content = item.get("content")
+        if isinstance(content, str):
+            messages.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            messages.extend(_anthropic_blocks_to_messages(role, content))
+        elif content is not None:
+            text = _anthropic_text(content)
+            if text:
+                messages.append({"role": role, "content": text})
+    chat["messages"] = messages
+    return chat
+
+
+def _anthropic_usage(usage):
+    out = {
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+    }
+    if not isinstance(usage, dict):
+        return out
+    try:
+        out["input_tokens"] = int(usage.get("prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        out["output_tokens"] = int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        pass
+    cached = usage.get("prompt_cache_hit_tokens")
+    if cached is None:
+        cached = _best_cached_tokens(usage)
+    try:
+        out["cache_read_input_tokens"] = int(cached or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        out["cache_creation_input_tokens"] = int(usage.get("prompt_cache_write_tokens") or 0)
+    except (TypeError, ValueError):
+        pass
+    service_tier = usage.get("service_tier")
+    if service_tier:
+        out["service_tier"] = service_tier
+    return out
+
+
+def _anthropic_message_id(value):
+    value = _anthropic_text(value)
+    if not value:
+        return _new_id("msg_")
+    return value if value.startswith("msg_") else "msg_" + value
+
+
+def _anthropic_stop_reason(finish_reason):
+    value = str(finish_reason or "").strip().lower()
+    if value == "length":
+        return "max_tokens"
+    if value in ("tool_calls", "function_call"):
+        return "tool_use"
+    if value in ("content_filter", "refusal"):
+        return "refusal"
+    return "end_turn"
+
+
+def chat_to_messages(obj):
+    """Fold one Chat Completions object into an Anthropic Messages object."""
+    if not isinstance(obj, dict):
+        obj = {}
+    choices = obj.get("choices") if isinstance(obj.get("choices"), list) else []
+    message = {}
+    finish = ""
+    if choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+        finish = choices[0].get("finish_reason") or ""
+    content = []
+    text = message.get("content")
+    if isinstance(text, list):
+        text = "".join(_anthropic_block_text(part) for part in text if isinstance(part, dict))
+    text = _anthropic_text(text)
+    if text:
+        content.append({"type": "text", "text": text})
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+            content.append({
+                "type": "tool_use",
+                "id": _anthropic_text(call.get("id")) or _new_id("toolu_"),
+                "name": _anthropic_text(fn.get("name")),
+                "input": _anthropic_parse_tool_input(fn.get("arguments")),
+            })
+    return {
+        "id": _anthropic_message_id(obj.get("id")),
+        "type": "message",
+        "role": "assistant",
+        "model": _anthropic_text(obj.get("model")),
+        "content": content,
+        "stop_reason": _anthropic_stop_reason(finish),
+        "stop_sequence": None,
+        "usage": _anthropic_usage(obj.get("usage")),
+    }
+
+
+def _anthropic_estimate_chat_tokens(chat):
+    values = []
+    if isinstance(chat, dict):
+        for msg in chat.get("messages") or []:
+            if isinstance(msg, dict):
+                values.append(_anthropic_json_text(msg.get("content")))
+                for call in msg.get("tool_calls") or []:
+                    if isinstance(call, dict):
+                        values.append(_anthropic_json_text(call))
+        for tool in chat.get("tools") or []:
+            values.append(_anthropic_json_text(tool))
+    return sum(estimate_tokens(value) for value in values if value)
+
+
+def stream_messages_events(raw_iter, model, holder=None):
+    """Yield Anthropic Messages SSE frames from a chat-completions SSE stream."""
+    holder = holder if isinstance(holder, dict) else {}
+    state = {
+        "started": False,
+        "done": False,
+        "failed": False,
+        "id": "",
+        "model": model,
+        "stop": "end_turn",
+        "text_open": False,
+        "text_idx": None,
+        "next": 0,
+        "tools": {},
+        "tool_order": [],
+        "usage": None,
+    }
+
+    def usage_payload():
+        return _anthropic_usage(state.get("usage"))
+
+    def ensure_start(chunk=None):
+        if state["started"]:
+            return None
+        state["started"] = True
+        if isinstance(chunk, dict):
+            state["id"] = _anthropic_text(chunk.get("id"))
+            state["model"] = _anthropic_text(chunk.get("model")) or state["model"]
+        return anthropic_sse_frame("message_start", {
+            "message": {
+                "id": _anthropic_message_id(state["id"]),
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": state["model"],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            }
+        })
+
+    def ensure_text():
+        if state["text_open"]:
+            return None
+        state["text_idx"] = state["next"]
+        state["next"] += 1
+        state["text_open"] = True
+        return anthropic_sse_frame("content_block_start", {
+            "index": state["text_idx"],
+            "content_block": {"type": "text", "text": ""},
+        })
+
+    for line in raw_iter:
+        if state["done"] or state["failed"]:
+            break
+        data = strip_data_prefix(line.decode("utf-8", "replace"))
+        if not data:
+            continue
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except Exception:
+            continue
+        if isinstance(chunk.get("error"), dict):
+            state["failed"] = True
+            err = chunk["error"]
+            yield anthropic_sse_frame("error", {
+                "error": {
+                    "type": anthropic_error_type(502),
+                    "message": _anthropic_text(err.get("message") or "upstream error"),
+                }
+            })
+            return
+        start = ensure_start(chunk)
+        if start:
+            yield start
+        # Capture usage before the choices guard: the final upstream frame
+        # carries both the usage block and the finish_reason (and no delta),
+        # so skipping it here would zero out every streaming usage row.
+        if isinstance(chunk.get("usage"), dict):
+            state["usage"] = chunk["usage"]
+        choices = chunk.get("choices") if isinstance(chunk.get("choices"), list) else []
+        if not choices:
+            continue
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        text = delta.get("content")
+        if isinstance(text, str) and text:
+            frame = ensure_text()
+            if frame:
+                yield frame
+            yield anthropic_sse_frame("content_block_delta", {
+                "index": state["text_idx"],
+                "delta": {"type": "text_delta", "text": text},
+            })
+        for call in delta.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            try:
+                idx = int(call.get("index") or 0)
+            except (TypeError, ValueError):
+                idx = 0
+            entry = state["tools"].get(idx)
+            if entry is None:
+                entry = {"idx": idx, "block": None, "id": "", "name": "", "opened": False}
+                state["tools"][idx] = entry
+                state["tool_order"].append(idx)
+            if call.get("id"):
+                entry["id"] = _anthropic_text(call.get("id"))
+            fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+            if fn.get("name"):
+                entry["name"] = _anthropic_text(fn.get("name"))
+            args = fn.get("arguments") if fn.get("arguments") is not None else ""
+            if not entry["opened"] and (entry["id"] or entry["name"] or args):
+                if state["text_open"]:
+                    state["text_open"] = False
+                    yield anthropic_sse_frame("content_block_stop", {"index": state["text_idx"]})
+                entry["opened"] = True
+                entry["block"] = state["next"]
+                state["next"] += 1
+                if not entry["id"]:
+                    entry["id"] = "toolu_" + str(idx)
+                yield anthropic_sse_frame("content_block_start", {
+                    "index": entry["block"],
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": entry["id"],
+                        "name": entry["name"],
+                        "input": {},
+                    },
+                })
+            if entry["opened"] and args:
+                yield anthropic_sse_frame("content_block_delta", {
+                    "index": entry["block"],
+                    "delta": {"type": "input_json_delta", "partial_json": _anthropic_text(args)},
+                })
+        finish = choice.get("finish_reason")
+        if finish:
+            state["stop"] = _anthropic_stop_reason(finish)
+    if state["failed"]:
+        return
+    if not state["started"]:
+        start = ensure_start(None)
+        if start:
+            yield start
+    if state["text_open"]:
+        state["text_open"] = False
+        yield anthropic_sse_frame("content_block_stop", {"index": state["text_idx"]})
+    for idx in state["tool_order"]:
+        entry = state["tools"][idx]
+        if not entry["opened"]:
+            continue
+        yield anthropic_sse_frame("content_block_stop", {"index": entry["block"]})
+    state["done"] = True
+    # Hand the raw upstream usage block back to the caller: the stream
+    # response records it on the usage row, and without this every streamed
+    # Messages request was logged as usage_missing.
+    holder["usage"] = state.get("usage")
+    yield anthropic_sse_frame("message_delta", {
+        "delta": {"stop_reason": state["stop"], "stop_sequence": None},
+        "usage": usage_payload(),
+    })
+    yield anthropic_sse_frame("message_stop", {})
+
+
 def _responses_usage(u):
     if not u:
         return None
@@ -5012,8 +6459,7 @@ def _responses_usage(u):
     return {
         "input_tokens": u.get("prompt_tokens") or 0,
         "input_tokens_details": {
-            "cached_tokens": u.get("prompt_cache_hit_tokens")
-            or det.get("cached_tokens") or pdet.get("cached_tokens") or 0,
+            "cached_tokens": _best_cached_tokens(u),
         },
         "output_tokens": u.get("completion_tokens") or 0,
         "output_tokens_details": {"reasoning_tokens": det.get("reasoning_tokens") or 0},
@@ -5127,6 +6573,7 @@ def stream_responses_events(upstream, model, holder):
     tool_calls_map = {}
     text_buffer = ""
     dsml_tool_calls = []
+    saw_done = False
     custom_names = set(holder.get("custom_names") or ())
     ns_map = holder.get("namespace_map") or {}
     # 由反代代跑的網路工具呼叫，收集起來不轉發給客戶端
@@ -5388,7 +6835,8 @@ def stream_responses_events(upstream, model, holder):
                     "prompt_tokens_details": {"cached_tokens": 0},
                 }
                 holder["usage"] = usage
-        status = "completed" if finish != "length" else "incomplete"
+        status = ("completed" if (finish != "length" and not dropped_truncated)
+                  else "incomplete")
         final = resp_obj(status)
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
@@ -5403,6 +6851,8 @@ def stream_responses_events(upstream, model, holder):
     for raw in upstream:
         data = strip_data_prefix(raw.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
+            if data == "[DONE]":
+                saw_done = True
             continue
         try:
             chunk = json.loads(data)
@@ -5588,6 +7038,18 @@ def stream_responses_events(upstream, model, holder):
                             break
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
+    # Truncated streams (max_tokens, dropped connection) can leave tool-call
+    # arguments as half-written JSON. Do not close those calls out as
+    # completed: drop them before finalize so the client never receives a
+    # function_call_arguments.done / output_item.done with unparsable
+    # arguments. Complete calls in the same batch are kept.
+    dropped_truncated = 0
+    if tool_calls_map and (finish == "length" or not saw_done):
+        for idx in sorted(tool_calls_map.keys()):
+            entry = tool_calls_map[idx]
+            if is_truncated_arguments(entry.get("arguments")):
+                tool_calls_map.pop(idx, None)
+                dropped_truncated += 1
     yield from _finalize()
 
 # ---------------------------------------------------------------------------
@@ -5721,6 +7183,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         if self.close_connection:
             self.send_header("Connection", "close")
@@ -5781,7 +7244,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _error(self, code, message, err_type="server_error"):
         self._close_unread_body()
-        self._json(code, {"error": {"message": message, "type": err_type, "code": code}})
+        error = {"message": message, "type": err_type, "code": code}
+        hint = gateway_hint(code, message)
+        if hint:
+            error["gateway_hint"] = hint
+        self._json(code, {"error": error})
+    def _anthropic_error(self, code, message, err_type=None):
+        """Reply with the Anthropic JSON error envelope, not OpenAI's."""
+        self._close_unread_body()
+        return self._json(code, anthropic_error_obj(code, message, err_type))
     def _rate_limited(self, exc):
         """429 with Retry-After, so clients back off instead of hammering.
 
@@ -5801,14 +7272,16 @@ class Handler(BaseHTTPRequestHandler):
         if exc.detail and not custom:
             detail = " - " + exc.detail[:200]
         self._close_unread_body()
-        body = json.dumps({
-            "error": {
-                "message": text + detail,
-                "type": "rate_limit_error",
-                "code": 429,
-                "retry_after": wait,
-            }
-        }, ensure_ascii=False).encode("utf-8")
+        error = {
+            "message": text + detail,
+            "type": "rate_limit_error",
+            "code": 429,
+            "retry_after": wait,
+        }
+        hint = gateway_hint(429, text + detail)
+        if hint:
+            error["gateway_hint"] = hint
+        body = json.dumps({"error": error}, ensure_ascii=False).encode("utf-8")
         self.send_response(429)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -5819,6 +7292,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
+    def _anthropic_rate_limited(self, exc):
+        """429 with Retry-After in the Anthropic error envelope."""
+        wait = max(1, int(getattr(exc, "wait", 60) or 60))
+        text = (getattr(exc, "message", "") or
+                "upstream rate limit reached for this model; retry in %ds" % wait)
+        if getattr(exc, "detail", "") and not getattr(exc, "message", ""):
+            text += " - " + str(exc.detail)[:200]
+        self._close_unread_body()
+        body = json.dumps(anthropic_error_obj(429, text, "rate_limit_error"),
+                          ensure_ascii=False).encode("utf-8")
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Retry-After", str(wait))
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        if cors_origin_allowed(self.path):
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _download(self, filename, obj):
         """Send a JSON document as a browser download.
         Content-Disposition is quoted because the filename is generated from
@@ -5992,6 +7486,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/tasks") or path.startswith("/scheduler"):
             return True
+        if path.startswith("/requests"):
+            return True
         if path.startswith("/settings"):
             return True
         if path.startswith("/logs"):
@@ -6041,6 +7537,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_usage_by_account()
         if path == "/usage/perf":
             return self._get_usage_perf(query)
+        if path == "/usage/timeseries":
+            return self._get_usage_timeseries(query)
         if path == "/tasks":
             return self._get_tasks(query)
         if path == "/scheduler":
@@ -6114,6 +7612,12 @@ class Handler(BaseHTTPRequestHandler):
             entries = fetch_models(realm=req_realm)
         except Exception as exc:
             return self._error(502, str(exc))
+        # Level 4 is best effort: warm the local cache in the background at
+        # most once per cooldown; offline deployments just keep the fallback.
+        try:
+            wb_modelsdev.refresh_async(ACCOUNTS_DIR, log=log)
+        except Exception:
+            pass
         data = [model_entry(mid, meta) for mid, meta in entries]
         return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM})
 
@@ -6264,6 +7768,21 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, perf_stats(sample, realm=req_realm, range=req_range,
                                           since=req_since, until=req_until))
 
+    def _get_usage_timeseries(self, query):
+        if not self._authorized():
+            return
+        req_realm = (query.get('realm', [None])[0]
+                     or self.headers.get('X-Realm') or CURRENT_REALM)
+        req_range, req_since, req_until = range_query(query)
+        bucket = (query.get("bucket") or [None])[0]
+        try:
+            bucket_seconds = int(bucket) if bucket else None
+        except (TypeError, ValueError):
+            bucket_seconds = None
+        return self._json(200, usage_timeseries(
+            realm=req_realm, range=req_range, since=req_since,
+            until=req_until, bucket_seconds=bucket_seconds))
+
     def _get_tasks(self, query):
         if not self._authorized():
             return
@@ -6359,16 +7878,58 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"id": wanted, "key": entry.get("key") or ""})
         return self._error(404, "no such key", "invalid_request_error")
 
+    def _send_security_headers(self, script_nonce=None, allow_inline_scripts=False):
+        """Hardening headers for the dashboard page (M4 D3).
+
+        Stage 2 (2026-10-05): the page has no inline event handlers and the
+        two inline <script> blocks are served with a per-response nonce, so
+        script-src no longer needs 'unsafe-inline'. Inline style attributes
+        stay allowed (style-src keeps 'unsafe-inline', matching the panel);
+        they cannot execute script. If the markup ever stops matching the
+        nonce injection exactly, _dashboard passes allow_inline_scripts=True
+        rather than serving a page whose scripts the browser would refuse.
+        """
+        script_src = "'self'"
+        if script_nonce:
+            script_src += " 'nonce-%s'" % script_nonce
+        elif allow_inline_scripts:
+            script_src += " 'unsafe-inline'"
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy",
+                         "geolocation=(), camera=(), microphone=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src %s; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+            "font-src 'self' data:; connect-src 'self'; object-src 'none'; "
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+            % script_src)
+
     def _dashboard(self):
         try:
             with open(DASHBOARD_HTML, "rb") as fh:
                 body = fh.read()
         except Exception as exc:
             return self._error(500, f"dashboard.html unavailable: {exc}")
+        # M4 D3 stage 2: stamp the two inline <script> blocks with a fresh
+        # nonce. The count check is deliberate - a markup change that adds or
+        # removes a plain <script> tag must not silently ship a page whose
+        # scripts the CSP would block.
+        nonce = secrets.token_urlsafe(16)
+        text = body.decode("utf-8", "replace")
+        inline_scripts = text.count("<script>")
+        if inline_scripts == 2:
+            body = text.replace(
+                "<script>", '<script nonce="%s">' % nonce).encode("utf-8")
+        else:
+            nonce = None
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._send_security_headers(nonce, allow_inline_scripts=inline_scripts != 2)
         self.end_headers()
         self.wfile.write(body)
     def _read_chunked_body(self, max_bytes=MAX_PAYLOAD_BYTES):
@@ -6461,33 +8022,58 @@ class Handler(BaseHTTPRequestHandler):
         try:
             return self._read_payload(allow_list=allow_list)
         except socket.timeout:
-            self._error(408, "request body receive timeout", "invalid_request_error")
+            if self._anthropic_route():
+                self._anthropic_error(408, "request body receive timeout",
+                                      "invalid_request_error")
+            else:
+                self._error(408, "request body receive timeout", "invalid_request_error")
             return None
         except BodyTooLarge as exc:
-            self._error(413, "payload too large (%d bytes > %d limit)"
-                        % (exc.length, MAX_PAYLOAD_BYTES), "invalid_request_error")
+            message = ("payload too large (%d bytes > %d limit)"
+                       % (exc.length, MAX_PAYLOAD_BYTES))
+            if self._anthropic_route():
+                self._anthropic_error(413, message, "invalid_request_error")
+            else:
+                self._error(413, message, "invalid_request_error")
             return None
         except BadJSON:
-            self._error(400, "invalid JSON body", "invalid_request_error")
+            if self._anthropic_route():
+                self._anthropic_error(400, "invalid JSON body", "invalid_request_error")
+            else:
+                self._error(400, "invalid JSON body", "invalid_request_error")
             return None
-    def _handle_settings_save(self):
-        """Persist panel-managed settings from the web settings tab."""
-        payload = self._payload_or_error()
-        if payload is None:
-            return
-        reply = {}
+    def _anthropic_route(self):
+        """True when the request path is one of the Anthropic Messages routes.
+
+        Errors raised before the route dispatcher runs (body read, size cap)
+        have to answer in the Anthropic envelope, or a Claude Code client sees
+        an OpenAI-shaped error it cannot parse.
+        """
+        return self.path.split("?")[0] in (
+            "/v1/messages", "/messages",
+            "/v1/messages/count_tokens", "/messages/count_tokens",
+        )
+    def _validate_settings_save(self, payload):
+        """Validate the whole panel save before anything is written.
+
+        /settings/save used to persist each block as it went, so a later
+        block failing validation returned 400 while the earlier blocks had
+        already landed. This pass only builds a plan; the caller applies it
+        once the plan is complete (audit #12).
+        """
+        plan = {}
         if "api_keys" in payload:
             raw = payload.get("api_keys")
             if not isinstance(raw, list):
-                return self._error(400, "api_keys must be a list", "invalid_request_error")
+                return None, self._error(400, "api_keys must be a list", "invalid_request_error")
             # The panel only ever shows a masked key, so a blank value means
             # "keep what is stored" for that row rather than "clear it".
             existing = {entry.get("id"): entry for entry in configured_keys()}
             cleaned = []
             for item in raw:
                 if not isinstance(item, dict):
-                    return self._error(400, "each api key must be an object",
-                                       "invalid_request_error")
+                    return None, self._error(400, "each api key must be an object",
+                                             "invalid_request_error")
                 entry_id = str(item.get("id") or "").strip()
                 value = str(item.get("key") or "").strip()
                 if not value and entry_id and entry_id in existing:
@@ -6497,15 +8083,15 @@ class Handler(BaseHTTPRequestHandler):
                 # of rows deleted earlier, and two rows sharing an id made
                 # /settings/reveal answer with the wrong key.
                 if value and len(value) < 4:
-                    return self._error(400, "api key must be at least 4 characters",
-                                       "invalid_request_error")
+                    return None, self._error(400, "api key must be at least 4 characters",
+                                             "invalid_request_error")
                 if not value:
-                    return self._error(400, "a key entry is empty - fill it in or remove the row",
-                                       "invalid_request_error")
+                    return None, self._error(400, "a key entry is empty - fill it in or remove the row",
+                                             "invalid_request_error")
                 realm = str(item.get("realm") or "").strip().lower()
                 if realm not in ("", "intl", "cn"):
-                    return self._error(400, "realm must be intl, cn or empty",
-                                       "invalid_request_error")
+                    return None, self._error(400, "realm must be intl, cn or empty",
+                                             "invalid_request_error")
                 # An older cached panel does not know this field at all, so a
                 # row that omits it keeps whatever is stored instead of
                 # silently dropping the restriction.
@@ -6523,157 +8109,269 @@ class Handler(BaseHTTPRequestHandler):
                     "enabled": item.get("enabled", True) is not False,
                     "created_at": created_at,
                 })
-            wb_settings.set_api_keys(ACCOUNTS_DIR, cleaned)
-            reply["api_keys_saved"] = len(cleaned)
+            plan["api_keys"] = cleaned
         if "auth_disabled" in payload:
-            wb_settings.set_auth_disabled(ACCOUNTS_DIR, payload.get("auth_disabled"))
-            reply["auth_disabled"] = bool(payload.get("auth_disabled"))
+            plan["auth_disabled"] = payload.get("auth_disabled")
         if "reserve_credits" in payload:
             try:
                 reserve = int(payload.get("reserve_credits"))
             except (TypeError, ValueError):
-                return self._error(400, "reserve_credits must be a whole number",
-                                   "invalid_request_error")
+                return None, self._error(400, "reserve_credits must be a whole number",
+                                         "invalid_request_error")
             if reserve < 0:
-                return self._error(400, "reserve_credits cannot be negative",
-                                   "invalid_request_error")
-            wb_settings.set_reserve_credits(ACCOUNTS_DIR, reserve)
-            if POOL:
-                POOL.apply_reserve_credits(reserve)
-            reply["reserve_credits"] = reserve
+                return None, self._error(400, "reserve_credits cannot be negative",
+                                         "invalid_request_error")
+            plan["reserve_credits"] = reserve
         if "daily_token_limit" in payload:
             raw = payload.get("daily_token_limit")
             if isinstance(raw, bool) or raw is None:
-                return self._error(400, "daily_token_limit must be a whole number",
-                                   "invalid_request_error")
+                return None, self._error(400, "daily_token_limit must be a whole number",
+                                         "invalid_request_error")
             try:
                 limit = int(raw)
             except (TypeError, ValueError):
-                return self._error(400, "daily_token_limit must be a whole number",
-                                   "invalid_request_error")
+                return None, self._error(400, "daily_token_limit must be a whole number",
+                                         "invalid_request_error")
             if limit < 0:
-                return self._error(400, "daily_token_limit cannot be negative",
-                                   "invalid_request_error")
-            wb_settings.set_daily_token_limit(ACCOUNTS_DIR, limit)
-            apply_daily_token_limit(refresh=True)
-            reply["daily_token_limit"] = limit
+                return None, self._error(400, "daily_token_limit cannot be negative",
+                                         "invalid_request_error")
+            plan["daily_token_limit"] = limit
         if "daily_credit_limit" in payload:
             raw = payload.get("daily_credit_limit")
             if isinstance(raw, bool) or raw is None:
-                return self._error(400, "daily_credit_limit must be a whole number",
-                                   "invalid_request_error")
+                return None, self._error(400, "daily_credit_limit must be a whole number",
+                                         "invalid_request_error")
             try:
                 limit = int(raw)
             except (TypeError, ValueError):
-                return self._error(400, "daily_credit_limit must be a whole number",
-                                   "invalid_request_error")
+                return None, self._error(400, "daily_credit_limit must be a whole number",
+                                         "invalid_request_error")
             if limit < 0:
-                return self._error(400, "daily_credit_limit cannot be negative",
-                                   "invalid_request_error")
-            wb_settings.set_daily_credit_limit(ACCOUNTS_DIR, limit)
-            apply_daily_credit_limit(refresh=True)
-            reply["daily_credit_limit"] = limit
+                return None, self._error(400, "daily_credit_limit cannot be negative",
+                                         "invalid_request_error")
+            plan["daily_credit_limit"] = limit
         if "model_daily_token_limit" in payload:
             raw = payload.get("model_daily_token_limit")
             if isinstance(raw, bool) or raw is None:
-                return self._error(400, "model_daily_token_limit must be a whole number",
-                                   "invalid_request_error")
+                return None, self._error(400, "model_daily_token_limit must be a whole number",
+                                         "invalid_request_error")
             try:
                 limit = int(raw)
             except (TypeError, ValueError):
-                return self._error(400, "model_daily_token_limit must be a whole number",
-                                   "invalid_request_error")
+                return None, self._error(400, "model_daily_token_limit must be a whole number",
+                                         "invalid_request_error")
             if limit < 0:
-                return self._error(400, "model_daily_token_limit cannot be negative",
-                                   "invalid_request_error")
-            wb_settings.set_model_daily_token_limit(ACCOUNTS_DIR, limit)
-            apply_model_daily_token_limit(refresh=True)
-            reply["model_daily_token_limit"] = limit
+                return None, self._error(400, "model_daily_token_limit cannot be negative",
+                                         "invalid_request_error")
+            plan["model_daily_token_limit"] = limit
         if "pricing_refresh_minutes" in payload or "pricing_refresh_hours" in payload:
-            # The interval is in minutes. The old field name is still accepted
-            # (x60) so a panel page cached from the previous build cannot set
-            # the wrong unit; it is answered under the new name.
-            field = "pricing_refresh_minutes" \
-                if "pricing_refresh_minutes" in payload else "pricing_refresh_hours"
+            field = ("pricing_refresh_minutes"
+                     if "pricing_refresh_minutes" in payload else "pricing_refresh_hours")
             raw = payload.get(field)
             if isinstance(raw, bool) or raw is None:
-                return self._error(400, "%s must be a number" % field,
-                                   "invalid_request_error")
+                return None, self._error(400, "%s must be a number" % field,
+                                         "invalid_request_error")
             try:
                 minutes = float(raw)
             except (TypeError, ValueError):
-                return self._error(400, "%s must be a number" % field,
-                                   "invalid_request_error")
+                return None, self._error(400, "%s must be a number" % field,
+                                         "invalid_request_error")
             if field == "pricing_refresh_hours":
                 minutes *= 60.0
             if minutes < 0:
-                return self._error(400, "pricing_refresh_minutes cannot be negative",
-                                   "invalid_request_error")
-            stored = wb_settings.set_pricing_refresh_minutes(ACCOUNTS_DIR, minutes)
-            if PRICING:
-                # A running wait picks the new interval up on the spot.
-                PRICING.set_interval(stored)
-            reply["pricing_refresh_minutes"] = stored
+                return None, self._error(400, "pricing_refresh_minutes cannot be negative",
+                                         "invalid_request_error")
+            plan["pricing_refresh_minutes"] = minutes
         if "pricing_variant_inherit" in payload:
-            # Strictly a JSON boolean, like the other switches: "false" as a
-            # string would be truthy and silently keep the feature on.
             raw = payload.get("pricing_variant_inherit")
             if not isinstance(raw, bool):
-                return self._error(400, "pricing_variant_inherit must be true or false",
-                                   "invalid_request_error")
-            previous = wb_settings.pricing_variant_inherit(ACCOUNTS_DIR)
-            wb_settings.set_pricing_variant_inherit(ACCOUNTS_DIR, raw)
-            reply["pricing_variant_inherit"] = raw
-            if PRICING and previous != raw:
-                # The switch only takes effect on the next fetch - a refresh
-                # drops (off) or adds (on) the suffix-inherited assignments -
-                # so kick one off rather than waiting out the interval.
-                threading.Thread(target=PRICING.run_once, daemon=True,
-                                 name="price-refresh-inherit").start()
-                reply["pricing_refresh_started"] = True
+                return None, self._error(400, "pricing_variant_inherit must be true or false",
+                                         "invalid_request_error")
+            plan["pricing_variant_inherit"] = raw
         if "auto_switch_product" in payload:
             # Strictly a JSON boolean: a string like "false" would be truthy and
             # silently switch the feature on, which is the one thing an operator
             # turning it off must not get.
             raw = payload.get("auto_switch_product")
             if not isinstance(raw, bool):
-                return self._error(400, "auto_switch_product must be true or false",
-                                   "invalid_request_error")
-            wb_settings.set_auto_switch_product(ACCOUNTS_DIR, raw)
-            reply["auto_switch_product"] = raw
+                return None, self._error(400, "auto_switch_product must be true or false",
+                                         "invalid_request_error")
+            plan["auto_switch_product"] = raw
         if "daily_chat_web" in payload:
             raw = payload.get("daily_chat_web")
             if not isinstance(raw, bool):
-                return self._error(400, "daily_chat_web must be true or false",
-                                   "invalid_request_error")
-            wb_settings.set_daily_chat_web(ACCOUNTS_DIR, raw)
-            reply["daily_chat_web"] = raw
+                return None, self._error(400, "daily_chat_web must be true or false",
+                                         "invalid_request_error")
+            plan["daily_chat_web"] = raw
         if "local_web_tools" in payload:
             raw = payload.get("local_web_tools")
             if not isinstance(raw, bool):
-                return self._error(400, "local_web_tools must be true or false",
-                                   "invalid_request_error")
-            wb_settings.set_local_web_tools(ACCOUNTS_DIR, raw)
-            reply["local_web_tools"] = raw
+                return None, self._error(400, "local_web_tools must be true or false",
+                                         "invalid_request_error")
+            plan["local_web_tools"] = raw
+        if "pool" in payload:
+            raw = payload.get("pool")
+            if not isinstance(raw, dict):
+                return None, self._error(400, "pool must be an object", "invalid_request_error")
+            try:
+                plan["pool"] = wb_pool.validate_patch(raw)
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
+        if "schedule" in payload:
+            raw = payload.get("schedule")
+            if not isinstance(raw, dict):
+                return None, self._error(400, "schedule must be an object",
+                                         "invalid_request_error")
+            try:
+                plan["schedule"] = wb_settings.validate_schedule_patch(raw)
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
+        if "redis" in payload:
+            raw = payload.get("redis")
+            if not isinstance(raw, dict):
+                return None, self._error(400, "redis must be an object", "invalid_request_error")
+            try:
+                plan["redis"] = wb_settings.validate_redis_patch(raw)
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
+        if "upstream" in payload:
+            raw = payload.get("upstream")
+            if not isinstance(raw, dict):
+                return None, self._error(400, "upstream must be an object",
+                                         "invalid_request_error")
+            try:
+                plan["upstream"] = wb_settings.validate_upstream_patch(raw)
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
+        if "prompt" in payload:
+            raw = payload.get("prompt")
+            if not isinstance(raw, dict):
+                return None, self._error(400, "prompt must be an object",
+                                         "invalid_request_error")
+            try:
+                plan["prompt"] = wb_settings.validate_prompt_patch(raw)
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
+        if "logging" in payload:
+            raw = payload.get("logging")
+            if not isinstance(raw, dict):
+                return None, self._error(400, "logging must be an object",
+                                         "invalid_request_error")
+            try:
+                plan["logging"] = wb_settings.validate_logging_patch(raw)
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()
             if new_key and len(new_key) < 4:
-                return self._error(400, "api key must be at least 4 characters",
-                                   "invalid_request_error")
+                return None, self._error(400, "api key must be at least 4 characters",
+                                         "invalid_request_error")
+            plan["api_key"] = new_key
+        if payload.get("restart_scheduler"):
+            plan["restart_scheduler"] = True
+        return plan, None
+
+    def _handle_settings_save(self):
+        """Persist panel-managed settings from the web settings tab."""
+        payload = self._payload_or_error()
+        if payload is None:
+            return
+        plan, error = self._validate_settings_save(payload)
+        if error is not None:
+            return error
+        reply = {}
+        if "api_keys" in plan:
+            cleaned = plan["api_keys"]
+            wb_settings.set_api_keys(ACCOUNTS_DIR, cleaned)
+            reply["api_keys_saved"] = len(cleaned)
+        if "auth_disabled" in plan:
+            wb_settings.set_auth_disabled(ACCOUNTS_DIR, plan["auth_disabled"])
+            reply["auth_disabled"] = bool(plan["auth_disabled"])
+        if "reserve_credits" in plan:
+            reserve = plan["reserve_credits"]
+            wb_settings.set_reserve_credits(ACCOUNTS_DIR, reserve)
+            if POOL:
+                POOL.apply_reserve_credits(reserve)
+            reply["reserve_credits"] = reserve
+        if "daily_token_limit" in plan:
+            limit = plan["daily_token_limit"]
+            wb_settings.set_daily_token_limit(ACCOUNTS_DIR, limit)
+            apply_daily_token_limit(refresh=True)
+            reply["daily_token_limit"] = limit
+        if "daily_credit_limit" in plan:
+            limit = plan["daily_credit_limit"]
+            wb_settings.set_daily_credit_limit(ACCOUNTS_DIR, limit)
+            apply_daily_credit_limit(refresh=True)
+            reply["daily_credit_limit"] = limit
+        if "model_daily_token_limit" in plan:
+            limit = plan["model_daily_token_limit"]
+            wb_settings.set_model_daily_token_limit(ACCOUNTS_DIR, limit)
+            apply_model_daily_token_limit(refresh=True)
+            reply["model_daily_token_limit"] = limit
+        if "pricing_refresh_minutes" in plan:
+            minutes = plan["pricing_refresh_minutes"]
+            stored = wb_settings.set_pricing_refresh_minutes(ACCOUNTS_DIR, minutes)
+            if PRICING:
+                PRICING.set_interval(stored)
+            reply["pricing_refresh_minutes"] = stored
+        if "pricing_variant_inherit" in plan:
+            enabled = plan["pricing_variant_inherit"]
+            previous = wb_settings.pricing_variant_inherit(ACCOUNTS_DIR)
+            wb_settings.set_pricing_variant_inherit(ACCOUNTS_DIR, enabled)
+            reply["pricing_variant_inherit"] = enabled
+            if PRICING and previous != enabled:
+                threading.Thread(target=PRICING.run_once, daemon=True,
+                                 name="price-refresh-inherit").start()
+                reply["pricing_refresh_started"] = True
+        if "auto_switch_product" in plan:
+            wb_settings.set_auto_switch_product(ACCOUNTS_DIR, plan["auto_switch_product"])
+            reply["auto_switch_product"] = plan["auto_switch_product"]
+        if "daily_chat_web" in plan:
+            wb_settings.set_daily_chat_web(ACCOUNTS_DIR, plan["daily_chat_web"])
+            reply["daily_chat_web"] = plan["daily_chat_web"]
+        if "local_web_tools" in plan:
+            wb_settings.set_local_web_tools(ACCOUNTS_DIR, plan["local_web_tools"])
+            reply["local_web_tools"] = plan["local_web_tools"]
+        if "pool" in plan:
+            wb_settings.set_pool_config(ACCOUNTS_DIR, plan["pool"])
+            if POOL:
+                POOL.apply_pool_config()
+            reply["pool"] = wb_settings.pool_config(ACCOUNTS_DIR)
+        if "schedule" in plan:
+            wb_settings.set_schedule_config(ACCOUNTS_DIR, plan["schedule"])
+            if SCHEDULER:
+                SCHEDULER.apply_settings()
+            reply["schedule"] = wb_settings.schedule_config(ACCOUNTS_DIR)
+        if "redis" in plan:
+            wb_settings.set_redis_config(ACCOUNTS_DIR, plan["redis"])
+            if POOL:
+                POOL.apply_pool_config()
+            reply["redis"] = wb_settings.redis_config(ACCOUNTS_DIR)
+        if "upstream" in plan:
+            wb_settings.set_upstream_config(ACCOUNTS_DIR, plan["upstream"])
+            reply["upstream"] = wb_settings.upstream_config(ACCOUNTS_DIR)
+        if "prompt" in plan:
+            wb_settings.set_prompt_config(ACCOUNTS_DIR, plan["prompt"])
+            reply["prompt"] = wb_settings.prompt_config(ACCOUNTS_DIR)
+        if "logging" in plan:
+            wb_settings.set_logging_config(ACCOUNTS_DIR, plan["logging"])
+            _LOGGING_CFG_CACHE["cfg"] = None
+            reply["logging"] = wb_settings.logging_config(ACCOUNTS_DIR)
+        if "api_key" in plan:
+            new_key = plan["api_key"]
             global API_KEY, API_KEY_FILE_SET
             wb_settings.set_api_key(ACCOUNTS_DIR, new_key)
             API_KEY = new_key
             API_KEY_FILE_SET = True
             reply["api_key_set"] = bool(new_key)
-        if payload.get("restart_scheduler"):
+        if plan.get("restart_scheduler"):
             if SCHEDULER:
                 SCHEDULER.stop()
                 SCHEDULER.start()
             reply["scheduler"] = "restarted"
         reply.update(runtime_settings_view())
         return self._json(200, reply)
-
     def _handle_proxy_slots(self, path, payload):
         """Proxy-slot management (panel-authenticated)."""
         if path == "/proxy/slots":
@@ -6817,6 +8515,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_account_credits_detail(payload)
         if path == "/tasks/run":
             return self._route_tasks_run(payload)
+        if path == "/tasks/queue/scan":
+            return self._route_tasks_queue_scan(payload)
+        if path == "/tasks/queue/start":
+            return self._route_tasks_queue_start(payload)
+        if path == "/tasks/queue/status":
+            return self._route_tasks_queue_status(payload)
+        if path == "/requests":
+            return self._route_requests(payload)
+        if path == "/requests/metrics":
+            return self._route_requests_metrics(payload)
         if path == "/tasks/travel":
             return self._route_tasks_travel(payload)
         if path == "/scheduler/trigger":
@@ -6843,6 +8551,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_accounts_import_desktop(payload)
         if path == "/accounts/refresh":
             return self._route_accounts_refresh(payload)
+        if path == "/accounts/sync-profile":
+            return self._route_accounts_sync_profile(payload)
+        if path == "/accounts/global-register":
+            return self._route_accounts_global_register(payload)
+        if path == "/accounts/trial":
+            return self._route_accounts_trial(payload)
         if path == "/accounts/test":
             return self._route_accounts_test(payload)
         if path == "/accounts/set":
@@ -6856,6 +8570,83 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/accounts/import":
             return self._route_accounts_import(payload)
         return self._error(404, "unknown account endpoint", "invalid_request_error")
+    def _route_accounts_global_register(self, payload):
+        """Manual international-account activation (panel global_register.go).
+
+        Region completion is idempotent and never runs in the background:
+        the operator triggers it from the dashboard or scripts/trial.py.
+        """
+        uid = str(payload.get("uid") or "").strip()
+        account = POOL.get(uid) if uid else None
+        if account is None:
+            return self._error(404, "account not found", "invalid_request_error")
+        try:
+            activated, detail = wb_global.complete_registration(account)
+        except Exception as exc:
+            log("global register failed for %s: %s" % (account.uid[:8], exc),
+                level="WARN")
+            return self._json(200, {"ok": False, "uid": account.uid,
+                                    "error": str(exc)[:300]})
+        log("account %s: global registration %s" % (account.uid[:8], detail),
+            level="INFO")
+        return self._json(200, {"ok": True, "uid": account.uid,
+                                "activated": activated, "detail": detail,
+                                "accounts": account_views()})
+
+    def _route_accounts_trial(self, payload):
+        """Manual one-shot trial top-up (panel trial.go, international only)."""
+        uid = str(payload.get("uid") or "").strip()
+        account = POOL.get(uid) if uid else None
+        if account is None:
+            return self._error(404, "account not found", "invalid_request_error")
+        try:
+            claimed = wb_global.claim_trial(account)
+        except Exception as exc:
+            log("trial claim failed for %s: %s" % (account.uid[:8], exc),
+                level="WARN")
+            return self._json(200, {"ok": False, "uid": account.uid,
+                                    "error": str(exc)[:300]})
+        log("account %s: trial %s" % (account.uid[:8],
+                                      "claimed" if claimed else "already claimed"),
+            level="INFO")
+        return self._json(200, {"ok": True, "uid": account.uid,
+                                "claimed": claimed,
+                                "detail": "claimed" if claimed else "already claimed",
+                                "accounts": account_views()})
+
+    def _route_accounts_sync_profile(self, payload):
+        """Manual nickname refresh from the web console (panel issue #94).
+
+        Opt-in by nature: only runs when the operator asks for it. The
+        upstream response carries phone numbers and other personal fields;
+        wb_accounts.fetch_account_profile parses only uid/nickname.
+        """
+        uid = str(payload.get("uid") or "").strip()
+        realm = payload.get("realm")
+        if uid:
+            targets = [POOL.get(uid)]
+        elif realm and realm != "all":
+            targets = [a for a in POOL.accounts if a.realm == realm]
+        else:
+            targets = list(POOL.accounts)
+        updated = []
+        failed = []
+        for account in targets:
+            if account is None:
+                continue
+            try:
+                nickname = account.sync_nickname()
+            except Exception as exc:
+                failed.append({"uid": account.uid, "error": str(exc)[:200]})
+                log("profile sync failed for %s: %s" % (account.uid[:8], exc),
+                    level="WARN")
+                continue
+            updated.append({"uid": account.uid, "nickname": nickname})
+            log("account %s: nickname synced from the web console"
+                % account.uid[:8], level="INFO")
+        return self._json(200, {"updated": updated, "failed": failed,
+                                "accounts": account_views()})
+
     def _route_accounts_product(self, payload):
         """切換出站身分（cli <-> workbuddy），並即時回傳結果。
 
@@ -6921,6 +8712,96 @@ class Handler(BaseHTTPRequestHandler):
             results.append({"uid": account.uid, "ok": res.get("ok", False),
                             "credits": account.credits, "error": res.get("error", "")})
         return self._json(200, {"results": results, "accounts": account_views()})
+
+    @staticmethod
+    def _request_filters(payload):
+        """Shared filter parsing for the request-archive endpoints."""
+        def _number(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        error = payload.get("error")
+        if error is not None:
+            error = bool(error)
+        status = payload.get("status")
+        if status is not None:
+            try:
+                status = int(status)
+            except (TypeError, ValueError):
+                status = None
+        return {
+            "model": str(payload.get("model") or "").strip() or None,
+            "account": str(payload.get("account") or "").strip() or None,
+            "status": status,
+            "outcome": str(payload.get("outcome") or "").strip() or None,
+            "error": error,
+            "path": str(payload.get("path") or "").strip() or None,
+            "request_id": str(payload.get("request_id") or "").strip() or None,
+            "since": _number(payload.get("since")),
+            "until": _number(payload.get("until")),
+        }
+
+    def _route_requests(self, payload):
+        """Request archive query (newest first) with multi-dimensional filters."""
+        raw_limit = payload.get("limit", 200)
+        if isinstance(raw_limit, bool):
+            return self._error(400, "limit must be a whole number between 1 and 5000",
+                               "invalid_request_error")
+        try:
+            limit = 200 if raw_limit is None else int(raw_limit)
+        except (TypeError, ValueError):
+            return self._error(400, "limit must be a whole number between 1 and 5000",
+                               "invalid_request_error")
+        if not 1 <= limit <= 5000:
+            return self._error(400, "limit must be a whole number between 1 and 5000",
+                               "invalid_request_error")
+        rows = wb_reqlog.read_rows(USAGE_DIR)
+        filtered = wb_reqlog.filter_rows(rows, **self._request_filters(payload))
+        total = len(filtered)
+        return self._json(200, {"ok": True, "total": total,
+                                "rows": list(reversed(filtered))[:limit]})
+
+    def _route_requests_metrics(self, payload):
+        """Completion/HTTP success rates and latency percentiles over the window."""
+        rows = wb_reqlog.read_rows(USAGE_DIR)
+        filtered = wb_reqlog.filter_rows(rows, **self._request_filters(payload))
+        return self._json(200, {"ok": True,
+                                "metrics": wb_reqlog.compute_metrics(filtered)})
+
+    def _route_tasks_queue_scan(self, payload):
+        """Task center: read-only scan of every CN account's pending work."""
+        if TASK_QUEUE is None:
+            return self._json(200, {"ok": False, "msg": "任务中心未初始化"})
+        uid = payload.get("uid")
+        uids = None
+        if uid and uid != "all":
+            uids = [str(uid)]
+        result = TASK_QUEUE.scan(uids=uids)
+        log("task queue scan: %d pending item(s)" % result.get("pending_count", 0),
+            level="INFO")
+        return self._json(200, result)
+
+    def _route_tasks_queue_start(self, payload):
+        """Task center: queue the scanned work and run it in the background."""
+        if TASK_QUEUE is None:
+            return self._json(200, {"ok": False, "msg": "任务中心未初始化"})
+        uid = payload.get("uid")
+        uids = [str(uid)] if uid and uid != "all" else None
+        codes = payload.get("codes")
+        if isinstance(codes, list):
+            codes = [str(c) for c in codes]
+        else:
+            codes = None
+        result = TASK_QUEUE.start(uids=uids, codes=codes,
+                                  concurrency=payload.get("concurrency"))
+        return self._json(200, result)
+
+    def _route_tasks_queue_status(self, payload):
+        if TASK_QUEUE is None:
+            return self._json(200, {"ok": False, "msg": "任务中心未初始化"})
+        return self._json(200, TASK_QUEUE.status())
 
     def _route_account_credits_detail(self, payload):
         if not self._authorized():
@@ -7103,9 +8984,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(403, "changing the upstream exit requires the "
                                     "panel session, not an API key",
                                "invalid_request_error")
-        new_realm = payload.get("realm")
-        if new_realm in ("intl", "cn"):
-            save_persisted_realm(new_realm)
+        new_realm = str(payload.get("realm") or "").strip().lower()
+        if new_realm not in ("intl", "cn"):
+            return self._error(400, "realm must be intl or cn",
+                               "invalid_request_error")
+        save_persisted_realm(new_realm)
         return self._json(200, {"ok": True, "current": CURRENT_REALM, "persisted": True})
 
     def _route_accounts_checkin(self, payload):
@@ -7335,8 +9218,10 @@ class Handler(BaseHTTPRequestHandler):
         if not uid:
             return self._error(400, "uid required")
         removed = POOL.remove(uid)
+        if not removed:
+            return self._error(404, "no such account", "invalid_request_error")
         log("account %s deleted" % uid[:8])
-        return self._json(200, {"deleted": removed, "accounts": account_views()})
+        return self._json(200, {"deleted": True, "accounts": account_views()})
 
     def _route_accounts_import(self, payload):
         # Import a previously exported document (or any hand-written list
@@ -7433,8 +9318,14 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(chat_req.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
+            session_meta = session_meta_for(
+                chat_req, session_key=session_key,
+                inbound_request_id=(self.headers.get("X-Conversation-Request-ID")
+                                    or self.headers.get("X-Root-Request-ID") or ""),
+                trace_id=(self.headers.get("X-Trace-ID") or ""))
             upstream, account, effort = open_upstream(
-                chat_req, session_key=session_key, target_realm=req_realm)
+                chat_req, session_key=session_key, target_realm=req_realm,
+                session_meta=session_meta)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -7456,27 +9347,19 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
         except Exception as exc:
-            message = str(exc)
-            record_error(model, 502, message,
-                         elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=getattr(exc, "account_uid", None),
-                         key=self._key_id())
-            if message.startswith("no usable account"):
-                return self._error(503, message +
-                                   " - add or enable one at the dashboard (/)")
-            return self._error(502, f"upstream unreachable: {exc}")
+            return self._open_upstream_error(exc, model, t_start, key=self._key_id())
         with upstream:
             if want_stream:
                 return self._responses_stream_response(
                     upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                     base_body=chat_req, session_key=session_key, realm=req_realm,
-                    effort=effort)
+                    session_meta=session_meta, effort=effort)
             return self._responses_nonstream_response(
                 upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                 base_body=chat_req, session_key=session_key, realm=req_realm,
                 effort=effort)
 
-    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
+    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, session_meta=None, effort=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -7490,7 +9373,8 @@ class Handler(BaseHTTPRequestHandler):
                   "base_body": base_body,
                   "base_messages": (base_body or {}).get("messages"),
                   "session_key": session_key,
-                  "realm": realm}
+                  "realm": realm,
+                  "session_meta": session_meta}
         first_ms = None
         try:
             # 一輪跑完如果模型要的是 web_search / web_fetch，就由反代
@@ -7567,41 +9451,240 @@ class Handler(BaseHTTPRequestHandler):
         rounds = 0
         # 開關關閉時不攔同名呼叫：那是客戶端自己的工具。
         web_tools = web_tools_active(base_body)
-        while True:
-            try:
-                chat_obj = aggregate_stream(upstream, model, None)
-            except Exception as exc:
-                record_error(model, 502, str(exc),
-                             elapsed_ms=int((time.time() - t_start) * 1000),
-                             account=account.uid, key=self._key_id())
-                return self._error(502, f"upstream stream error: {exc}")
-            calls = internal_calls_from_chat(chat_obj, web_tools=web_tools)
-            if not calls:
-                break
-            rounds += 1
-            give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
+        try:
+            while True:
+                try:
+                    chat_obj = aggregate_stream(upstream, model, None)
+                except Exception as exc:
+                    record_error(model, 502, str(exc),
+                                 elapsed_ms=int((time.time() - t_start) * 1000),
+                                 account=account.uid, key=self._key_id())
+                    return self._error(502, f"upstream stream error: {exc}")
+                calls = internal_calls_from_chat(chat_obj, web_tools=web_tools)
+                if not calls:
+                    break
+                rounds += 1
+                give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+                holder = {"base_messages": (base_body or {}).get("messages"),
+                          "base_body": base_body, "realm": realm,
+                          "web_sources": sources}
+                try:
+                    upstream, account, _ = follow_up_with_tool_results(
+                        calls, holder, model, session_key, t_start, drop_tools=give_up)
+                except Exception as exc:
+                    record_error(model, 502, "web tool follow-up failed: %s" % exc,
+                                 elapsed_ms=int((time.time() - t_start) * 1000),
+                                 account=account.uid, key=self._key_id())
+                    return self._error(502, "web tool follow-up failed: %s" % exc)
+                sources = holder.get("web_sources") or sources
+            wall = int((time.time() - t_start) * 1000)
+            result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
+                                      sources=sources)
+            record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
+                         account=account.uid, key=self._key_id(), effort=effort)
+            return self._json(200, result)
+        finally:
+            # follow-up 會把 upstream 換成新的一條，外層的 with 只認得最開始
+            # 那一條；最後一條（或中途早退時的當前那條）必須在這裡收掉，
+            # 否則在途租約會永久卡住（非流式 Responses + 內建網路工具的 P1）。
+            # _LeasedResponse.release 有防重入，重複關閉是安全的。
             try:
                 upstream.close()
             except Exception:
                 pass
-            holder = {"base_messages": (base_body or {}).get("messages"),
-                      "base_body": base_body, "realm": realm,
-                      "web_sources": sources}
+
+    def _handle_messages_count_tokens(self, payload):
+        """Best-effort Anthropic count_tokens endpoint.
+
+        The WorkBuddy upstream has no Anthropic tokenizer. This estimate uses
+        the same CJK-aware estimator as the gateway's own accounting and keeps
+        the native response shape; it is intentionally not presented as an
+        official model-token count.
+        """
+        try:
+            chat = messages_to_chat(payload)
+        except ValueError as exc:
+            return self._anthropic_error(400, str(exc), "invalid_request_error")
+        return self._json(200, {"input_tokens": _anthropic_estimate_chat_tokens(chat)})
+
+    def _handle_messages(self, payload):
+        """Serve an Anthropic Messages request through the chat pipeline."""
+        try:
+            chat_req = messages_to_chat(payload)
+        except ValueError as exc:
+            return self._anthropic_error(400, str(exc), "invalid_request_error")
+        model = chat_req.get("model") or "unknown"
+        want_stream = bool(chat_req.get("stream"))
+        session_key = extract_session_key(self.headers, chat_req)
+        t_start = time.time()
+        fp = prompt_fingerprint(chat_req.get("messages"))
+        try:
+            client_ip = self.client_address[0] if self.client_address else ""
+        except Exception:
+            client_ip = ""
+        set_request_context(
+            request_id=(self.headers.get("X-Request-Id")
+                        or self.headers.get("X-Request-ID") or uuid.uuid4().hex),
+            client_ip=client_ip,
+            user_agent=self.headers.get("User-Agent") or "",
+            path=self.path.split("?")[0],
+        )
+        log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d"
+            % (model, want_stream, len(chat_req.get("messages") or []),
+               chat_req.get("reasoning_effort"), len(chat_req.get("tools") or [])))
+        try:
+            req_realm = self._request_realm() or CURRENT_REALM
+            blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
+            if blocked:
+                return self._anthropic_error(400, blocked, "invalid_request_error")
+            banned = self._banned_model_error(chat_req.get("model"))
+            if banned:
+                return self._anthropic_error(400, banned, "invalid_request_error")
+            key_blocked = self._key_model_error(chat_req.get("model"))
+            if key_blocked:
+                return self._anthropic_error(400, key_blocked, "invalid_request_error")
+            session_meta = session_meta_for(
+                chat_req, session_key=session_key,
+                inbound_request_id=(self.headers.get("X-Conversation-Request-ID")
+                                    or self.headers.get("X-Root-Request-ID") or ""),
+                trace_id=(self.headers.get("X-Trace-ID") or ""))
+            upstream, account, effort = open_upstream(
+                chat_req, session_key=session_key, target_realm=req_realm,
+                session_meta=session_meta)
+        except ContentRejected as exc:
+            record_error(model, 403, exc.detail[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=getattr(exc, "account_uid", None),
+                         key=self._key_id())
+            return self._anthropic_error(403, "upstream 403: %s" %
+                                          (exc.detail or "content rejected"),
+                                          "permission_error")
+        except RateLimited as exc:
+            record_error(model, 429, exc.detail[:200],
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=getattr(exc, "account_uid", None),
+                         key=self._key_id())
+            return self._anthropic_rate_limited(exc)
+        except urllib.error.HTTPError as exc:
             try:
-                upstream, account, _ = follow_up_with_tool_results(
-                    calls, holder, model, session_key, t_start, drop_tools=give_up)
-            except Exception as exc:
-                record_error(model, 502, "web tool follow-up failed: %s" % exc,
-                             elapsed_ms=int((time.time() - t_start) * 1000),
-                             account=account.uid, key=self._key_id())
-                return self._error(502, "web tool follow-up failed: %s" % exc)
-            sources = holder.get("web_sources") or sources
+                detail = exc.read(600).decode("utf-8", "replace")
+            except Exception:
+                detail = str(exc)
+            record_error(model, exc.code, detail,
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=getattr(exc, "account_uid", None),
+                         key=self._key_id())
+            return self._anthropic_error(exc.code,
+                                         "upstream %s: %s" % (exc.code, detail))
+        except Exception as exc:
+            message = str(exc)
+            status = upstream_error_status(message)
+            record_error(model, status, message,
+                         elapsed_ms=int((time.time() - t_start) * 1000),
+                         account=getattr(exc, "account_uid", None),
+                         key=self._key_id())
+            if status == 503:
+                message += " - add or enable one at the dashboard (/)"
+            return self._anthropic_error(status, message)
+        with upstream:
+            if want_stream:
+                return self._messages_stream_response(
+                    upstream, model, fp, account, t_start,
+                    base_body=chat_req, session_key=session_key,
+                    realm=req_realm, session_meta=session_meta, effort=effort)
+            return self._messages_nonstream_response(
+                upstream, model, fp, account, t_start,
+                base_body=chat_req, session_key=session_key,
+                realm=req_realm, effort=effort)
+
+    def _messages_nonstream_response(self, upstream, model, fp, account, t_start,
+                                     base_body=None, session_key=None, realm=None,
+                                     effort=None):
+        try:
+            chat_obj = aggregate_stream(upstream, model, None)
+            result = chat_to_messages(chat_obj)
+            wall = int((time.time() - t_start) * 1000)
+            record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
+                         fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+            return self._json(200, result)
+        except Exception as exc:
+            wall = int((time.time() - t_start) * 1000)
+            record_error(model, 502, "messages upstream error: %s" % exc,
+                         elapsed_ms=wall, account=account.uid, key=self._key_id())
+            return self._anthropic_error(502, "upstream stream error: %s" % exc)
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+
+    def _messages_stream_response(self, upstream, model, fp, account, t_start,
+                                  base_body=None, session_key=None, realm=None,
+                                  session_meta=None, effort=None):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        if cors_origin_allowed(self.path):
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        holder = {"usage": None}
+        first_ms = None
+        try:
+            for frame in stream_messages_events(upstream, model, holder):
+                if first_ms is None:
+                    first_ms = int((time.time() - t_start) * 1000)
+                self.wfile.write(frame)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            wall = int((time.time() - t_start) * 1000)
+            record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+                         ttft_ms=first_ms,
+                         gen_ms=(wall - first_ms) if first_ms is not None else None,
+                         fp=fp, account=account.uid,
+                         outcome="client_aborted", key=self._key_id(), effort=effort)
+            return
+        except Exception as exc:
+            wall = int((time.time() - t_start) * 1000)
+            record_error(model, 502, "messages stream aborted: %s" % exc,
+                         elapsed_ms=wall, account=account.uid,
+                         usage=holder.get("usage"), stream=True,
+                         ttft_ms=first_ms, fp=fp, outcome="upstream_aborted",
+                         key=self._key_id())
+            try:
+                self.wfile.write(anthropic_sse_frame("error", {
+                    "error": {"type": "api_error", "message": str(exc)}}))
+                self.wfile.flush()
+            except Exception:
+                pass
+            return
+        finally:
+            try:
+                upstream.close()
+            except Exception:
+                pass
         wall = int((time.time() - t_start) * 1000)
-        result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
-                                  sources=sources)
-        record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall, fp=fp,
-                     account=account.uid, key=self._key_id(), effort=effort)
-        return self._json(200, result)
+        record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+                     ttft_ms=first_ms,
+                     gen_ms=(wall - first_ms) if first_ms is not None else None,
+                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+        return
+
+    def _open_upstream_error(self, exc, model, t_start, key=None):
+        """Record and answer an open_upstream failure with one status."""
+        message = str(exc)
+        status = upstream_error_status(message)
+        record_error(model, status, message,
+                     elapsed_ms=int((time.time() - t_start) * 1000),
+                     account=getattr(exc, "account_uid", None), key=key)
+        if status == 503:
+            return self._error(503, message +
+                               " - add or enable one at the dashboard (/)")
+        return self._error(502, f"upstream unreachable: {exc}")
 
     def do_POST(self):
         path = self.path.split("?")[0]
@@ -7636,37 +9719,83 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_panel(path)
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
+        is_messages_route = path in (
+            "/v1/messages", "/messages",
+            "/v1/messages/count_tokens", "/messages/count_tokens",
+        )
         is_account_route = (
             path.startswith("/accounts/")
             or path == "/realm"
             or path.startswith("/tasks")
             or path.startswith("/scheduler")
             or path.startswith("/logs")
+            or path.startswith("/requests")
         )
-        if not is_account_route and path not in ("/v1/chat/completions", "/chat/completions",
-                                                "/v1/completions", "/completions",
-                                                "/v1/responses", "/responses"):
+        if not is_account_route and not is_messages_route and path not in (
+                "/v1/chat/completions", "/chat/completions",
+                "/v1/completions", "/completions",
+                "/v1/responses", "/responses"):
             return self._error(404, "not found", "invalid_request_error")
-        if not self._authorized():
+        if is_messages_route:
+            if not self._key_ok():
+                return self._anthropic_error(
+                    401, "missing or invalid API key", "authentication_error")
+        elif not self._authorized():
             return
         if is_account_route:
             payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
             if payload is None:
                 return
             return self._handle_accounts(path, payload)
-        # Include request uploads in the slot budget, before reading a body.
+        if is_messages_route and path.endswith("/count_tokens"):
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._handle_messages_count_tokens(payload)
+        # Include uploads in the slot budget for both conversation protocols.
         if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
-            return self._error(503, "gateway is at its concurrent chat limit "
-                                    "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
+            message = ("gateway is at its concurrent chat limit "
+                       "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
+            try:
+                client_ip = self.client_address[0] if self.client_address else ""
+            except Exception:
+                client_ip = ""
+            set_request_context(
+                request_id=(self.headers.get("X-Request-Id")
+                            or self.headers.get("X-Request-ID") or uuid.uuid4().hex),
+                client_ip=client_ip,
+                user_agent=self.headers.get("User-Agent") or "",
+                path=path,
+            )
+            # The body is intentionally unread: its model/stream are unknown.
+            record_error("unknown", 503, message, stream=False, key=self._key_id())
+            if is_messages_route:
+                return self._anthropic_error(503, message, "overloaded_error")
+            return self._error(503, message)
         try:
             payload = self._payload_or_error()
             if payload is None:
                 return
+            if is_messages_route:
+                return self._handle_messages(payload)
             return self._dispatch_chat_post(path, payload)
         finally:
             _chat_slots.release()
 
     def _dispatch_chat_post(self, path, payload):
+        # Per-request archive context: a request id is always recorded; the
+        # client IP/UA ride along only when the operator opted in.
+        try:
+            client_ip = self.client_address[0] if self.client_address else ""
+        except Exception:
+            client_ip = ""
+        set_request_context(
+            request_id=(self.headers.get("X-Request-Id")
+                        or self.headers.get("X-Request-ID") or uuid.uuid4().hex),
+            client_ip=client_ip,
+            user_agent=self.headers.get("User-Agent") or "",
+            path=path,
+        )
         # 先擋背景請求：Codex 自己發的（記憶整理／環境建議／自動複核）
         # 不算「使用者實際使用」，一律本地拒絕，不碰上游。
         if BLOCK_BACKGROUND_REQUESTS:
@@ -7713,7 +9842,10 @@ class Handler(BaseHTTPRequestHandler):
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = open_upstream(
-                payload, session_key=session_key, target_realm=req_realm)
+                payload, session_key=session_key, target_realm=req_realm,
+                inbound_request_id=(self.headers.get("X-Conversation-Request-ID")
+                                    or self.headers.get("X-Root-Request-ID") or ""),
+                trace_id=(self.headers.get("X-Trace-ID") or ""))
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -7735,16 +9867,7 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
         except Exception as exc:
-            message = str(exc)
-            record_error(model, 502, message, elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=getattr(exc, "account_uid", None),
-                         key=self._key_id())
-            if message.startswith("no usable account"):
-                # Only a genuinely empty/cooling pool is a 503. A throttled model
-                # is reported as 429 by _rate_limited above instead.
-                return self._error(503, message +
-                                   " - add or enable one at the dashboard (/)")
-            return self._error(502, f"upstream unreachable: {exc}")
+            return self._open_upstream_error(exc, model, t_start, key=self._key_id())
         with upstream:
             if want_stream:
                 return self._chat_stream_response(
@@ -7985,9 +10108,10 @@ def _bootstrap_runtime(args):
     apply_daily_credit_limit()
     apply_model_daily_token_limit()
     load_persisted_realm()
-    global SCHEDULER
+    global SCHEDULER, TASK_QUEUE
     from wb_scheduler import Scheduler
-    SCHEDULER = Scheduler(POOL)
+    TASK_QUEUE = wb_taskqueue.TaskQueue(POOL, log=log, concurrency=1)
+    SCHEDULER = Scheduler(POOL, task_queue=TASK_QUEUE)
     SCHEDULER.start()
     global PRICING
     # The policy table and its timeline live beside the usage log, so one

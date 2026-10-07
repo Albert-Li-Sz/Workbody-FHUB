@@ -68,6 +68,7 @@ class PrivateStorageTests(unittest.TestCase):
 
     def test_settings_load_hardens_existing_api_keys(self):
         path = S.save(self.directory, {"api_keys": [{"key": "fake-key"}]})
+        self.assertEqual(S.load(self.directory)["api_keys"][0]["key"], "fake-key")
         os.chmod(path, 0o644)
         os.chmod(self.directory, 0o755)
         self.assertEqual(S.load(self.directory)["api_keys"][0]["key"], "fake-key")
@@ -84,6 +85,7 @@ class PrivateStorageTests(unittest.TestCase):
 
     def test_permission_failure_cannot_silently_reset_auth_settings(self):
         S.save(self.directory, {"api_keys": [{"key": "fake-key"}]})
+        S.load(self.directory)  # A settings-cache hit must not bypass hardening.
         with patch.object(wb_storage, "restrict_file", side_effect=PermissionError("denied")):
             with self.assertRaises(PermissionError):
                 S.load(self.directory)

@@ -7,6 +7,7 @@ password is never stored in clear text - only a PBKDF2-SHA256 digest.
 Only the Python standard library is required.
 """
 
+import copy
 import fnmatch
 import hashlib
 import hmac
@@ -17,6 +18,8 @@ import secrets
 import threading
 import time
 import wb_storage
+
+import wb_pool
 
 DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
@@ -36,6 +39,11 @@ MAX_PRICING_REFRESH_MINUTES = 24 * 30 * 60
 PRICING_VARIANT_INHERIT_KEY = "pricing_variant_inherit"
 
 _lock = threading.RLock()
+SETTINGS_CACHE_TTL = 5.0
+# abspath -> (read_at, (mtime_ns, size), data). The chat path reads settings
+# 3-4 times per request; the cache removes the repeated open+parse while the
+# stamp check still notices an edit made outside save() (audit #6).
+_settings_cache = {}
 
 
 def settings_path(accounts_dir):
@@ -48,8 +56,21 @@ def _digest(password, salt_hex, rounds=PBKDF2_ROUNDS):
     ).hex()
 
 
+def _settings_stamp(path):
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
 def load(accounts_dir):
-    """Return the persisted settings, or an empty dict on a fresh install."""
+    """Return the persisted settings, or an empty dict on a fresh install.
+
+    Cached for SETTINGS_CACHE_TTL seconds, keyed on the file's mtime+size so
+    an edit made outside save() is still noticed; save() drops its own entry
+    immediately (audit #6).
+    """
     path = settings_path(accounts_dir)
     # Harden existing installations too. A permission failure must propagate,
     # rather than being mistaken for empty settings and disabling API-key auth.
@@ -58,23 +79,111 @@ def load(accounts_dir):
         wb_storage.restrict_directory(accounts_dir)
     except FileNotFoundError:
         return {}
+    key = os.path.abspath(path)
+    stamp = _settings_stamp(path)
+    now = time.time()
+    with _lock:
+        hit = _settings_cache.get(key)
+        if (hit and now - hit[0] < SETTINGS_CACHE_TTL
+                and hit[1] == stamp):
+            return copy.deepcopy(hit[2])
+    data = {}
     try:
         with open(path, encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, dict):
-            return data
+            parsed = json.load(fh)
+        if isinstance(parsed, dict):
+            data = parsed
     except FileNotFoundError:
         pass
     except Exception:
         pass
-    return {}
+    with _lock:
+        _settings_cache[key] = (now, stamp, data)
+    return copy.deepcopy(data)
 
 
 def save(accounts_dir, data):
     """Atomic write so a crash cannot leave a half-written settings file."""
     with _lock:
         path = settings_path(accounts_dir)
-        return wb_storage.write_private_json(path, data)
+        wb_storage.write_private_json(path, data)
+        _settings_cache.pop(os.path.abspath(path), None)
+        return path
+
+
+LOGGING_DEFAULTS = {
+    # Client IP / UA are personal data: opt-in, off by default.
+    "record_client_info": False,
+    # Request archive retention window and size budget (panel reqlog parity).
+    "retention_days": 7,
+    "archive_max_mb": 100,
+}
+
+
+def validate_logging_patch(raw):
+    """Strict validation for a panel-saved logging patch."""
+    out = {}
+    for key, value in (raw or {}).items():
+        if key == "record_client_info":
+            if not isinstance(value, bool):
+                raise ValueError("record_client_info must be true or false")
+            out[key] = value
+        elif key in ("retention_days", "archive_max_mb"):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("%s must be a whole number" % key)
+            if value < 1:
+                raise ValueError("%s cannot be less than 1" % key)
+            out[key] = value
+        else:
+            raise ValueError("unknown logging setting %r" % key)
+    return out
+
+
+def logging_config(accounts_dir):
+    """Request-archive settings (lenient read, strict write)."""
+    stored = load(accounts_dir).get("logging")
+    stored = stored if isinstance(stored, dict) else {}
+    out = {}
+    for key, default in LOGGING_DEFAULTS.items():
+        value = stored.get(key, default)
+        if key == "record_client_info":
+            out[key] = value if isinstance(value, bool) else default
+        else:
+            out[key] = (value if isinstance(value, int) and not isinstance(value, bool)
+                        and value >= 1 else default)
+    return out
+
+
+def set_logging_config(accounts_dir, cfg):
+    """Persist the logging settings. Returns the stored config."""
+    current = logging_config(accounts_dir)
+    if isinstance(cfg, dict):
+        current.update({k: v for k, v in cfg.items() if k in LOGGING_DEFAULTS})
+    clean = validate_logging_patch(current)
+    with _lock:
+        data = load(accounts_dir)
+        data["logging"] = deep_merge(data.get("logging"), clean)
+        save(accounts_dir, data)
+    return clean
+
+
+def deep_merge(base, patch):
+    """Recursively merge patch into base; unknown sibling keys survive.
+
+    The panel form only submits the keys it manages. Replacing a whole group
+    would silently drop hand-written or future keys, so nested objects merge
+    key by key (panel mergeConfigMaps semantics). Returns a new dict; inputs
+    are not mutated.
+    """
+    if not isinstance(base, dict) or not isinstance(patch, dict):
+        return patch
+    out = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
 
 
 def panel_password_is_default(accounts_dir):
@@ -462,6 +571,309 @@ def set_daily_token_limit(accounts_dir, value):
         data["daily_token_limit"] = value
         save(accounts_dir, data)
     return value
+
+
+def pool_config(accounts_dir):
+    """Panel-parity pool rules (weighted picking + backoff windows).
+
+    Stored as one `pool` object in settings.json. Unknown keys are ignored
+    and missing keys fall back to the panel-verified defaults, so an
+    install that never writes this object keeps its previous behaviour
+    plus the new weighted picking.
+    """
+    stored = load(accounts_dir).get("pool")
+    merged = dict(wb_pool.DEFAULTS)
+    if isinstance(stored, dict):
+        merged.update({k: v for k, v in stored.items() if k in wb_pool.DEFAULTS})
+    return wb_pool.normalize(merged)
+
+
+def set_pool_config(accounts_dir, cfg):
+    """Persist the pool rules. Returns the normalized, stored config."""
+    current = pool_config(accounts_dir)
+    if isinstance(cfg, dict):
+        current.update({k: v for k, v in cfg.items() if k in wb_pool.DEFAULTS})
+    clean = wb_pool.normalize(current)
+    with _lock:
+        data = load(accounts_dir)
+        data["pool"] = deep_merge(data.get("pool"), clean)
+        save(accounts_dir, data)
+    return clean
+
+
+SCHEDULE_DEFAULTS = {
+    "checkin_hours": [9, 21],
+    "travel_hours": [9, 21],
+    "keepalive_hours": [22],
+    "cat_hours": [1, 23],
+    "daily_chat_hours": [9, 21],
+    "growth_hours": [1],
+    "checkin_enabled": True,
+    "travel_enabled": True,
+    "keepalive_enabled": True,
+    "cat_enabled": True,
+    "daily_chat_enabled": True,
+    "growth_enabled": True,
+    # The gateway has always run scheduled tasks for disabled accounts;
+    # this panel-parity switch lets an operator opt into skipping them.
+    "include_disabled_in_tasks": True,
+    "balance_refresh_enabled": False,
+    "balance_refresh_minutes": 5,
+}
+_SCHEDULE_HOUR_KEYS = ("checkin_hours", "travel_hours", "keepalive_hours",
+                       "cat_hours", "daily_chat_hours", "growth_hours")
+_SCHEDULE_BOOL_KEYS = ("checkin_enabled", "travel_enabled", "keepalive_enabled",
+                       "cat_enabled", "daily_chat_enabled", "growth_enabled",
+                       "include_disabled_in_tasks", "balance_refresh_enabled")
+
+
+def _clean_hours(value):
+    """Validate an hours list (whole numbers 0-23, no bools), sorted."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("hours must be a list of whole numbers 0-23")
+    out = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError("hours must be whole numbers 0-23")
+        if not 0 <= item <= 23:
+            raise ValueError("hours must be between 0 and 23")
+        if item not in out:
+            out.append(item)
+    return sorted(out)
+
+
+def validate_schedule_patch(raw):
+    """Strict validation for a panel-saved schedule patch."""
+    out = {}
+    for key, value in (raw or {}).items():
+        if key in _SCHEDULE_HOUR_KEYS:
+            out[key] = _clean_hours(value)
+        elif key in _SCHEDULE_BOOL_KEYS:
+            if not isinstance(value, bool):
+                raise ValueError("%s must be true or false" % key)
+            out[key] = value
+        elif key == "balance_refresh_minutes":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("balance_refresh_minutes must be a whole number")
+            if value < 1:
+                raise ValueError("balance_refresh_minutes cannot be less than 1")
+            out[key] = value
+        else:
+            raise ValueError("unknown schedule setting %r" % key)
+    return out
+
+
+def schedule_config(accounts_dir):
+    """Panel-parity schedule: per-family hours, switches and balance scan."""
+    stored = load(accounts_dir).get("schedule")
+    stored = stored if isinstance(stored, dict) else {}
+    out = {}
+    for key, default in SCHEDULE_DEFAULTS.items():
+        value = stored.get(key)
+        if key in _SCHEDULE_HOUR_KEYS:
+            try:
+                cleaned = _clean_hours(value) if value is not None else None
+            except ValueError:
+                cleaned = None
+            out[key] = cleaned if cleaned is not None else list(default)
+        elif key in _SCHEDULE_BOOL_KEYS:
+            out[key] = value if isinstance(value, bool) else default
+        else:
+            out[key] = (value if isinstance(value, int) and not isinstance(value, bool)
+                        and value >= 1 else default)
+    return out
+
+
+def set_schedule_config(accounts_dir, cfg):
+    """Persist the schedule. Returns the normalized, stored config."""
+    current = schedule_config(accounts_dir)
+    if isinstance(cfg, dict):
+        current.update({k: v for k, v in cfg.items() if k in SCHEDULE_DEFAULTS})
+    clean = {}
+    for key, default in SCHEDULE_DEFAULTS.items():
+        value = current.get(key, default)
+        if key in _SCHEDULE_HOUR_KEYS:
+            clean[key] = _clean_hours(value)
+        elif key in _SCHEDULE_BOOL_KEYS:
+            clean[key] = value if isinstance(value, bool) else default
+        else:
+            clean[key] = int(value)
+    with _lock:
+        data = load(accounts_dir)
+        data["schedule"] = deep_merge(data.get("schedule"), clean)
+        save(accounts_dir, data)
+    return clean
+
+
+REDIS_DEFAULTS = {
+    "url": "",
+    "token": "",
+    "affinity_mirror": False,
+    "ttl_seconds": 604800,
+}
+
+
+def validate_redis_patch(raw):
+    """Strict validation for a panel-saved redis/upstash patch."""
+    out = {}
+    for key, value in (raw or {}).items():
+        if key in ("url", "token"):
+            if not isinstance(value, str):
+                raise ValueError("%s must be a string" % key)
+            out[key] = value.strip()
+        elif key == "affinity_mirror":
+            if not isinstance(value, bool):
+                raise ValueError("affinity_mirror must be true or false")
+            out[key] = value
+        elif key == "ttl_seconds":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("ttl_seconds must be a whole number")
+            if value < 60:
+                raise ValueError("ttl_seconds cannot be less than 60")
+            out[key] = value
+        else:
+            raise ValueError("unknown redis setting %r" % key)
+    return out
+
+
+def redis_config(accounts_dir):
+    """Optional Upstash mirror for sticky sessions (off by default)."""
+    stored = load(accounts_dir).get("redis")
+    stored = stored if isinstance(stored, dict) else {}
+    out = {}
+    for key, default in REDIS_DEFAULTS.items():
+        value = stored.get(key, default)
+        if key in ("url", "token"):
+            out[key] = value.strip() if isinstance(value, str) else default
+        elif key == "affinity_mirror":
+            out[key] = value if isinstance(value, bool) else default
+        else:
+            out[key] = (value if isinstance(value, int) and not isinstance(value, bool)
+                        and value >= 60 else default)
+    return out
+
+
+def set_redis_config(accounts_dir, cfg):
+    """Persist the redis mirror settings. Returns the stored config."""
+    current = redis_config(accounts_dir)
+    if isinstance(cfg, dict):
+        current.update({k: v for k, v in cfg.items() if k in REDIS_DEFAULTS})
+    clean = validate_redis_patch(current)
+    with _lock:
+        data = load(accounts_dir)
+        data["redis"] = deep_merge(data.get("redis"), clean)
+        save(accounts_dir, data)
+    return clean
+
+
+UPSTREAM_DEFAULTS = {
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300,
+    "device_token": "",
+    "device_token_file": "",
+}
+
+
+def validate_upstream_patch(raw):
+    """Strict validation for a panel-saved upstream patch."""
+    out = {}
+    for key, value in (raw or {}).items():
+        if key in ("header_timeout_seconds", "idle_timeout_seconds"):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("%s must be a whole number of seconds" % key)
+            if value < 1:
+                raise ValueError("%s cannot be less than 1" % key)
+            out[key] = value
+        elif key in ("device_token", "device_token_file"):
+            if not isinstance(value, str):
+                raise ValueError("%s must be a string" % key)
+            out[key] = value.strip()
+        else:
+            raise ValueError("unknown upstream setting %r" % key)
+    return out
+
+
+def upstream_config(accounts_dir):
+    """Chat socket timeouts and the optional X-Device-Token source."""
+    stored = load(accounts_dir).get("upstream")
+    stored = stored if isinstance(stored, dict) else {}
+    out = {}
+    for key, default in UPSTREAM_DEFAULTS.items():
+        value = stored.get(key, default)
+        if key in ("header_timeout_seconds", "idle_timeout_seconds"):
+            out[key] = (value if isinstance(value, int) and not isinstance(value, bool)
+                        and value >= 1 else default)
+        else:
+            out[key] = value.strip() if isinstance(value, str) else default
+    return out
+
+
+def set_upstream_config(accounts_dir, cfg):
+    """Persist the upstream settings. Returns the stored config."""
+    current = upstream_config(accounts_dir)
+    if isinstance(cfg, dict):
+        current.update({k: v for k, v in cfg.items() if k in UPSTREAM_DEFAULTS})
+    clean = validate_upstream_patch(current)
+    with _lock:
+        data = load(accounts_dir)
+        data["upstream"] = deep_merge(data.get("upstream"), clean)
+        save(accounts_dir, data)
+    return clean
+
+
+PROMPT_DEFAULTS = {
+    "mode": "passthrough",
+    "file": "",
+}
+
+
+def validate_prompt_patch(raw):
+    """Strict validation for a panel-saved prompt patch."""
+    out = {}
+    for key, value in (raw or {}).items():
+        if key == "mode":
+            if not isinstance(value, str):
+                raise ValueError("prompt mode must be a string")
+            mode = value.strip().lower()
+            if mode not in ("passthrough", "custom", "append"):
+                raise ValueError("prompt mode must be passthrough, custom or append")
+            out["mode"] = mode
+        elif key == "file":
+            if not isinstance(value, str):
+                raise ValueError("prompt file must be a string")
+            out["file"] = value.strip()
+        else:
+            raise ValueError("unknown prompt setting %r" % key)
+    return out
+
+
+def prompt_config(accounts_dir):
+    """Gateway system-prompt mode (default passthrough = legacy behaviour)."""
+    stored = load(accounts_dir).get("prompt")
+    stored = stored if isinstance(stored, dict) else {}
+    mode = stored.get("mode", PROMPT_DEFAULTS["mode"])
+    if not isinstance(mode, str) or mode.strip().lower() not in (
+            "passthrough", "custom", "append"):
+        mode = PROMPT_DEFAULTS["mode"]
+    else:
+        mode = mode.strip().lower()
+    file_path = stored.get("file", PROMPT_DEFAULTS["file"])
+    if not isinstance(file_path, str):
+        file_path = PROMPT_DEFAULTS["file"]
+    return {"mode": mode, "file": file_path.strip()}
+
+
+def set_prompt_config(accounts_dir, cfg):
+    """Persist the prompt settings. Returns the stored config."""
+    current = prompt_config(accounts_dir)
+    if isinstance(cfg, dict):
+        current.update({k: v for k, v in cfg.items() if k in PROMPT_DEFAULTS})
+    clean = validate_prompt_patch(current)
+    with _lock:
+        data = load(accounts_dir)
+        data["prompt"] = deep_merge(data.get("prompt"), clean)
+        save(accounts_dir, data)
+    return clean
 
 
 def daily_credit_limit(accounts_dir):

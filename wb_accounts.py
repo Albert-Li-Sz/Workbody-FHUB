@@ -11,8 +11,12 @@ import urllib.parse
 import urllib.request
 import uuid
 from wb_fingerprint import derive_id, generate_request_id
+import wb_pool
+
+
 import wb_atrest
 import wb_identity
+import wb_redisstore
 import wb_settings
 import wb_storage
 import wb_webagent
@@ -35,7 +39,9 @@ import wb_webagent
 # 打卡在桌面端对话之外，再走一次这条网页通道，并且把它跑到 completed。
 # ---------------------------------------------------------------------------
 WEB_ORIGIN = "https://www.workbuddy.ai"
+WEB_ORIGIN_CN = "https://www.workbuddy.cn"
 WEB_CONVERSATIONS_URL = WEB_ORIGIN + "/console/as/conversations/"
+PROFILE_PATH = "/console/account"
 WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
@@ -55,6 +61,42 @@ def _retryable(exc):
     if isinstance(exc, (TimeoutError, ConnectionResetError, ConnectionAbortedError, OSError)):
         return True
     return False
+
+
+def web_origin_for(realm):
+    """Web-console origin per realm (CN vs international), panel webBase parity."""
+    return WEB_ORIGIN_CN if str(realm or "").lower() == "cn" else WEB_ORIGIN
+
+
+def fetch_account_profile(account, timeout=15):
+    """Web-console account profile -> (uid, nickname), nothing else.
+
+    The endpoint also returns phoneNumber and other personal fields; this
+    function parses only uid and nickname, so sensitive values never enter
+    logs, responses or storage. A uid mismatch against the credential raises
+    (wrong-account guard).
+    """
+    origin = web_origin_for(getattr(account, "realm", ""))
+    req = urllib.request.Request(
+        origin + PROFILE_PATH, method="GET",
+        headers={
+            "Authorization": "Bearer " + str(account.access_token or ""),
+            "Accept": "application/json, text/plain, */*",
+            "x-client-platform": "web",
+            "Origin": WEB_ORIGIN_CN,
+            "Referer": WEB_ORIGIN_CN + "/profile/account-settings",
+            "User-Agent": WEB_USER_AGENT,
+        },
+    )
+    with urlopen(req, timeout=timeout, proxy=getattr(account, "proxy", "")) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError("profile response is not an object")
+    uid = str(data.get("uid") or "")
+    if uid and account.uid and uid != account.uid:
+        raise RuntimeError("profile uid mismatch")
+    nickname = data.get("nickname")
+    return uid, nickname.strip() if isinstance(nickname, str) else ""
 
 
 _OPENER_CACHE = {}
@@ -248,10 +290,54 @@ def desktop_effective_realm(hint, token, domain=None):
         return evidence
     return hint if hint in ("intl", "cn") else "intl"
 
+_DEVICE_TOKEN_CACHE = {"key": None, "token": "", "at": 0.0}
+_DEVICE_TOKEN_LOCK = threading.Lock()
+_DEVICE_TOKEN_TTL = 300
+_DEVICE_TOKEN_MAX_BYTES = 1024
+
+
+def resolve_device_token(accounts_dir):
+    """X-Device-Token fallback: a literal value, or a desktop token file.
+
+    Mirrors the panel's device_token.go: the desktop client writes its
+    token to a file, the gateway reads it (max 1KB, trimmed) and caches
+    the result for five minutes so the header hot path stays cheap.
+    Failures degrade to an empty token instead of breaking a request.
+    """
+    try:
+        cfg = wb_settings.upstream_config(accounts_dir)
+    except Exception:
+        return ""
+    literal = str(cfg.get("device_token") or "").strip()
+    path = str(cfg.get("device_token_file") or "").strip()
+    key = literal or path
+    if not key:
+        return ""
+    now = time.time()
+    with _DEVICE_TOKEN_LOCK:
+        if (_DEVICE_TOKEN_CACHE["key"] == key
+                and now - _DEVICE_TOKEN_CACHE["at"] < _DEVICE_TOKEN_TTL):
+            return _DEVICE_TOKEN_CACHE["token"]
+    token = literal
+    if not token and path:
+        try:
+            if os.path.getsize(path) <= _DEVICE_TOKEN_MAX_BYTES:
+                with open(path, encoding="utf-8") as fh:
+                    token = fh.read().strip()
+        except Exception:
+            token = ""
+    with _DEVICE_TOKEN_LOCK:
+        _DEVICE_TOKEN_CACHE.update({"key": key, "token": token, "at": now})
+    return token
+
+
 class Account(object):
     def __init__(self, data, path=None):
         data = data or {}
         self.path = path
+        # Directory of the credential file, so header-time helpers (the
+        # optional X-Device-Token) can resolve settings without a pool lookup.
+        self.accounts_dir = os.path.dirname(path) if path else ""
         token = str(data.get("accessToken") or "")
         self.uid = str(data.get("uid") or jwt_uid(token))
         # The CN desktop build stores its nickname as an encrypted envelope
@@ -311,6 +397,24 @@ class Account(object):
         # unknown count.
         self.daily_token_limit = 0
         self.daily_tokens_today = None
+        # Panel-parity governance state (runtime only, like model_cooldowns):
+        # consecutive soft limits, consecutive failures feeding the breaker,
+        # consecutive unknown failures feeding the degrade window, the idle
+        # weight's last-used stamp and the in-flight lease counter.
+        self.pool_cfg = dict(wb_pool.DEFAULTS)
+        self.soft_streak = 0
+        self.fails = 0
+        self.breaker_until = 0.0
+        self.degrade_count = 0
+        self.degrade_until = 0.0
+        self.last_used_at = 0.0
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.balance_until = 0.0
+        self.balance_cooled = False
+        self.session_dead_fails = 0
+
+
         # Daily credit guard: paid models only. Once today's counted spend
         # reaches the limit the account keeps serving models the catalogue
         # marks free ("x0.00") and is skipped for everything else, so the
@@ -402,6 +506,16 @@ class Account(object):
             "inCooldown": deadline > now,
             "cooldownFor": round(max(0.0, deadline - now)) or None,
             "modelCooldowns": models,
+            "softStreak": int(self.soft_streak),
+            "sessionDeadFails": int(self.session_dead_fails),
+            "sessionDeadThreshold": max(
+                1, int(self.pool_cfg.get("session_dead_threshold") or 3)
+            ),
+            "breakerFor": round(max(0.0, self.breaker_until - now)) or None,
+            "degradeFor": round(max(0.0, self.degrade_until - now)) or None,
+            "balanceCooledFor": round(max(0.0, self.balance_until - now)) or None,
+            "inFlight": int(self.in_flight),
+            "maxInFlight": int(self.max_in_flight or 0),
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
             "credits": self.credits,
@@ -587,6 +701,10 @@ class Account(object):
         # that model is refused here.
         if self.model_token_limit_blocked(model):
             return False
+        # In-flight lease: an account already serving its share of concurrent
+        # requests stays out of the picker until one of them finishes.
+        if self.max_in_flight and self.in_flight >= self.max_in_flight:
+            return False
         exp = self.expires_at or jwt_exp(self.access_token)
         if not exp:
             return True
@@ -601,11 +719,13 @@ class Account(object):
             return self.refresh()
         return self.refresh()
 
-    def headers(self, purpose="chat"):
+    def headers(self, purpose="chat", session_meta=None):
         """組出這一輪的出站標頭。
 
         chat 用途走 wb_identity（CLI 頭 / WorkBuddy 頭，可切換）；
         billing 用途維持原本的輕量標頭，計費端點不吃那套身分。
+        session_meta 由請求層在輪轉循環外算好（會話頭族的聚合主鍵），
+        同一輪的重試/換號共用；缺省時由 wb_identity 自行生成。
         """
         cfg = get_realm_config(self.realm)
 
@@ -633,16 +753,24 @@ class Account(object):
                 headers["X-No-Enterprise-Id"] = "1"
             if self.realm == "cn":
                 headers["X-Product"] = "SaaS"
+            device_token = self._device_token()
+            if device_token:
+                headers["X-Device-Token"] = device_token
             return headers
 
+        meta = session_meta if isinstance(session_meta, dict) else {}
+        conversation_id = meta.get("conversation_id") or getattr(
+            self, "conversation_id", None)
         identity = wb_identity.build_identity_headers(
             product=self.product,
             realm=self.realm,
             uid=self.uid,
             token=self.access_token,
-            conversation_id=getattr(self, "conversation_id", None),
+            conversation_id=conversation_id,
             enterprise_id=self.enterprise_id,
             tenant_id=self.enterprise_id,
+            conversation_request_id=meta.get("conversation_request_id"),
+            trace_id=meta.get("trace_id"),
         )
         headers = {
             "Content-Type": "application/json",
@@ -656,7 +784,33 @@ class Account(object):
             "X-Session-ID": derive_id(self.uid, "session"),
         }
         headers.update(identity)
+        device_token = self._device_token()
+        if device_token:
+            headers["X-Device-Token"] = device_token
         return headers
+
+    def _device_token(self):
+        """Optional X-Device-Token from the configured literal or file."""
+        directory = getattr(self, "accounts_dir", "")
+        if not directory:
+            return ""
+        return resolve_device_token(directory)
+
+    def sync_nickname(self):
+        """Manual web-console nickname refresh (panel issue #94).
+
+        Only called from the explicit dashboard/API action - never from the
+        balance scheduler - and persists the new nickname immediately.
+        """
+        _uid, nickname = fetch_account_profile(self)
+        if nickname and nickname != self.nickname:
+            self.nickname = nickname
+            directory = getattr(self, "accounts_dir", "")
+            if not directory and self.path:
+                directory = os.path.dirname(self.path)
+            if directory:
+                self.save(directory)
+        return nickname
 
     def set_product(self, value):
         """切換出站身分（cli <-> workbuddy）。回傳 True 表示真的換了。
@@ -722,6 +876,7 @@ class Account(object):
         self.refresh_token = data.get("refreshToken") or self.refresh_token
         self.expires_at = jwt_exp(token) or self.expires_at
         with self._throttle_lock:
+            self.session_dead_fails = 0
             self.last_error = ""
             self.cooldown_until = 0
         if self.path and os.path.exists(os.path.dirname(self.path)):
@@ -908,6 +1063,11 @@ class Account(object):
             self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
             if self.path and os.path.exists(os.path.dirname(self.path)):
                 self.save(os.path.dirname(self.path))
+            if self.balance_cooled:
+                try:
+                    self.fetch_credits()
+                except Exception:
+                    pass
             return {"ok": (code == 0 or code == 10001), "code": code, "msg": msg, "data": payload.get("data")}
         except urllib.error.HTTPError as exc:
             try:
@@ -1188,6 +1348,7 @@ class Account(object):
             "updated_at": time.time(),
             "updated_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        self.revive_balance_cooldown()
         if self.path and os.path.exists(os.path.dirname(self.path)):
             self.save(os.path.dirname(self.path))
         return {"ok": True, "credits": self.credits}
@@ -1225,7 +1386,9 @@ class Account(object):
             return 0.0
         now = time.time()
         with self._throttle_lock:
-            wait = max(0.0, self.cooldown_until - now)
+            wait = max(0.0, self.cooldown_until - now,
+                       self.breaker_until - now, self.degrade_until - now,
+                       self.balance_until - now)
             if model:
                 wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
         return wait
@@ -1240,6 +1403,135 @@ class Account(object):
                 self.last_error = ""
                 self.cooldown_until = 0
 
+    def note_soft_rate(self, message):
+        """Account-level rate limit: soft cooldown with exponential backoff."""
+        cfg = self.pool_cfg
+        with self._throttle_lock:
+            self.soft_streak += 1
+            wait = wb_pool.soft_backoff(self.soft_streak, cfg["soft_rate"],
+                                        cfg["soft_rate_max"])
+            self.last_error = str(message)[:200]
+            self.cooldown_until = max(self.cooldown_until, time.time() + wait)
+        return wait
+
+    def note_failure(self, message):
+        """5xx / transport failure: feed the breaker counter (no cooldown yet)."""
+        cfg = self.pool_cfg
+        with self._throttle_lock:
+            self.last_error = str(message)[:200]
+            self.fails += 1
+            if self.fails >= int(cfg["breaker_threshold"]):
+                wait = wb_pool.breaker_backoff(self.fails, cfg["breaker_threshold"],
+                                               cfg["breaker_cooldown"],
+                                               cfg["breaker_cooldown_max"])
+                self.breaker_until = max(self.breaker_until, time.time() + wait)
+        return self.breaker_until
+
+    def note_unknown_failure(self, message):
+        """Unknown error: degrade counter plus the shared breaker counter."""
+        cfg = self.pool_cfg
+        with self._throttle_lock:
+            self.last_error = str(message)[:200]
+            self.degrade_count += 1
+            self.fails += 1
+            now = time.time()
+            if self.degrade_count >= int(cfg["degrade_threshold"]):
+                wait = wb_pool.degrade_backoff(self.degrade_count,
+                                               cfg["degrade_threshold"],
+                                               cfg["degrade_cooldown"],
+                                               cfg["degrade_cooldown_max"])
+                self.degrade_until = max(self.degrade_until, now + wait)
+            if self.fails >= int(cfg["breaker_threshold"]):
+                wait = wb_pool.breaker_backoff(self.fails, cfg["breaker_threshold"],
+                                               cfg["breaker_cooldown"],
+                                               cfg["breaker_cooldown_max"])
+                self.breaker_until = max(self.breaker_until, now + wait)
+        return self.degrade_until
+
+    def note_success(self, model=None):
+        """A served request clears the account-level penalties."""
+        with self._throttle_lock:
+            if model:
+                self.model_cooldowns.pop(model, None)
+            self.soft_streak = 0
+            self.fails = 0
+            self.degrade_count = 0
+            self.breaker_until = 0.0
+            self.degrade_until = 0.0
+            self.balance_until = 0.0
+            self.balance_cooled = False
+            self.session_dead_fails = 0
+            self.last_error = ""
+            self.cooldown_until = 0.0
+
+    def acquire(self):
+        """Reserve one in-flight slot; False when the account is at its cap."""
+        with self._throttle_lock:
+            cap = int(self.max_in_flight or 0)
+            if cap and self.in_flight >= cap:
+                return False
+            self.in_flight += 1
+            return True
+
+    def release(self):
+        with self._throttle_lock:
+            if self.in_flight > 0:
+                self.in_flight -= 1
+
+    def note_balance_cooled(self, message="insufficient credits"):
+        """402 / out-of-credits: hard cooldown until the next local 04:00."""
+        until = wb_pool.next_local_4am()
+        with self._throttle_lock:
+            self.last_error = str(message)[:200]
+            self.balance_cooled = True
+            self.balance_until = max(self.balance_until, until)
+        return until
+
+    def revive_balance_cooldown(self):
+        """A balance refresh that shows credits again unfreezes the
+        balance cooldown only - rate-limit and model cooldowns stay."""
+        if not self.balance_cooled:
+            return False
+        remain = wb_pool.credits_remain(self)
+        if remain is None or remain <= 0:
+            return False
+        with self._throttle_lock:
+            self.balance_cooled = False
+            self.balance_until = 0.0
+            self.last_error = ""
+        return True
+
+    def note_session_dead(self, message):
+        """Session-dead (12153): disable only after N consecutive reports."""
+        threshold = max(1, int(self.pool_cfg.get("session_dead_threshold") or 3))
+        with self._throttle_lock:
+            self.last_error = str(message)[:200]
+            self.session_dead_fails += 1
+            fails = self.session_dead_fails
+        if fails < threshold:
+            return False
+        self.enabled = False
+        if self.path:
+            try:
+                self.save(os.path.dirname(self.path))
+            except Exception:
+                pass
+        return True
+
+    def mark_manual_revive(self):
+        """Operator re-enabled the account: clear every manual penalty."""
+        with self._throttle_lock:
+            self.session_dead_fails = 0
+            self.balance_cooled = False
+            self.balance_until = 0.0
+            self.breaker_until = 0.0
+            self.degrade_count = 0
+            self.degrade_until = 0.0
+            self.soft_streak = 0
+            self.fails = 0
+            self.last_error = ""
+            self.cooldown_until = 0.0
+
 def _human_delta(seconds):
     if seconds is None: return None
     if seconds <= 0: return "expired"
@@ -1250,33 +1542,87 @@ def _human_delta(seconds):
     return "%d min" % int(seconds / 60)
 
 class SessionAffinity(object):
-    def __init__(self, ttl=7200, max_entries=5000):
+    """Session -> account bindings, optionally mirrored to Redis.
+
+    The mirror is off unless the operator configures one; every mirror
+    call is best-effort, so a dead Redis degrades to the in-memory
+    behaviour instead of breaking a request.
+    """
+
+    def __init__(self, ttl=7200, max_entries=5000, mirror=None, mirror_ttl=604800):
         self.ttl = ttl
         self.max_entries = max_entries
         self.bindings = {}
         self._lock = threading.Lock()
+        self.mirror = mirror
+        try:
+            self.mirror_ttl = int(mirror_ttl or 604800)
+        except (TypeError, ValueError):
+            self.mirror_ttl = 604800
+
+    def configure_mirror(self, mirror, mirror_ttl=None):
+        with self._lock:
+            self.mirror = mirror
+            if mirror_ttl is not None:
+                try:
+                    self.mirror_ttl = int(mirror_ttl)
+                except (TypeError, ValueError):
+                    pass
+
+    def _mirror_key(self, key):
+        return wb_redisstore.PREFIX + str(key)
+
     def get(self, key):
-        if not key: return None
+        if not key:
+            return None
         with self._lock:
             entry = self.bindings.get(key)
-            if not entry: return None
-            uid, exp = entry
-            if time.time() > exp:
+            if entry:
+                uid, exp = entry
+                if time.time() <= exp:
+                    self.bindings[key] = (uid, time.time() + self.ttl)
+                    return uid
                 self.bindings.pop(key, None)
-                return None
+            mirror = self.mirror
+        if mirror is None:
+            return None
+        try:
+            uid = mirror.get(self._mirror_key(key))
+        except Exception:
+            uid = None
+        if not uid:
+            return None
+        with self._lock:
             self.bindings[key] = (uid, time.time() + self.ttl)
-            return uid
+        return uid
+
     def bind(self, key, uid):
-        if not key or not uid: return
+        if not key or not uid:
+            return
         with self._lock:
             if len(self.bindings) >= self.max_entries:
                 now = time.time()
                 self.bindings = {k: v for k, v in self.bindings.items() if v[1] > now}
             self.bindings[key] = (uid, time.time() + self.ttl)
+            mirror = self.mirror
+            mirror_ttl = self.mirror_ttl
+        if mirror is not None:
+            try:
+                mirror.set(self._mirror_key(key), uid, mirror_ttl)
+            except Exception:
+                pass
+
     def unbind(self, key):
-        if not key: return
+        if not key:
+            return
         with self._lock:
             self.bindings.pop(key, None)
+            mirror = self.mirror
+        if mirror is not None:
+            try:
+                mirror.delete(self._mirror_key(key))
+            except Exception:
+                pass
 
 class AccountPool(object):
     def __init__(self, directory, log=None):
@@ -1286,7 +1632,12 @@ class AccountPool(object):
         self.logins = {}
         self._lock = threading.RLock()
         self._cursor = 0
+        self.pool_cfg = wb_pool.normalize(None)
         self.affinity = SessionAffinity()
+        # Panel-parity cost ledger: (uid, model) -> {tier, at, credit}.
+        # tier 0 = measured free, 2 = measured paid, absent/stale = unknown.
+        self.cost_ledger = {}
+        self.cost_explored_at = {}
 
     def load(self):
         with self._lock:
@@ -1305,6 +1656,7 @@ class AccountPool(object):
                     continue
                 if account.uid:
                     self.accounts.append(account)
+            self.apply_pool_config()
             self.apply_reserve_credits()
             return self.accounts
 
@@ -1339,6 +1691,7 @@ class AccountPool(object):
             else:
                 self.accounts.append(account)
             account.save(self.dir)
+            self.apply_pool_config()
             self.apply_proxy_slots()
             self.apply_reserve_credits()
             return account
@@ -1432,7 +1785,7 @@ class AccountPool(object):
         if account is None: return None
         account.enabled = bool(enabled)
         if enabled:
-            account.clear_error()
+            account.mark_manual_revive()
         account.save(self.dir)
         self.apply_proxy_slots()
         return account.public()
@@ -1464,6 +1817,113 @@ class AccountPool(object):
                     account.proxy = slot["url"]
                 else:
                     account.proxy = account.proxy_legacy
+
+    def note_model_cost(self, uid, model, credit):
+        """Record one measured cost observation for (account, model)."""
+        uid = str(uid or "")
+        model = str(model or "")
+        if not uid or not model:
+            return
+        try:
+            credit = float(credit or 0)
+        except (TypeError, ValueError):
+            return
+        tier = 2 if credit > 0 else 0
+        now = time.time()
+        with self._lock:
+            self.cost_ledger[(uid, model)] = {"tier": tier, "at": now,
+                                              "credit": credit}
+            if len(self.cost_ledger) > 5000:
+                cutoff = now - 86400
+                self.cost_ledger = {k: v for k, v in self.cost_ledger.items()
+                                    if v.get("at", 0) >= cutoff}
+
+    def _cost_tier(self, account, model, cfg, now):
+        ttl = float(cfg.get("cost_ledger_ttl") or 21600)
+        entry = self.cost_ledger.get((account.uid, model))
+        if not entry or now - entry.get("at", 0) > ttl:
+            return 1
+        return entry.get("tier", 1)
+
+    def _apply_cost_layer(self, candidates, model, cfg, now):
+        """Keep the cheapest measured layer; explore unknown accounts.
+
+        tier 0 (measured free) wins over tier 1 (unknown), which wins over
+        tier 2 (measured paid). When a free layer monopolises while unknown
+        accounts exist, one request per cost_explore_interval is routed to
+        an unknown account so the ledger can learn - the panel project's
+        条件探索, adapted here (no extra upstream request).
+        """
+        if not candidates:
+            return candidates
+        tiers = [(a, self._cost_tier(a, model, cfg, now)) for a in candidates]
+        best = min(t for _a, t in tiers)
+        chosen = [a for a, t in tiers if t == best]
+        unknown = [a for a, t in tiers if t == 1]
+        interval = float(cfg.get("cost_explore_interval") or 0)
+        if best == 0 and unknown and interval > 0:
+            last = self.cost_explored_at.get(model, 0.0)
+            if now - last >= interval:
+                self.cost_explored_at[model] = now
+                return unknown
+        return chosen
+
+    def _apply_credit_floor(self, candidates, model, cfg, now):
+        """Drop measured-paid models once the balance is at the floor.
+
+        Only a *measured paid* tier and a *known* balance can exclude an
+        account: unknown accounts stay usable so the ledger can still
+        learn, and free models are never blocked by the floor.
+        """
+        floor = int(cfg.get("credit_floor") or 0)
+        if floor <= 0:
+            return candidates
+        out = []
+        for account in candidates:
+            if self._cost_tier(account, model, cfg, now) == 2:
+                remain = wb_pool.credits_remain(account)
+                if remain is not None and remain <= floor:
+                    continue
+            out.append(account)
+        return out
+
+    def apply_pool_config(self, cfg=None):
+        """Re-resolve the panel-parity pool rules for every account.
+
+        Values mirror the panel project: weighted picking, soft-rate /
+        breaker / degrade backoff windows, per-realm in-flight caps and the
+        affinity store size. Passing None re-reads settings.json.
+        """
+        if cfg is None:
+            cfg = wb_settings.pool_config(self.dir)
+        cfg = wb_pool.normalize(cfg)
+        with self._lock:
+            self.pool_cfg = cfg
+            for account in self.accounts:
+                account.pool_cfg = cfg
+                account.accounts_dir = self.dir
+                # PANEL parity (audit #9): max_in_flight_global = 0 means
+                # "not configured" and falls back to max_in_flight; only
+                # max_in_flight itself treats 0 as unlimited (leases off).
+                if account.realm == "intl" and cfg["max_in_flight_global"]:
+                    cap = cfg["max_in_flight_global"]
+                else:
+                    cap = cfg["max_in_flight"]
+                account.max_in_flight = int(cap or 0)
+            self.affinity.ttl = int(cfg["affinity_ttl"])
+            self.affinity.max_entries = int(cfg["affinity_max_entries"])
+        mirror = None
+        mirror_ttl = 604800
+        try:
+            redis_cfg = wb_settings.redis_config(self.dir)
+        except Exception:
+            redis_cfg = None
+        if redis_cfg and redis_cfg.get("affinity_mirror") and redis_cfg.get("url"):
+            mirror = wb_redisstore.build_mirror(redis_cfg.get("url"),
+                                                redis_cfg.get("token"))
+            mirror_ttl = int(redis_cfg.get("ttl_seconds") or 604800)
+        self.affinity.configure_mirror(mirror, mirror_ttl)
+        return cfg
 
     def apply_reserve_credits(self, value=None):
         """Re-resolve the low-credit guard for every account.
@@ -1625,7 +2085,7 @@ class AccountPool(object):
                 if realm and account.realm != realm: continue
                 account.enabled = bool(enabled)
                 if enabled:
-                    account.clear_error()
+                    account.mark_manual_revive()
                 account.save(self.dir)
         self.apply_proxy_slots()
 
@@ -1649,20 +2109,46 @@ class AccountPool(object):
         return account
 
     def pick(self, realm=None, exclude=None, model=None):
+        """Pick the next account for model.
+
+        Weighted mode (default, panel parity): healthy candidates are ranked
+        by credits share plus idle compensation, the Top-5 shortlist is drawn
+        from, and a candidate used within the last 100ms is skipped so a burst
+        cannot stampede one credential. weighted_pick=false restores the
+        legacy cursor round-robin for anyone who wants the old order.
+        """
         exclude = exclude or set()
+        now = time.time()
         with self._lock:
-            snapshot = [a for a in self.accounts if not realm or a.realm == realm]
+            snapshot = [a for a in self.accounts
+                        if (not realm or a.realm == realm) and a.uid not in exclude]
             start = self._cursor
-        total = len(snapshot)
-        if total == 0: return None
-        for offset in range(total):
-            index = (start + offset) % total
-            account = snapshot[index]
-            if account.uid in exclude: continue
-            if account.ready(model=model):
-                with self._lock: self._cursor = (index + 1) % total
-                return account
-        return None
+            cfg = dict(self.pool_cfg)
+        if not snapshot:
+            return None
+        if cfg.get("weighted_pick", True):
+            candidates = [a for a in snapshot if a.ready(model=model)]
+            if not candidates:
+                return None
+            candidates = self._apply_cost_layer(candidates, model, cfg, now)
+            candidates = self._apply_credit_floor(candidates, model, cfg, now)
+            if not candidates:
+                return None
+            account = wb_pool.choose(candidates, cfg, now=now)
+        else:
+            total = len(snapshot)
+            account = None
+            for offset in range(total):
+                index = (start + offset) % total
+                cand = snapshot[index]
+                if cand.ready(model=model):
+                    account = cand
+                    with self._lock:
+                        self._cursor = (index + 1) % total
+                    break
+        if account is not None:
+            account.last_used_at = now
+        return account
 
     def representative(self, realm=None):
         with self._lock:
@@ -2070,6 +2556,21 @@ def normalise_import_row(row, realm=None):
     so a file from either source imports cleanly. Raises ValueError when the
     row carries no usable credential.
     """
+    # cockpit tools exports a bare array of snake_case OAuth rows. Map it onto
+    # the flat shape the rest of this function already understands; expires_at
+    # is milliseconds, which normalize_epoch() below converts to seconds.
+    if (isinstance(row, dict) and "access_token" in row
+            and "accessToken" not in row):
+        row = {
+            "uid": row.get("uid"),
+            "nickname": row.get("nickname") or row.get("email") or "",
+            "domain": row.get("domain"),
+            "accessToken": row.get("access_token"),
+            "refreshToken": row.get("refresh_token"),
+            "expiresAt": row.get("expires_at"),
+            "source": "cockpit",
+        }
+
     auth = row.get("auth") if isinstance(row.get("auth"), dict) else None
     profile = row.get("account") if isinstance(row.get("account"), dict) else None
 
@@ -2119,7 +2620,7 @@ def normalise_import_row(row, realm=None):
         "accessToken": token,
         "refreshToken": str(pick("refreshToken") or ""),
         "expiresAt": normalize_epoch(pick("expiresAt")) or jwt_exp(token),
-        "source": "import",
+        "source": str(pick("source") or "import"),
         "enabled": True,
         # Volatile state is intentionally reset - see VOLATILE_FIELDS.
         "lastError": "",

@@ -6,13 +6,17 @@
 3. 猫猫旅行 (buddy travel) 状态查询、自动派出与自动领奖。
 4. 严格遵守 >= 1.0s 防风控间隔，并使用 wb_fingerprint 的稳定设备指纹。
 """
+import datetime
 import json
+import os
 import re
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 import wb_accounts as _accounts
+import wb_desktop
 
 CHAT_BASE = "https://copilot.tencent.com"
 BILL_BASE = "https://www.codebuddy.cn"
@@ -53,20 +57,25 @@ TASK_SPECS = {
     "Library_read": {"kind": "library", "target": 1, "reward": 100, "name": "浏览资料库"},
     "first_buddy": {"kind": "buddy_first", "target": 1, "reward": 0, "name": "领养首只猫猫"},
     "Expert_Philanthropy": {"unforgeable": True, "reason": "真实捐款动作", "reward": 0, "name": "公益爱心捐赠"},
+    # 小程序（mp）口徑常態任務：默認列表不下發，需 X-Client-Platform: miniprogram。
+    # school_season（校園日）活動已於 2026-09-24 結束，不登記（mp 列表出現也會被
+    # pending() 過濾）。Sequential 族每日零點解鎖一環。
+    "Sequential_Tasks_1": {"kind": "mpchat", "target": 1, "reward": 100, "name": "小程序首对话"},
+    "Sequential_Tasks_2": {"kind": "mpexpert", "target": 1, "reward": 200, "name": "小程序选专家对话"},
+    "Sequential_Tasks_3": {"kind": "mpchat", "target": 5, "reward": 300, "name": "小程序五次对话"},
+    "Sequential_Tasks_4": {"kind": "mpauto", "target": 1, "reward": 100, "name": "小程序定时任务"},
+    "Sequential_Tasks_5": {"kind": "mpmodel", "target": 1, "reward": 100, "name": "小程序使用 GLM5.2"},
+    "Sequential_Tasks_6": {"kind": "mpchat", "target": 10, "reward": 500, "name": "小程序十次对话"},
+    "Sequential_Tasks_7": {"kind": "mpplaybook", "target": 1, "reward": 500, "name": "小程序体验灵感"},
 }
 
 # ---------------------------------------------------------------------------
 # 逆向修复常量 (2026-09 实测校准)
 # ---------------------------------------------------------------------------
-# 这些任务上游只认桌面客户端的真实行为信号 (jump_url 均为 workbuddy:// 深链,
-# 需要真实点击进入对应页面)。伪造 /v2/report 事件会被忽略或落到 heartbeat,
-# 进度永远是 0/1, claim 必然返回 400 "task not completed"。诚实地跳过并给出深链。
-DESKTOP_ONLY_TASKS = {
-    "RichMeow_Chat": "在桌面端发起 1 次对话",
-    "Library_read": "在桌面端打开「资料库」并读完介绍文档",
-    "Buddy_App": "在桌面端左上角「发现应用」进入任意一个 Buddy 应用",
-    "Buddy_App_QQ": "在桌面端「发现应用」进入「企鹅教师助手」",
-}
+# 这些任务需要桌面客户端的真实行为信号。panel 2026-09-12 多账号实测后，下列
+# 任务已能用带完整桌面指纹的事件链纯 API 点亮，见 DESKTOP_ACTIONS；此表仅保留
+# 尚未破解、必须真实操作的条目（当前为空，保留供后续逆向使用）。
+DESKTOP_ONLY_TASKS = {}
 
 # 夜猫子任务只在 23:00-08:00 上报才计数, 且每天 1 次、累计 3 天。
 NIGHT_TASK_CODES = {"black_cat"}
@@ -99,10 +108,14 @@ TEAM_ID_POOL = [
 ]
 
 
-def fetch_growth_tasks(account):
-    """查询成长任务列表及当前状态。"""
+def fetch_growth_tasks(account, mp=False):
+    """查询成长任务列表及当前状态；mp=True 走小程序口径（mp 专属任务）。"""
     url = CHAT_BASE + "/v2/activity/growth/tasks"
-    req = urllib.request.Request(url, headers=account.headers("chat"))
+    headers = account.headers("chat")
+    if mp:
+        headers = dict(headers)
+        headers["X-Client-Platform"] = "miniprogram"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with _accounts.urlopen(req, timeout=15, proxy=account.proxy) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -112,12 +125,18 @@ def fetch_growth_tasks(account):
                 code = t.get("task_code") or ""
                 spec = TASK_SPECS.get(code, {})
                 prog = t.get("progress") or {}
+                status = str(t.get("accept_status") or "not_accepted")
                 tasks.append({
                     "task_code": code,
                     "name": t.get("title") or spec.get("name") or code,
                     "description": t.get("description") or t.get("task_desc") or "",
                     "jump_url": t.get("jump_url") or "",
-                    "status": t.get("accept_status") or "not_accepted",
+                    "status": status,
+                    "accept_status": status,
+                    "upstream_status": str(t.get("status") or ""),
+                    "locked": bool(t.get("locked")),
+                    "claimable": bool(t.get("claimable")),
+                    "claimed": bool(t.get("claimed") or status == "claimed"),
                     "current": prog.get("current", 0),
                     "target": prog.get("target", spec.get("target", 1)),
                     "reward_credit": t.get("reward_credit") or spec.get("reward", 0),
@@ -162,7 +181,7 @@ def fetch_growth_summary(account):
     return out
 
 
-def accept_tasks(account, codes, chunk=20):
+def accept_tasks(account, codes, chunk=20, mp=False):
     """批量接取任务。
 
     上游按批返回 results, 单个任务可能 status=accepted / already_accepted /
@@ -178,8 +197,12 @@ def accept_tasks(account, codes, chunk=20):
     for i in range(0, len(codes), max(1, chunk)):
         part = codes[i:i + max(1, chunk)]
         body = json.dumps({"task_codes": part}).encode("utf-8")
+        headers = account.headers("chat")
+        if mp:
+            headers = dict(headers)
+            headers["X-Client-Platform"] = "miniprogram"
         req = urllib.request.Request(url, data=body, method="POST",
-                                     headers=account.headers("chat"))
+                                     headers=headers)
         try:
             with _accounts.urlopen(req, timeout=15, proxy=account.proxy) as resp:
                 d = json.loads(resp.read().decode("utf-8"))
@@ -223,10 +246,14 @@ def accept_tasks(account, codes, chunk=20):
     return out
 
 
-def claim_task(account, code):
+def claim_task(account, code, mp=False):
     """领取任务奖励。支持 copilot.tencent.com -> www.workbuddy.cn 自动降级。"""
     url = f"{CHAT_BASE}/activity/growth/tasks/{code}/claim"
-    req = urllib.request.Request(url, data=b"{}", method="POST", headers=account.headers("chat"))
+    headers = account.headers("chat")
+    if mp:
+        headers = dict(headers)
+        headers["X-Client-Platform"] = "miniprogram"
+    req = urllib.request.Request(url, data=b"{}", method="POST", headers=headers)
     try:
         with _accounts.urlopen(req, timeout=15, proxy=account.proxy) as resp:
             d = json.loads(resp.read().decode("utf-8"))
@@ -425,6 +452,539 @@ def do_cat_travel(account):
     return {"ok": True, "action": state, "msg": f"当前状态: {state}"}
 
 
+# ---------------------------------------------------------------------------
+# 桌面事件链动作（wb_desktop，panel 2026-09-12 多账号实测判据）
+# ---------------------------------------------------------------------------
+def _desktop_chat_chain(account, need, prefix):
+    ok_all = True
+    for i in range(max(1, need)):
+        ms = int(time.time() * 1000)
+        conv = "wb2api-%s-%d-%d" % (prefix, ms, i)
+        req = conv + "-req"
+        events = wb_desktop.chat_sequence(conv, req,
+                                          "msg-%s-%d" % (prefix, i),
+                                          "fast-model", "fast-model")
+        if not wb_desktop.report_desktop_events(account, events):
+            ok_all = False
+        time.sleep(0.3)
+    return ok_all, "已上报桌面端完整对话事件链 ×%d" % max(1, need)
+
+
+def run_desktop_richmeow(account, need):
+    return _desktop_chat_chain(account, 1, "rm")
+
+
+def run_desktop_buddy_app(account, need):
+    ok = wb_desktop.report_desktop_events(account, wb_desktop.buddy_app_sequence())
+    return ok, "已上报 buddyapp 进入五连事件（同时覆盖 Buddy_App 与 Buddy_App_QQ）"
+
+
+def run_desktop_automation(account, need):
+    ok = wb_desktop.report_desktop_events(
+        account, [wb_desktop.automation_create_event()])
+    return ok, "已上报定时任务创建事件"
+
+
+def run_desktop_library(account, need):
+    ok = wb_desktop.report_web_event(
+        account, "web_element_click",
+        "https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm",
+        "library_doc_intro_click", "WorkBuddy资料库介绍")
+    return ok, "已上报资料库介绍阅读事件（web 指纹）"
+
+
+_TEMPLATE_POOL = [("1", "深度研究"), ("2", "周报生成"), ("3", "竞品分析"),
+                  ("4", "活动策划"), ("5", "代码评审")]
+
+
+def run_desktop_template(account, need):
+    ok_all = True
+    count = max(1, need)
+    for i in range(count):
+        tid, tname = _TEMPLATE_POOL[i % len(_TEMPLATE_POOL)]
+        ms = int(time.time() * 1000)
+        conv = "wb2api-tpl-%d-%d" % (ms, i)
+        req = conv + "-req"
+        events = wb_desktop.template_use_sequence(conv, req, tid, tname)
+        if not wb_desktop.report_desktop_events(account, events):
+            ok_all = False
+        time.sleep(0.3)
+    return ok_all, "已上报 template_used ×%d" % count
+
+
+def run_desktop_playbook(account, need):
+    ms = int(time.time() * 1000)
+    conv = "wb2api-pb-%d" % ms
+    req = conv + "-req"
+    events = wb_desktop.playbook_prompt_sequence(
+        conv, req, "pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")
+    ok = wb_desktop.report_desktop_events(account, events)
+    return ok, "已上报 playbook_cta_click + playbook_prompt_send"
+
+
+def run_desktop_canvas(account, need):
+    ms = int(time.time() * 1000)
+    conv = "wb2api-canvas-%d" % ms
+    req = conv + "-req"
+    events = wb_desktop.design_canvas_sequence(conv, req)
+    ok = wb_desktop.report_desktop_events(account, events)
+    return ok, "已上报 wbx_design_canvas_task_create/open"
+
+
+def run_desktop_appearance(account, need):
+    theme = "theme-tkmw7j"
+    wb_desktop.set_appearance_theme(account, theme)
+    time.sleep(2)
+    ok = wb_desktop.report_desktop_events(
+        account, [wb_desktop.appearance_skin_event(theme)])
+    return ok, "已设置主题并上报皮肤生效事件"
+
+
+DESKTOP_ACTIONS = {
+    "RichMeow_Chat": run_desktop_richmeow,
+    "Buddy_App": run_desktop_buddy_app,
+    "Buddy_App_QQ": run_desktop_buddy_app,
+    "automation_1": run_desktop_automation,
+    "Library_read": run_desktop_library,
+    "template_5": run_desktop_template,
+    "playbook_prompt": run_desktop_playbook,
+    "create_canvas": run_desktop_canvas,
+    "Hp_Appearance": run_desktop_appearance,
+}
+
+
+# ---------------------------------------------------------------------------
+# 連登管家（panel scheduler/streak.go + upstream/streak.go）
+# ---------------------------------------------------------------------------
+def _growth_json(account, method, path, body=None, timeout=15):
+    """Growth-center call on the chat domain; returns (data, error)."""
+    data = None
+    headers = dict(account.headers("chat"))
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(CHAT_BASE + path, data=data, method=method,
+                                 headers=headers)
+    try:
+        with _accounts.urlopen(req, timeout=timeout, proxy=account.proxy) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read(300).decode("utf-8", "replace")
+        except Exception:
+            pass
+        return None, "HTTP %s: %s" % (exc.code, detail[:200])
+    except Exception as exc:
+        return None, str(exc)[:200]
+    if not isinstance(payload, dict):
+        return None, "growth response is not an object"
+    if payload.get("code") != 0:
+        return None, str(payload.get("msg") or ("code=%s" % payload.get("code")))
+    return payload.get("data") or {}, ""
+
+
+def _billing_json(account, method, path, body=None, timeout=15):
+    """Billing-domain call (www.codebuddy.cn for CN); returns (data, error)."""
+    cfg = _accounts.get_realm_config(account.realm)
+    url = cfg["billing_upstream"] + path
+    headers = dict(account.headers("billing"))
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    try:
+        with _accounts.urlopen(
+                urllib.request.Request(url, data=data, method=method,
+                                       headers=headers),
+                timeout=timeout, proxy=account.proxy) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read(300).decode("utf-8", "replace")
+        except Exception:
+            pass
+        return None, "HTTP %s: %s" % (exc.code, detail[:200])
+    except Exception as exc:
+        return None, str(exc)[:200]
+    if not isinstance(payload, dict) or payload.get("code") != 0:
+        msg = payload.get("msg") if isinstance(payload, dict) else "bad response"
+        return None, str(msg or "unknown error")
+    return payload.get("data") or {}, ""
+
+
+def streak_full(account):
+    """GET /activity/growth/streak -> full streak/redemption payload."""
+    return _growth_json(account, "GET", "/activity/growth/streak")
+
+
+def fetch_streak_days(account):
+    """Current consecutive-login day count, or None when unavailable."""
+    data, err = streak_full(account)
+    if err:
+        return None
+    try:
+        return int(((data or {}).get("streak") or {}).get("days") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def redeem_tier(account, tier):
+    """POST /activity/growth/redeem {tier, client_token} (idempotent token)."""
+    return _growth_json(account, "POST", "/activity/growth/redeem",
+                        {"tier": tier, "client_token": str(uuid.uuid4())})
+
+
+def lottery_chances(account):
+    """GET /activity/growth/lottery/summary -> (chances, error)."""
+    data, err = _growth_json(account, "GET", "/activity/growth/lottery/summary")
+    if err:
+        return 0, err
+    try:
+        return int((data or {}).get("chances") or 0), ""
+    except (TypeError, ValueError):
+        return 0, "bad chances payload"
+
+
+def lottery_draw(account):
+    """POST /activity/growth/lottery/draw -> (prize, error)."""
+    return _growth_json(account, "POST", "/activity/growth/lottery/draw",
+                        {"client_token": str(uuid.uuid4())})
+
+
+def heatmap_yesterday_missed(account):
+    """True when yesterday's heatmap cell exists with score 0."""
+    data, err = _growth_json(account, "GET", "/activity/growth/heatmap")
+    if err:
+        return False, err
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    for cell in (data or {}).get("cells") or []:
+        if isinstance(cell, dict) and str(cell.get("date") or "")[:10] == yesterday:
+            return (cell.get("score") or 0) == 0, ""
+    return False, ""
+
+
+def use_makeup_card(account, target_date):
+    """POST /activity/growth/makeup-cards/use {target_date}."""
+    _data, err = _growth_json(account, "POST", "/activity/growth/makeup-cards/use",
+                              {"target_date": target_date})
+    return err == ""
+
+
+def claim_gift(account):
+    """POST /billing/meter/claim-gift -> (credit, error)."""
+    data, err = _billing_json(account, "POST", "/billing/meter/claim-gift", {})
+    if err:
+        return 0, err
+    try:
+        return int((data or {}).get("credit") or 0), ""
+    except (TypeError, ValueError):
+        return 0, "bad gift payload"
+
+
+def claim_compensation(account):
+    """POST /billing/meter/claim-compensation -> (credit, error)."""
+    data, err = _billing_json(account, "POST", "/billing/meter/claim-compensation", {})
+    if err:
+        return 0, err
+    try:
+        return int((data or {}).get("credit") or 0), ""
+    except (TypeError, ValueError):
+        return 0, "bad compensation payload"
+
+
+def run_streak_bonus(account):
+    """連登管家：補簽 → 禮包/補償 → 兌換已解鎖檔位 → 抽完所有次數（冪等）。
+
+    對應 panel scheduler/streak.go：未解鎖（403）與已領取檔位自動跳過；
+    每次執行都不會重複消耗上游配額。
+    """
+    if account.realm != "cn":
+        return {"ok": False, "logs": ["国际版不适用国内成长中心"], "credit": 0}
+    logs = []
+    credit_total = 0
+
+    # 0. 補簽保連登（昨日漏簽且有補簽卡）。
+    missed, _err = heatmap_yesterday_missed(account)
+    if missed:
+        full, _full_err = streak_full(account)
+        cards = int(((full or {}).get("makeup_cards") or {}).get("balance") or 0)
+        if cards > 0:
+            yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+            if use_makeup_card(account, yesterday):
+                logs.append("已用补签卡补签 %s（保连登）" % yesterday)
+            else:
+                logs.append("补签失败（上游拒绝）")
+        else:
+            logs.append("昨日漏签但没有补签卡")
+
+    # 0.5 禮包/補償（每號一次；無則靜默）。
+    gift, gift_err = claim_gift(account)
+    if not gift_err and gift:
+        credit_total += gift
+        logs.append("新手礼包 +%s 积分" % gift)
+    comp, comp_err = claim_compensation(account)
+    if not comp_err and comp:
+        credit_total += comp
+        logs.append("补偿领取 +%s 积分" % comp)
+
+    # 1. 兌換所有已解鎖檔位。
+    full, err = streak_full(account)
+    if err:
+        logs.append("连登状态查询失败: %s" % err)
+        return {"ok": False, "logs": logs, "credit": credit_total}
+    status = (full or {}).get("redemption_status") or {}
+    statuses = {
+        "7d": status.get("tier_7d_status"),
+        "14d": status.get("tier_14d_status"),
+        "28d": status.get("tier_28d_status"),
+    }
+    for tier in status.get("tiers") or []:
+        if not isinstance(tier, dict):
+            continue
+        name = str(tier.get("tier") or "")
+        if statuses.get(name) in ("locked", "claimed"):
+            continue
+        _data, redeem_err = redeem_tier(account, name)
+        if redeem_err:
+            logs.append("兑换 %s 档跳过: %s" % (name, redeem_err))
+            continue
+        logs.append("兑换 %s 档（+%s积分 +%s能量 卡×%s 抽奖×%s）" % (
+            name, tier.get("credit") or 0, tier.get("energy") or 0,
+            tier.get("cards") or 0, tier.get("chances") or 0))
+        time.sleep(0.5)
+
+    # 2. 抽完所有次數。
+    chances, chance_err = lottery_chances(account)
+    if chance_err:
+        logs.append("抽奖次数查询失败: %s" % chance_err)
+    else:
+        for i in range(chances):
+            prize, draw_err = lottery_draw(account)
+            if draw_err:
+                logs.append("第%d抽失败: %s" % (i + 1, draw_err))
+                break
+            logs.append("第%d抽: %s" % (i + 1, json.dumps(
+                prize, ensure_ascii=False)[:200]))
+            time.sleep(0.5)
+        if chances:
+            logs.append("抽奖完成 %d 次" % chances)
+
+    account.fetch_credits()
+    return {"ok": True, "logs": logs, "credit": credit_total,
+            "credits": account.credits}
+
+
+# 小程序對話事件之間的真人節奏間隔：連發會被反作弊回滾（claim 400
+# "task not completed"），panel 2026-09-26 實測 45s 間隔可穩定入賬。
+MP_CHAT_GAP = float(os.environ.get("WB_MP_CHAT_GAP") or "45")
+MP_SEQUENTIAL_CODES = ("Sequential_Tasks_1", "Sequential_Tasks_2",
+                       "Sequential_Tasks_3", "Sequential_Tasks_4",
+                       "Sequential_Tasks_5", "Sequential_Tasks_6",
+                       "Sequential_Tasks_7")
+
+
+def _report_sequential_events(account, code, need):
+    """上報對應 Sequential 任務的判據事件（panel 各 runSequential*）。"""
+    if code in ("Sequential_Tasks_1", "Sequential_Tasks_3", "Sequential_Tasks_6"):
+        for i in range(need):
+            conv = "wb2api-mp-%d-%d" % (int(time.time() * 1000), i)
+            if not wb_desktop.report_mp_events(
+                    account, [wb_desktop.mp_chat_event(conv)]):
+                return False, "小程序对话事件上报失败"
+            if i < need - 1:
+                time.sleep(MP_CHAT_GAP)
+        return True, "已上报小程序对话事件 ×%d（间隔 %.0fs 防回滚）" % (need, MP_CHAT_GAP)
+    if code == "Sequential_Tasks_2":
+        expert_id, expert_name = EXPERT_ID_POOL[0]
+        if not wb_desktop.report_mp_events(
+                account, [wb_desktop.mp_expert_event(expert_id, expert_name)]):
+            return False, "小程序专家事件上报失败"
+        return True, "已上报小程序专家使用事件（%s）" % expert_id
+    if code == "Sequential_Tasks_4":
+        if not wb_desktop.report_desktop_events(
+                account, [wb_desktop.automation_create_event("wb2api 自动化")]):
+            return False, "定时任务创建事件上报失败"
+        return True, "已上报定时任务创建事件（PC 同源判据）"
+    if code == "Sequential_Tasks_5":
+        conv = "wb2api-mp-glm-%d" % int(time.time() * 1000)
+        if not wb_desktop.report_mp_events(
+                account, [wb_desktop.mp_chat_event(conv, model_id="glm-5.2",
+                                                   model_name="GLM-5.2")]):
+            return False, "小程序模型对话事件上报失败"
+        return True, "已上报小程序 GLM-5.2 对话事件"
+    if code == "Sequential_Tasks_7":
+        ms = int(time.time() * 1000)
+        conv = "wb2api-pb-%d" % ms
+        req = conv + "-req"
+        if wb_desktop.report_desktop_events(
+                account, wb_desktop.playbook_prompt_sequence(
+                    conv, req, "pm-gtm-launch-plan",
+                    "新产品上市 GTM 发布计划一页纸")):
+            return True, "已上报灵感事件组（PC 判据）"
+        if wb_desktop.report_mp_events(
+                account, wb_desktop.mp_playbook_events(
+                    "pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")):
+            return True, "已上报灵感事件组（mp 备选判据）"
+        return False, "灵感事件组上报失败"
+    return False, "未知 Sequential 任务 %s" % code
+
+
+def run_sequential_task(account, code, gap=None):
+    """Sequential 小程序任務通用骨架（panel runSequentialEventTask）。
+
+    mp 查詢 → accept（mp 頭）→ 判據事件上報 → 回讀 → 達標領獎（mp 頭）。
+    locked 期間 accept 不落賬，直接跳過等次日零點解鎖。
+    """
+    if account.realm != "cn":
+        return False, "国际版不适用国内成长任务中心", 0
+    if code not in MP_SEQUENTIAL_CODES:
+        return False, "不是小程序 Sequential 任务", 0
+    tasks = fetch_growth_tasks(account, mp=True)
+    task = next((t for t in tasks if t["task_code"] == code), None)
+    if task is None:
+        return True, "mp 口径未下发该任务（前置未完成或活动未开始），跳过", 0
+    if task.get("claimed") or task.get("status") == "claimed":
+        return True, "已完成（已领取）", 0
+    if task.get("locked"):
+        return True, "任务未解锁（每日零点解锁一环），跳过", 0
+    target = max(1, int(task.get("target") or 1))
+    current = int(task.get("current") or 0)
+    if task.get("claimable") or current >= target or task.get("status") == "completed":
+        res = claim_task(account, code, mp=True)
+        if res.get("ok"):
+            credit = res.get("credit", 0) or 0
+            return True, "已达标，领奖成功 +%s 积分" % credit, credit
+        return False, "已达标但领奖失败: %s" % (res.get("msg") or "未知原因"), 0
+    if task.get("status") == "not_accepted":
+        accepted = accept_tasks(account, [code], mp=True)
+        if code not in (accepted.get("accepted") or []):
+            return True, "accept 未登记生效（可能处于每日锁定窗口），等下次调度", 0
+        time.sleep(gap if gap is not None else 1.0)
+        tasks = fetch_growth_tasks(account, mp=True)
+        task = next((t for t in tasks if t["task_code"] == code), task)
+        target = max(1, int(task.get("target") or target))
+        current = int(task.get("current") or 0)
+    need = max(1, target - current)
+    ok, detail = _report_sequential_events(account, code, need)
+    if not ok:
+        return False, detail, 0
+    prog = current
+    for _round in range(3):
+        time.sleep(3.0)
+        fresh = next((t for t in fetch_growth_tasks(account, mp=True)
+                      if t["task_code"] == code), None)
+        if fresh:
+            prog = int(fresh.get("current") or 0)
+            if fresh.get("claimable") or fresh.get("claimed") or prog >= target:
+                break
+    if prog < target:
+        return False, "%s；进度 %s/%s 未点亮（判据形态待校正，下次重试）" % (
+            detail, prog, target), 0
+    res = claim_task(account, code, mp=True)
+    if res.get("ok"):
+        credit = res.get("credit", 0) or 0
+        return True, "%s；领奖成功 +%s 积分" % (detail, credit), credit
+    return False, "进度已达但领奖失败: %s" % (res.get("msg") or "未知原因"), 0
+
+
+def run_single_task(account, code, gap=1.0):
+    """执行单个成长任务动作并自动领奖（panel runGrowthQueued 同语义）。
+
+    回傳 (ok, message, earned_credit)。隊列與單任務入口共用本函數：先回讀任務
+    狀態（已領取/未解鎖/不可自動化直接跳過），需要時補接取，再按 DESKTOP_ACTIONS
+    或通用事件上報，等進度落賬後領獎。
+    """
+    if account.realm != "cn":
+        return False, "国际版不适用国内成长任务中心", 0
+    if code in MP_SEQUENTIAL_CODES:
+        return run_sequential_task(account, code, gap=gap)
+    tasks = fetch_growth_tasks(account)
+    task = next((t for t in tasks if t["task_code"] == code), None)
+    if task is None:
+        return False, "该账号无此任务", 0
+    if task.get("claimed") or task.get("status") == "claimed":
+        return True, "已完成（已领取）", 0
+    if task.get("unforgeable"):
+        return False, "该任务不可自动化: %s" % (task.get("reason") or ""), 0
+    if task.get("locked"):
+        return True, "任务未解锁（上游锁定），跳过", 0
+    if code in NIGHT_TASK_CODES and not in_night_window():
+        return True, "夜猫子任务仅 23:00-08:00 计数，跳过", 0
+
+    cur = int(task.get("current") or 0)
+    tgt = int(task.get("target") or 1)
+    if task.get("claimable") or cur >= tgt or task.get("upstream_status") == "complete":
+        res = claim_task(account, code)
+        if res.get("ok"):
+            credit = res.get("credit", 0) or 0
+            return True, "已达标，领奖成功 +%s 积分" % credit, credit
+        return False, "已达标但领奖失败: %s" % (res.get("msg") or "未知原因"), 0
+
+    if task.get("status") == "not_accepted":
+        accepted = accept_tasks(account, [code])
+        if code not in (accepted.get("accepted") or []):
+            return False, "接取失败: %s" % (accepted.get("msg") or "上游拒绝"), 0
+        time.sleep(gap)
+        tasks = fetch_growth_tasks(account)
+        task = next((t for t in tasks if t["task_code"] == code), task)
+        cur = int(task.get("current") or 0)
+        tgt = int(task.get("target") or tgt or 1)
+
+    need = max(1, tgt - cur)
+    action = DESKTOP_ACTIONS.get(code)
+    if action:
+        try:
+            report_ok, detail = action(account, need)
+        except Exception as exc:
+            return False, "事件链异常: %s" % exc, 0
+    else:
+        spec = TASK_SPECS.get(code) or {}
+        kind = spec.get("kind")
+        report_ok = True
+        detail = "已上报 %s 事件 ×%d" % (kind or "heartbeat", need)
+        id_pool = None
+        if kind in ("expert", "team"):
+            id_pool = TEAM_ID_POOL if kind == "team" else EXPERT_ID_POOL
+        for i in range(need):
+            expert = None
+            if id_pool:
+                pid, pnm = id_pool[(cur + i) % len(id_pool)]
+                expert = (pid, pnm)
+            event = build_event(account, kind, idx=i, expert=expert)
+            if not report_events(account, [event]):
+                report_ok = False
+            if i < need - 1:
+                time.sleep(gap)
+    if not report_ok:
+        return False, "事件上报失败（上游拒绝）", 0
+
+    # Wait for the upstream to post the progress (usually 1-3s).
+    prog = cur
+    for attempt in range(6):
+        fresh = next((x for x in fetch_growth_tasks(account)
+                      if x["task_code"] == code), None)
+        if fresh:
+            prog = int(fresh.get("current") or 0)
+            if prog >= tgt or fresh.get("status") in ("completed", "claimed"):
+                break
+            if prog > cur:
+                time.sleep(2.5)
+                continue
+        if attempt < 2:
+            time.sleep(1.5)
+        else:
+            break
+    if prog < tgt:
+        return False, "%s；进度 %s/%s 未达成，领奖顺延" % (detail, prog, tgt), 0
+    res = claim_task(account, code)
+    if res.get("ok"):
+        credit = res.get("credit", 0) or 0
+        return True, "%s；领奖成功 +%s 积分" % (detail, credit), credit
+    return False, "进度已达 %s/%s 但领奖失败: %s" % (prog, tgt, res.get("msg") or "未知原因"), 0
+
+
 def run_growth_tasks(account, gap=1.0):
     """完整执行批量成长任务点亮与领奖。"""
     if account.realm != "cn":
@@ -519,23 +1079,32 @@ def run_growth_tasks(account, gap=1.0):
         #    (eventCode, id) 去重, 进度永远不动。
         need = max(1, tgt - cur)
         kind = spec.get("kind")
-        logs.append(f"正在点亮任务 [{spec['name']}] (需上报 {need} 次)...")
-        report_ok = True
-        id_pool = None
-        if kind in ("expert", "team"):
-            id_pool = TEAM_ID_POOL if kind == "team" else EXPERT_ID_POOL
-        for i in range(need):
-            expert = None
-            if id_pool:
-                pid, pnm = id_pool[(cur + i) % len(id_pool)]
-                expert = (pid, pnm)
-            ev = build_event(account, kind, idx=i, expert=expert)
-            if not report_events(account, [ev]):
-                report_ok = False
-            if i < need - 1:
-                time.sleep(gap)
-        if not report_ok:
-            logs.append(f"! 任务 [{spec['name']}] 部分事件上报失败 (上游拒绝), 继续尝试领奖")
+        action = DESKTOP_ACTIONS.get(code)
+        if action:
+            logs.append(f"正在点亮任务 [{spec['name']}] (桌面事件链 ×{need})...")
+            try:
+                report_ok, detail = action(account, need)
+            except Exception as exc:
+                report_ok, detail = False, "事件链异常: %s" % exc
+            logs.append(("✓ " if report_ok else "! ") + detail)
+        else:
+            logs.append(f"正在点亮任务 [{spec['name']}] (需上报 {need} 次)...")
+            report_ok = True
+            id_pool = None
+            if kind in ("expert", "team"):
+                id_pool = TEAM_ID_POOL if kind == "team" else EXPERT_ID_POOL
+            for i in range(need):
+                expert = None
+                if id_pool:
+                    pid, pnm = id_pool[(cur + i) % len(id_pool)]
+                    expert = (pid, pnm)
+                ev = build_event(account, kind, idx=i, expert=expert)
+                if not report_events(account, [ev]):
+                    report_ok = False
+                if i < need - 1:
+                    time.sleep(gap)
+            if not report_ok:
+                logs.append(f"! 任务 [{spec['name']}] 部分事件上报失败 (上游拒绝), 继续尝试领奖")
         time.sleep(1.5)
 
         # 等上游把进度落账再领奖。进度通常 1-3 秒就可见, 因此先快查几次;
