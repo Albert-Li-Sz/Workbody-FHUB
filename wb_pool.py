@@ -185,7 +185,8 @@ def credits_remain(account):
 def free_tokens_today(account):
     """Counted tokens across this account's free models for the local day."""
     try:
-        return max(0, int(getattr(account, "free_tokens_today", None) or 0))
+        pending = getattr(account, "pending_consumption", lambda kind: 0)("free")
+        return max(0, int(getattr(account, "free_tokens_today", None) or 0)) + pending
     except (TypeError, ValueError, OverflowError):
         return 0
 
@@ -193,7 +194,8 @@ def free_tokens_today(account):
 def credits_spent_today(account):
     """Counted credit spend, independent of paid-model token volume."""
     try:
-        value = float(getattr(account, "daily_credits_today", None) or 0)
+        value = (float(getattr(account, "daily_credits_today", None) or 0)
+                 + getattr(account, "pending_consumption", lambda kind: 0)("paid"))
     except (TypeError, ValueError, OverflowError):
         return 0.0
     return max(0.0, value) if math.isfinite(value) else 0.0

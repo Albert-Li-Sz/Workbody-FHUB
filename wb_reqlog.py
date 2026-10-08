@@ -20,6 +20,7 @@ import json
 import os
 import threading
 import time
+import wb_database
 
 _last_check = {}
 CHECK_INTERVAL_SECONDS = 60
@@ -94,6 +95,10 @@ def read_rows(usage_dir, limit=None, main_name="usage.jsonl"):
     on the dashboard's 5s poll; the stamp cache makes that one parse per file
     change instead (audit #7).
     """
+    database = wb_database.for_usage(os.path.join(usage_dir, main_name))
+    if database:
+        rows = list(database.usage_rows(limit=limit))
+        return list(reversed(rows)) if limit else rows
     key = (os.path.abspath(str(usage_dir or ".")), main_name)
     stamp = _files_stamp(usage_dir, main_name)
     with LOCK:
@@ -272,5 +277,11 @@ def rotate_if_needed(path, max_mb, retention_days, now=None, log=None):
         return False
     _last_check[key] = now
     usage_dir = os.path.dirname(path) or "."
+    database = wb_database.for_usage(path)
+    if database:
+        with LOCK:
+            removed = database.prune_usage(now)
+        if removed and log:
+            log("SQLite usage: pruned %d record(s) outside configured retention" % removed)
     prune_archives(usage_dir, retention_days, now=now, log=log)
     return compact_main(path, max_mb, retention_days, now=now, log=log)

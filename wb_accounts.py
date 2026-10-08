@@ -17,6 +17,10 @@ import wb_pool
 
 import wb_atrest
 import wb_forward_proxy
+import wb_http
+import wb_events
+import wb_fairness
+import wb_database
 import wb_identity
 import wb_redisstore
 import wb_settings
@@ -124,11 +128,8 @@ def opener_for_proxy(proxy):
 
 
 def urlopen(req, timeout=30, proxy=""):
-    """urlopen honouring an optional per-account proxy."""
-    opener = opener_for_proxy(proxy)
-    if opener is None:
-        return urllib.request.urlopen(req, timeout=timeout)
-    return opener.open(req, timeout=timeout)
+    """Lease a reusable connection pinned to this account and its proxy."""
+    return wb_http.urlopen(req, timeout=timeout, proxy=proxy)
 
 
 def http_json(url, data=None, method=None, headers=None, timeout=30,
@@ -431,6 +432,7 @@ class Account(object):
         self.degrade_until = 0.0
         self.last_used_at = 0.0
         self.in_flight = 0
+        self._reservations = {}
         self.max_in_flight = 0
         self.balance_until = 0.0
         self.balance_cooled = False
@@ -539,6 +541,8 @@ class Account(object):
             "degradeFor": round(max(0.0, self.degrade_until - now)) or None,
             "balanceCooledFor": round(max(0.0, self.balance_until - now)) or None,
             "inFlight": int(self.in_flight),
+            "pendingFreeTokens": self.pending_consumption("free"),
+            "pendingCredits": round(self.pending_consumption("paid"), 4),
             "maxInFlight": int(self.max_in_flight or 0),
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
@@ -585,8 +589,8 @@ class Account(object):
         return path
 
     def delete(self):
-        if self.path and os.path.exists(self.path):
-            os.remove(self.path)
+        if self.path:
+            wb_storage.delete_private_json(self.path)
 
     def reserve_blocked(self):
         """True when the low-credit guard should keep this account idle.
@@ -1491,19 +1495,33 @@ class Account(object):
             self.last_error = ""
             self.cooldown_until = 0.0
 
-    def acquire(self):
+    def acquire(self, reservation=None):
         """Reserve one in-flight slot; False when the account is at its cap."""
         with self._throttle_lock:
             cap = int(self.max_in_flight or 0)
             if cap and self.in_flight >= cap:
                 return False
             self.in_flight += 1
-            return True
+            if reservation:
+                self._reservations[reservation["id"]] = dict(reservation)
+        wb_events.BROKER.publish("accounts", realm=self.realm)
+        return True
 
-    def release(self):
+    def release(self, reservation_id=None):
         with self._throttle_lock:
+            if reservation_id is not None:
+                if reservation_id not in self._reservations:
+                    return
+                self._reservations.pop(reservation_id)
             if self.in_flight > 0:
                 self.in_flight -= 1
+        wb_events.BROKER.publish("accounts", realm=self.realm)
+
+    def pending_consumption(self, kind):
+        field = "tokens" if kind == "free" else "credit"
+        with self._throttle_lock:
+            return sum(value.get(field, 0) for value in self._reservations.values()
+                       if value.get("kind") == kind)
 
     def note_balance_cooled(self, message="insufficient credits"):
         """402 / out-of-credits: hard cooldown until the next local 04:00."""
@@ -1572,8 +1590,8 @@ class SessionAffinity(object):
     """Session -> account bindings, optionally mirrored to Redis.
 
     The mirror is off unless the operator configures one; every mirror
-    call is best-effort, so a dead Redis degrades to the in-memory
-    behaviour instead of breaking a request.
+    call is best-effort, so a dead Redis falls back to local SQLite and
+    memory instead of breaking a request.
     """
 
     def __init__(self, ttl=7200, max_entries=5000, mirror=None, mirror_ttl=604800):
@@ -1599,6 +1617,16 @@ class SessionAffinity(object):
     def _mirror_key(self, key):
         return wb_redisstore.PREFIX + str(key)
 
+    def _remember(self, key, uid):
+        """Caller holds _lock; keep the hot cache bounded even at full TTL."""
+        self.bindings.pop(key, None)
+        if len(self.bindings) >= self.max_entries:
+            now = time.time()
+            self.bindings = {k: v for k, v in self.bindings.items() if v[1] > now}
+        while len(self.bindings) >= self.max_entries:
+            self.bindings.pop(next(iter(self.bindings)))
+        self.bindings[key] = (uid, time.time() + self.ttl)
+
     def get(self, key):
         if not key:
             return None
@@ -1607,10 +1635,24 @@ class SessionAffinity(object):
             if entry:
                 uid, exp = entry
                 if time.time() <= exp:
-                    self.bindings[key] = (uid, time.time() + self.ttl)
-                    return uid
-                self.bindings.pop(key, None)
+                    self._remember(key, uid)
+                else:
+                    self.bindings.pop(key, None)
+                    uid = None
+            else:
+                uid = None
             mirror = self.mirror
+        database = wb_database.DATABASE
+        if uid:
+            if database:
+                database.affinity_set(key, uid, self.ttl)
+            return uid
+        uid = database.affinity_get(key) if database else None
+        if uid:
+            with self._lock:
+                self._remember(key, uid)
+            database.affinity_set(key, uid, self.ttl)
+            return uid
         if mirror is None:
             return None
         try:
@@ -1620,19 +1662,20 @@ class SessionAffinity(object):
         if not uid:
             return None
         with self._lock:
-            self.bindings[key] = (uid, time.time() + self.ttl)
+            self._remember(key, uid)
+        if database:
+            database.affinity_set(key, uid, self.ttl)
         return uid
 
     def bind(self, key, uid):
         if not key or not uid:
             return
         with self._lock:
-            if len(self.bindings) >= self.max_entries:
-                now = time.time()
-                self.bindings = {k: v for k, v in self.bindings.items() if v[1] > now}
-            self.bindings[key] = (uid, time.time() + self.ttl)
+            self._remember(key, uid)
             mirror = self.mirror
             mirror_ttl = self.mirror_ttl
+        if wb_database.DATABASE:
+            wb_database.DATABASE.affinity_set(key, uid, self.ttl)
         if mirror is not None:
             try:
                 mirror.set(self._mirror_key(key), uid, mirror_ttl)
@@ -1645,6 +1688,8 @@ class SessionAffinity(object):
         with self._lock:
             self.bindings.pop(key, None)
             mirror = self.mirror
+        if wb_database.DATABASE:
+            wb_database.DATABASE.affinity_delete(key)
         if mirror is not None:
             try:
                 mirror.delete(self._mirror_key(key))
@@ -1672,13 +1717,12 @@ class AccountPool(object):
             self.accounts = []
             if not os.path.isdir(self.dir): return self.accounts
             wb_storage.restrict_directory(self.dir)
-            for name in sorted(os.listdir(self.dir)):
-                if not name.endswith(".json"): continue
-                path = os.path.join(self.dir, name)
+            for path in wb_storage.document_paths(self.dir):
+                name = os.path.basename(path)
                 try:
-                    wb_storage.restrict_file(path)
-                    with open(path, encoding="utf-8") as fh:
-                        account = Account(json.load(fh), path)
+                    if os.path.exists(path):
+                        wb_storage.restrict_file(path)
+                    account = Account(wb_storage.read_private_json(path), path)
                 except Exception as exc:
                     self.log("account %s unreadable: %s" % (name, exc))
                     continue
@@ -1717,7 +1761,18 @@ class AccountPool(object):
                     account.proxy_slot = existing.proxy_slot
                 if not account.proxy_legacy and existing.proxy_legacy:
                     account.proxy_legacy = existing.proxy_legacy
-                self.accounts[self.accounts.index(existing)] = account
+                # Leased responses still hold this Account object. Updating
+                # credentials in place preserves pending consumption and lets
+                # those responses release the same reservations after login.
+                with existing._throttle_lock:
+                    for field in (
+                            "nickname", "domain", "realm", "platform", "product",
+                            "enterprise_id", "access_token", "refresh_token", "expires_at",
+                            "added_at", "source", "proxy_slot", "proxy_legacy", "enabled",
+                            "priority", "_priority_explicit", "last_error", "cooldown_until",
+                            "credits", "last_checkin", "last_daily_chat"):
+                        setattr(existing, field, getattr(account, field))
+                account = existing
             else:
                 self.accounts.append(account)
             account.save(self.dir)
@@ -2153,7 +2208,7 @@ class AccountPool(object):
         return sum(1 for a in snapshot if a.enabled and a.access_token
                    and a.ready(model=model, allow_refresh=allow_refresh))
 
-    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None):
+    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None, allow_refresh=True):
         exclude = exclude or set()
         now = time.time()
         with self._lock:
@@ -2166,7 +2221,7 @@ class AccountPool(object):
             bound_uid = self.affinity.get(session_key)
             if bound_uid and bound_uid not in exclude:
                 account = self.get(bound_uid)
-                if account and (not realm or account.realm == realm) and account.ready(model=model):
+                if account and (not realm or account.realm == realm) and account.ready(model=model, allow_refresh=allow_refresh):
                     with self._lock:
                         preferred = [a for a in self.accounts
                                      if (not realm or a.realm == realm) and a.uid not in exclude
@@ -2175,7 +2230,7 @@ class AccountPool(object):
                         cfg = dict(self.pool_cfg)
                     if cfg.get("weighted_pick", True):
                         preferred = self._apply_credit_floor(preferred, model, cfg, now)
-                    if not any(a.ready(model=model) for a in preferred):
+                    if not any(a.ready(model=model, allow_refresh=allow_refresh) for a in preferred):
                         # A paid session may keep its cache only while its
                         # account is still among the least-spent peers.
                         # Otherwise the next send must join credit fairness.
@@ -2189,12 +2244,12 @@ class AccountPool(object):
                                      == getattr(account, "priority", DEFAULT_PRIORITY)]
                         if cfg.get("weighted_pick", True):
                             peers = self._apply_credit_floor(peers, model, cfg, now)
-                        peers = [a for a in peers if a.ready(model=model)]
+                        peers = [a for a in peers if a.ready(model=model, allow_refresh=allow_refresh)]
                         if (self._model_free_for(account, model, now)
                                 or account in wb_pool.least_credit_spent(peers)):
                             return account
                 self.affinity.unbind(session_key)
-        account = self.pick(realm=realm, exclude=exclude, model=model)
+        account = self.pick(realm=realm, exclude=exclude, model=model, allow_refresh=allow_refresh)
         if account and session_key and not fair_free:
             self.affinity.bind(session_key, account.uid)
         return account
@@ -2205,15 +2260,34 @@ class AccountPool(object):
         tier = self._cost_tier(account, model, self.pool_cfg, now)
         return tier == 0 or (tier == 1 and account.model_is_free(model))
 
+    def reserve_for_session(self, payload, realm=None, session_key=None, exclude=None, model=None, estimate=None):
+        """Selection and reservation are one operation for concurrent arrivals."""
+        estimated = estimate or wb_fairness.estimate(payload, realm)
+        excluded = set(exclude or ())
+        with self._lock:
+            for _ in range(len(self.accounts) + 1):
+                account = self.pick_for_session(realm=realm, session_key=session_key,
+                                                exclude=excluded, model=model, allow_refresh=False)
+                if account is None:
+                    return None, None
+                reservation = dict(estimated)
+                reservation["credit"] = wb_fairness.account_credit(reservation, account.realm, account.uid)
+                reservation.update(id=uuid.uuid4().hex,
+                                   kind="free" if self._model_free_for(account, model, time.time()) else "paid")
+                if account.acquire(reservation):
+                    return account, reservation["id"]
+                excluded.add(account.uid)
+            return None, None
+
     def _pick_fair_free(self, candidates, realm, model):
         # Free models share one token budget per account and realm. Rotate
         # only among the least-loaded accounts; advance atomically so equal
         # loads do not keep assigning concurrent arrivals to the same UID.
         with self._lock:
             key = (realm or "all", "free")
-            minimum = min(wb_pool.free_tokens_today(a) for a in candidates)
-            candidates = [a for a in candidates
-                          if wb_pool.free_tokens_today(a) == minimum]
+            loads = [(a, wb_pool.free_tokens_today(a)) for a in candidates]
+            minimum = min(value for a, value in loads)
+            candidates = [a for a, value in loads if value == minimum]
             flight = min(a.in_flight for a in candidates)
             candidates = [a for a in candidates if a.in_flight == flight]
             last_uid = self._free_cursors.get(key)
@@ -2224,7 +2298,7 @@ class AccountPool(object):
             self._free_cursors[key] = account.uid
             return account
 
-    def pick(self, realm=None, exclude=None, model=None):
+    def pick(self, realm=None, exclude=None, model=None, allow_refresh=True):
         """Pick the next account for model.
 
         Weighted mode (default, panel parity): healthy candidates are ranked
@@ -2256,7 +2330,7 @@ class AccountPool(object):
         for priority in sorted(tiers):
             tier = tiers[priority]
             if cfg.get("weighted_pick", True):
-                candidates = [a for a in tier if a.ready(model=model)]
+                candidates = [a for a in tier if a.ready(model=model, allow_refresh=allow_refresh)]
                 if not candidates:
                     continue
                 catalogue_free = [a for a in candidates
@@ -2282,7 +2356,7 @@ class AccountPool(object):
                             candidates = wb_pool.least_credit_spent(candidates)
                         account = wb_pool.choose(candidates, cfg, now=now)
             else:
-                candidates = [a for a in tier if a.ready(model=model)]
+                candidates = [a for a in tier if a.ready(model=model, allow_refresh=allow_refresh)]
                 if not candidates:
                     continue
                 free_candidates = [a for a in candidates
@@ -2298,7 +2372,7 @@ class AccountPool(object):
                     for offset in range(total):
                         index = (start + offset) % total
                         cand = snapshot[index]
-                        if cand.uid in tier_uids and cand.ready(model=model):
+                        if cand.uid in tier_uids and cand.ready(model=model, allow_refresh=allow_refresh):
                             account = cand
                             with self._lock:
                                 self._cursor = (index + 1) % total

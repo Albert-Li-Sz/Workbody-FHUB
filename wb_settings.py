@@ -88,15 +88,14 @@ def load(accounts_dir):
             wb_storage.restrict_file(path)
             wb_storage.restrict_directory(accounts_dir)
         except FileNotFoundError:
-            if key not in _settings_last_good:
+            if key not in _settings_last_good and not wb_storage.has_document(path):
                 return {}
         hit = _settings_cache.get(key)
         if (hit and now - hit[0] < SETTINGS_CACHE_TTL
                 and hit[1] == stamp):
             return copy.deepcopy(hit[2])
         try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
+            data = wb_storage.read_private_json(path)
             if not isinstance(data, dict):
                 raise ValueError("settings must be a JSON object")
             if "api_keys" in data and (not isinstance(data["api_keys"], list)

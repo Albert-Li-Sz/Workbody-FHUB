@@ -214,9 +214,6 @@ a:hover{text-decoration:underline}
   border-color:var(--accent);background:var(--panel);
   box-shadow:0 0 0 1px var(--accent), var(--shadow-md);
 }
-.realm-card.active#tabCn{
-  border-color:#ef4444;box-shadow:0 0 0 1px #ef4444, var(--shadow-md);
-}
 .realm-card.gateway-ctrl{
   background:var(--panel2);cursor:default;border-color:var(--line);
 }
@@ -477,6 +474,165 @@ a:hover{text-decoration:underline}
   .main-nav-btn{flex:0 0 auto;min-width:58px;padding:8px 8px;font-size:12px}
 }
 </style>
+<style>.skip-link{position:fixed;left:240px;top:-60px;z-index:700;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:6px}.skip-link:focus{top:10px}@media(max-width:960px){.skip-link{left:16px}}</style>
+<style id="workspace-design">
+/* Workbody workspace: neutral surfaces, restrained typography, explicit hierarchy. */
+:root{
+ --bg:#fff;--panel:#fff;--panel2:#fafafa;--panel3:#f0f0f0;
+ --line:#e7e7e7;--line-hover:#c9c9c9;--fg:#171717;--dim:#737373;--dim-light:#a3a3a3;
+ --accent:#171717;--accent-hover:#333;--accent-soft:rgba(23,23,23,.045);--on-accent:#fff;
+ --accent2:#23834d;--accent2-soft:#edf7f0;--warn:#a66c16;--warn-soft:#fff8eb;
+ --think:#666;--think-soft:#f4f4f5;--bad:#c03939;--bad-soft:#fff1f1;
+ --shadow-sm:none;--shadow:none;--shadow-md:0 6px 24px rgba(0,0,0,.07);--header-bg:var(--panel);
+ --sidebar-width:224px;
+}
+[data-theme="dark"]{
+ --bg:#111;--panel:#171717;--panel2:#1c1c1c;--panel3:#262626;
+ --line:#303030;--line-hover:#525252;--fg:#f5f5f5;--dim:#a3a3a3;--dim-light:#737373;
+ --accent:#fafafa;--accent-hover:#e5e5e5;--accent-soft:rgba(250,250,250,.06);--on-accent:#171717;
+ --accent2:#78c999;--accent2-soft:rgba(77,174,116,.12);--warn:#d9b36b;--warn-soft:rgba(217,179,107,.09);
+ --think:#b5b5b5;--think-soft:#262626;--bad:#f08c8c;--bad-soft:rgba(240,140,140,.09);
+ --shadow-md:0 6px 24px rgba(0,0,0,.24);
+}
+body{font-size:13px;line-height:1.6;letter-spacing:0;background:var(--bg)}
+button,input,select,textarea{font-family:inherit}
+button{min-height:34px;background:var(--accent);border-color:var(--accent);color:var(--on-accent);border-radius:6px;font-weight:550;box-shadow:none;padding:7px 13px;transition:background .15s,border-color .15s}
+button.sec{background:var(--panel);color:var(--fg)}
+button.mini{min-height:27px;border-radius:5px;padding:3px 8px}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--fg);outline-offset:3px}
+button:disabled{opacity:.5}
+input:not([type="checkbox"]):not([type="radio"]),select,textarea{border-radius:6px!important;background:var(--panel)!important;border-color:var(--line)!important;max-width:100%;min-height:34px}
+input[type="checkbox"],input[type="radio"]{accent-color:var(--accent)}
+a{color:var(--fg)}
+.workspace-sidebar{position:fixed;inset:0 auto 0 0;width:var(--sidebar-width);z-index:30;display:flex;flex-direction:column;padding:25px 14px 18px;border-right:1px solid var(--line);background:var(--panel2);overflow-y:auto}
+.workspace-brand{display:flex;align-items:center;gap:10px;padding:0 10px;text-decoration:none!important;color:var(--fg);margin-bottom:30px}
+.brand-mark{width:32px;height:32px;display:grid;place-items:center;border:1px solid var(--fg);border-radius:8px;flex:none;background:var(--fg);color:var(--bg)}
+.brand-mark svg{width:20px;height:20px}
+.brand-copy strong{display:block;font-size:14px;letter-spacing:-.3px;font-weight:650}
+.brand-copy small{font-size:11px;color:var(--dim)}
+.workspace-label{padding:0 12px;margin-bottom:10px;font-size:11px;font-weight:550;color:var(--dim)}
+.main-nav{display:flex;flex-direction:column;align-items:stretch;gap:4px;background:none;border:0;padding:0;border-radius:0;width:100%;overflow:visible}
+.main-nav-btn{flex:none;justify-content:flex-start;min-height:39px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid transparent;color:var(--dim);gap:11px;font-size:13px;background:transparent;box-shadow:none;font-weight:500}
+.main-nav-btn svg{width:17px;height:17px;flex:none;stroke-width:1.7}
+.main-nav-btn.active{color:var(--fg);background:var(--panel3);border-color:transparent;box-shadow:none;font-weight:600}
+.main-nav-btn:hover{background:var(--panel3);border-color:transparent;color:var(--fg)}
+.workspace-sidebar-footer{margin-top:auto;padding:25px 10px 0;font-size:11px;color:var(--dim)}
+.sidebar-status{display:flex;align-items:center;gap:4px;margin-bottom:8px}
+.sidebar-status .dot{width:6px;height:6px;box-shadow:none;margin-right:5px}
+.sidebar-footer-row{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding-top:12px}
+.sidebar-footer-row .gh-link{width:28px;height:28px;border-radius:5px;border:0}
+.workspace-shell{margin-left:var(--sidebar-width);min-width:0}
+header.workspace-header{position:sticky;top:0;min-height:66px;display:flex;flex-wrap:nowrap;align-items:center;justify-content:space-between;padding:12px 32px;border-bottom:1px solid var(--line);background:var(--panel);backdrop-filter:none;box-shadow:none;gap:14px;z-index:20}
+.workspace-breadcrumb{display:flex;align-items:center;gap:10px;white-space:nowrap;color:var(--dim);font-size:12px}
+.workspace-breadcrumb b{color:var(--fg);font-weight:550}
+.workspace-breadcrumb .slash{color:var(--dim-light)}
+.header-right{display:flex;align-items:center;gap:10px;flex-wrap:nowrap;margin-left:auto}
+.meta{font-size:11px;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.5}
+.theme-btn{min-height:30px;width:30px;height:30px;flex:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;color:var(--dim)}
+.theme-dropdown{border-radius:8px;box-shadow:var(--shadow-md);background:var(--panel);padding:5px}
+.theme-option{background:transparent;color:var(--fg);border:0}
+.mobile-menu-button,.sidebar-close{display:none}
+.workspace-scrim{display:none}
+.live-indicator{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--dim);white-space:nowrap}
+.live-indicator i{width:6px;height:6px;border-radius:50%;background:var(--dim-light)}
+.live-indicator[data-state="live"] i{background:var(--accent2)}
+.live-indicator[data-state="retry"] i{background:var(--warn)}
+main{max-width:1536px;padding:30px 32px 60px;margin:0 auto;min-width:0}
+.page-hero{padding:0;margin:0 0 25px;gap:20px;align-items:flex-start;border:0;border-radius:0;background:none;box-shadow:none}
+.page-hero .eyebrow{display:none}
+.page-hero h2{font-size:25px;line-height:1.3;letter-spacing:-.6px;color:var(--fg);font-weight:650;margin:0 0 8px}
+.page-hero p{max-width:680px;font-size:13px;color:var(--dim);line-height:1.7;margin:0}
+.page-actions{padding-top:4px;gap:8px;flex-shrink:0}
+.cards,#cards{gap:12px;margin-bottom:24px}
+.card,#cards .card{border-radius:8px;padding:19px 20px;background:var(--panel);box-shadow:none;border:1px solid var(--line)}
+.card .k,#cards .card .k{font-weight:500;font-size:12px;margin-bottom:9px}
+.card .v,#cards .card .v{font-weight:600;font-size:28px;letter-spacing:-.8px;color:var(--fg)}
+.card .s,#cards .card .s{margin-top:8px;font-size:11px}
+.card.err .v{color:var(--bad)}
+.card.think .v,.card.accent .v,.card.accent2 .v{color:var(--fg)}
+section{padding:20px;border-radius:8px;margin-bottom:22px;border:1px solid var(--line);box-shadow:none;min-width:0}
+section h2{font-size:14px;color:var(--fg);font-weight:600;letter-spacing:0;text-transform:none;margin-bottom:16px}
+section h2 em{font-size:12px;color:var(--dim);font-weight:400}
+.table-wrap{border-radius:6px}
+table{font-size:12px}
+th{background:var(--panel2);font-size:11px;font-weight:550;color:var(--dim);padding:10px 12px}
+td{padding:13px 12px;line-height:1.6}
+th:first-child,th:last-child{border-radius:0}
+tbody tr:hover{background:var(--panel2)}
+.badge{border-radius:5px;font-weight:500;padding:2px 6px;font-size:10px}
+.badge.s{color:var(--dim);background:var(--panel2);border-color:var(--line)}
+.badge.ok{color:var(--accent2);background:var(--accent2-soft);border-color:transparent}
+.badge.warn,.cool-pill{color:var(--warn);background:var(--warn-soft);border-color:transparent;border-radius:5px}
+.badge.bad{color:var(--bad);background:var(--bad-soft);border-color:transparent}
+.badge.off{color:var(--dim);background:var(--panel3);border-color:transparent}
+.realm-switch-group,.id-btn-group{border-radius:6px;background:var(--panel2);padding:2px;gap:2px}
+.realm-pill{min-height:29px;border-radius:4px;font-size:11px;padding:5px 13px}
+.realm-pill.active,.id-btn.active{background:var(--panel);color:var(--fg);box-shadow:0 0 0 1px var(--line)}
+.key-card{border-radius:8px;padding:19px 20px;box-shadow:none;margin-bottom:12px}
+.key-card:hover{box-shadow:none}
+.quick-grid{display:none}
+.toolbar{gap:8px;margin-bottom:16px;align-items:center}
+.hint{line-height:1.65;font-size:11px}
+.empty{padding:36px 20px;color:var(--dim);font-size:12px}
+.modal-mask{background:rgba(0,0,0,.36);backdrop-filter:none}
+.modal{border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,.14)}
+.modal-hd{padding:18px 22px}
+.modal-hd h2{font-size:16px;font-weight:600}
+.modal-bd{padding:22px}
+.modal-ft{padding:16px 22px;background:var(--panel2)}
+.settings-grid{gap:18px}
+.infrastructure-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.infrastructure-item{background:var(--panel2);border:1px solid var(--line);padding:14px 16px;border-radius:6px}
+.infrastructure-item .k{font-size:11px;color:var(--dim)}
+.infrastructure-item .v{font-size:15px;font-weight:600;color:var(--fg);margin-top:6px}
+.infrastructure-item .s{font-size:11px;color:var(--dim);margin-top:5px}
+#panelGate{background:var(--panel2)!important}
+#panelGate>.panel-login-card{width:min(400px,100%);border:1px solid var(--line);border-radius:10px;padding:30px;box-shadow:none;background:var(--panel)}
+.panel-login-brand{display:flex;align-items:center;gap:10px;margin-bottom:28px;font-size:14px;font-weight:600}
+.panel-login-card .login-heading{font-size:23px;letter-spacing:-.5px;font-weight:600;margin-bottom:6px}
+#panelPwdInput{margin-top:4px;min-height:40px}
+footer{font-size:11px;text-align:left;margin-top:28px;border-top:1px solid var(--line);padding-top:16px;color:var(--dim)}
+@media(min-width:1500px){main{padding:36px 44px 64px}header.workspace-header{padding-right:44px;padding-left:44px}}
+@media(max-width:1120px){:root{--sidebar-width:200px}header.workspace-header{padding:12px 24px}main{padding:25px 24px 48px}.meta{display:none}.page-hero{flex-direction:column;gap:14px}.page-actions{padding:0}td{padding:11px 10px}}
+@media(max-width:900px){
+ :root{--sidebar-width:224px}.workspace-sidebar{transform:translateX(-100%);transition:transform .18s ease;z-index:42}
+ .workspace-shell{margin-left:0}.sidebar-open .workspace-sidebar{transform:translateX(0)}
+ .sidebar-open .workspace-scrim{display:block;position:fixed;inset:0;z-index:41;width:100%;height:100%;padding:0;border:0;border-radius:0;background:rgba(0,0,0,.35)}
+ body.sidebar-open{overflow:hidden}.mobile-menu-button,.sidebar-close{display:inline-grid;place-items:center;padding:0;width:32px;height:32px;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;flex:none}
+ .mobile-menu-button svg,.sidebar-close svg{width:17px;height:17px}.sidebar-close{position:absolute;top:20px;right:12px;width:27px;height:27px;min-height:27px;border:0;background:transparent}
+ .workspace-brand{padding-left:6px}.brand-copy strong{font-size:13px}.brand-copy small{font-size:10px}
+ header.workspace-header{min-height:58px;padding:10px 18px;gap:12px}.header-right{gap:7px}.workspace-breadcrumb{font-size:11px;gap:8px}
+ main{padding:24px 18px 46px}.main-nav-btn{justify-content:flex-start;flex:none;padding:9px 12px;min-height:40px;font-size:13px}
+ .infrastructure-grid{grid-template-columns:1fr}.page-hero h2{font-size:23px}.page-hero p{font-size:12px}
+}
+@media(max-width:520px){
+ header.workspace-header{padding:10px 13px}.workspace-breadcrumb .breadcrumb-parent,.workspace-breadcrumb .slash{display:none}
+ .live-indicator span{display:none}.live-indicator{width:12px;justify-content:center}.header-right{gap:7px}
+ main{padding:22px 13px 40px}section{padding:16px 14px;border-radius:7px;margin-bottom:18px}.page-actions{width:100%;flex-wrap:wrap}
+ .card,#cards .card{padding:14px;border-radius:7px}.card .v,#cards .card .v{font-size:23px}.cards,#cards{gap:9px;grid-template-columns:repeat(2,minmax(0,1fr))}
+ .modal-mask{padding:12px}.modal-bd{padding:18px}.modal-hd,.modal-ft{padding:16px 18px}.modal-ft{flex-wrap:wrap}
+ .page-hero{margin-bottom:22px}.toolbar button{min-height:34px}.key-card{padding:16px 14px}.table-wrap{max-width:100%}
+}
+
+.realm-card.gateway-ctrl{background:var(--panel2);border-color:var(--line);box-shadow:none}
+.realm-card.active{border-color:var(--fg);box-shadow:none;background:var(--panel2)}
+.realm-card .badge{color:var(--dim);background:var(--panel3);border-color:transparent}
+#tabIntlCredits,#tabCnCredits{color:var(--fg)!important}
+.realm-badge-intl,.realm-badge-cn,[data-theme="dark"] .realm-badge-intl,[data-theme="dark"] .realm-badge-cn{color:var(--dim);background:var(--panel3);border-color:var(--line);border-radius:5px}
+.toggle-realm-btn{background:var(--panel)!important;border:1px solid var(--line)!important;color:var(--fg)!important;box-shadow:none!important}
+.scheduler-disclosure{margin:-6px 0 22px;color:var(--dim);font-size:11px}
+.scheduler-disclosure summary{cursor:pointer;width:fit-content;padding:3px 1px}
+.scheduler-disclosure #schedulerDetails{margin:10px 0 0!important;background:var(--panel2)!important;border-radius:6px!important}
+.advanced-setting{margin-bottom:10px;border:1px solid var(--line);border-radius:7px;padding:14px 16px}
+.advanced-setting summary{display:flex;align-items:center;justify-content:space-between;gap:14px;cursor:pointer;list-style:none}
+.advanced-setting summary::-webkit-details-marker{display:none}
+.advanced-setting summary::after{content:'+';font-size:18px;color:var(--dim)}
+.advanced-setting[open] summary::after{content:'−'}
+.advanced-setting h3{font-size:13px;margin:0;font-weight:600}
+.advanced-setting-desc{font-size:12px;color:var(--dim);line-height:1.5;margin-top:3px}
+.advanced-setting-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-top:20px}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}}
+</style>
 <script>
 /* Runs before <body> is parsed, so the page the user last had is the
    first one painted. Kept inline and dependency-free on purpose: an
@@ -612,27 +768,37 @@ a:hover{text-decoration:underline}
 </script>
 </head>
 <body>
-<header>
-  <div class="header-left" style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
-    <h1><span class="dot" id="statusDot"></span>Workbody-FHUB 网关看板 <span id="headerVersion">v__WORKBODY_VERSION__</span></h1>
-    <nav class="main-nav">
-      <button class="main-nav-btn active" id="btnNavGateway" data-action="switchMainTab" data-on="click" data-arg="gateway" title="总览">总览</button>
-      <button class="main-nav-btn" id="btnNavAccounts" data-action="switchMainTab" data-on="click" data-arg="accounts" title="账号池与运维">账号</button>
-      <button class="main-nav-btn" id="btnNavTasks" data-action="switchMainTab" data-on="click" data-arg="tasks" title="任务中心">任务</button>
-      <button class="main-nav-btn" id="btnNavAnalytics" data-action="switchMainTab" data-on="click" data-arg="analytics" title="用量与成本">用量</button>
-      <button class="main-nav-btn" id="btnNavModels" data-action="switchMainTab" data-on="click" data-arg="models" title="模型与档位">模型</button>
-      <button class="main-nav-btn" id="btnNavLogs" data-action="switchMainTab" data-on="click" data-arg="logs" title="运行日志">日志</button>
-      <button class="main-nav-btn" id="btnNavSettings" data-action="switchMainTab" data-on="click" data-arg="settings" title="设置">设置</button>
+<a class="skip-link" href="#workspaceMain">跳到主要内容</a>
+<aside id="workspaceMenu" class="workspace-sidebar" aria-label="工作区">
+ <a class="workspace-brand" href="?tab=gateway"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 5h6v6H4zM14 5h6v6h-6zM4 15h6v5H4zM14 15h6v5h-6z"/></svg></span><span class="brand-copy"><strong>Workbody-FHUB</strong><small>网关控制台</small></span></a>
+ <button class="sidebar-close" data-action="closeSidebar" data-on="click" aria-label="关闭导航"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
+ <div class="workspace-label">工作区</div>
+ <nav class="main-nav" aria-label="控制台导航">
+      <button class="main-nav-btn active" id="btnNavGateway" data-action="switchMainTab" data-on="click" data-arg="gateway" title="总览"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>总览</span></button>
+      <button class="main-nav-btn" id="btnNavAccounts" data-action="switchMainTab" data-on="click" data-arg="accounts" title="账号池与运维"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 21v-2a6 6 0 0 1 12 0v2M17 5a3 3 0 0 1 0 6M21 21v-2a6 6 0 0 0-4-5.7"/></svg><span>账号池</span></button>
+      <button class="main-nav-btn" id="btnNavTasks" data-action="switchMainTab" data-on="click" data-arg="tasks" title="任务中心"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="17" rx="2"/><path d="M9 4V2h6v2M8 10l2 2 4-4M8 16h8"/></svg><span>任务中心</span></button>
+      <button class="main-nav-btn" id="btnNavAnalytics" data-action="switchMainTab" data-on="click" data-arg="analytics" title="用量与成本"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3v17h17M8 16v-5M13 16V7M18 16V4"/></svg><span>用量与成本</span></button>
+      <button class="main-nav-btn" id="btnNavModels" data-action="switchMainTab" data-on="click" data-arg="models" title="模型与档位"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><span>模型库</span></button>
+      <button class="main-nav-btn" id="btnNavLogs" data-action="switchMainTab" data-on="click" data-arg="logs" title="运行日志"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg><span>请求与日志</span></button>
+      <button class="main-nav-btn" id="btnNavSettings" data-action="switchMainTab" data-on="click" data-arg="settings" title="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>设置</span></button>
     </nav>
-    <a class="gh-link" href="https://github.com/Albert-Li-Sz/Workbody-FHUB" target="_blank" rel="noopener noreferrer"
+ <div class="workspace-sidebar-footer">
+  <div class="sidebar-status"><span class="dot" id="statusDot"></span>网关服务</div>
+  <div class="sidebar-footer-row"><span id="headerVersion">v__WORKBODY_VERSION__</span><a class="gh-link" href="https://github.com/Albert-Li-Sz/Workbody-FHUB" target="_blank" rel="noopener noreferrer"
        title="查看 GitHub 项目仓库" aria-label="GitHub 项目仓库">
       <svg viewBox="0 0 16 16" aria-hidden="true">
         <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
       </svg>
-    </a>
-  </div>
+    </a></div>
+ </div>
+</aside>
+<button class="workspace-scrim" data-action="closeSidebar" data-on="click" tabindex="-1" aria-label="关闭导航"></button>
+<div class="workspace-shell">
+<header class="workspace-header">
+ <button id="mobileMenuButton" class="mobile-menu-button" data-action="toggleSidebar" data-on="click" aria-label="打开导航" aria-controls="workspaceMenu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+ <div class="workspace-breadcrumb"><span class="breadcrumb-parent">控制台</span><span class="slash">/</span><b id="workspaceCurrentPage">总览</b></div>
   <div class="header-right">
-    <div class="meta" id="meta"></div>
+    <div class="meta" id="meta"></div><div id="liveIndicator" class="live-indicator" data-state="waiting" role="status"><i></i><span id="liveStatusText">等待连接</span></div>
     <button type="button" class="theme-btn" id="langToggleBtn" data-action="toggleLanguage" data-on="click" title="切换简体/繁體">简</button>
     <div class="theme-dropdown-wrap" id="themeDropdownWrap">
       <button type="button" class="theme-btn" id="themeToggleBtn" data-action="toggleThemeMenu" data-on="click" title="颜色主题" aria-label="切换颜色主题" aria-haspopup="true" aria-expanded="false">
@@ -669,10 +835,9 @@ a:hover{text-decoration:underline}
 </header>
 <div id="panelGate" style="position:fixed;inset:0;z-index:600;display:none;
      align-items:center;justify-content:center;padding:20px;background:var(--bg)">
-  <div style="width:min(380px,100%);background:var(--panel);border:1px solid var(--line);
-              border-radius:14px;padding:26px 24px;box-shadow:0 10px 30px rgba(15,23,42,.12)">
-    <div style="font-size:16px;font-weight:700;margin-bottom:6px">Workbody-FHUB 网关看板</div>
-    <div style="font-size:12px;color:var(--dim);margin-bottom:18px">请输入面板访问密码</div>
+  <div class="panel-login-card">
+    <div class="panel-login-brand"><span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 5h6v6H4zM14 5h6v6h-6zM4 15h6v5H4zM14 15h6v5h-6z"/></svg></span>Workbody-FHUB</div><div class="login-heading">欢迎回来</div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:18px">登录控制台，管理账号与模型。</div>
     <input id="panelPwdInput" type="password" placeholder="面板密码" autocomplete="current-password"
             data-action="submitPanelLoginOnEnter" data-on="keydown"
            style="width:100%;background:var(--panel2);border:1px solid var(--line);
@@ -684,13 +849,13 @@ a:hover{text-decoration:underline}
     </div>
   </div>
 </div>
-<main>
+<main id="workspaceMain" tabindex="-1">
   <div id="pageGateway" class="main-page">
   <div class="page-hero">
     <div>
       <div class="eyebrow">HUB 控制台</div>
       <h2>总览</h2>
-      <p>出口状态、后台调度器、实时指标与最近请求。账号运维、任务中心、模型与设置都已拆成独立分页。</p>
+      <p>查看网关状态、今日用量与最近请求。</p>
     </div>
     <div class="page-actions">
       <button class="sec" data-action="triggerSchedulerNow" data-on="click">立即巡检保活</button>
@@ -762,11 +927,13 @@ a:hover{text-decoration:underline}
     </div>
 
   </div>
+  <div class="cards" id="cards"></div>
+
   <!-- 后台定时调度器状态栏 -->
   <div id="schedulerBar" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 14px;margin-bottom:16px;font-size:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
     <div style="display:flex;align-items:center;gap:8px">
       <span class="dot" id="schedDot"></span>
-      <span>后台定时调度器: <b id="schedStatusText">运行中</b></span>
+      <span>定时任务：<b id="schedStatusText">运行中</b></span>
       <span style="color:var(--dim);font-size:11px" id="schedTimes"></span>
     </div>
     <div style="display:flex;gap:8px">
@@ -774,9 +941,8 @@ a:hover{text-decoration:underline}
       <button class="sec mini" id="btnToggleSched"  data-action="toggleScheduler" data-on="click">暂停调度</button>
     </div>
   </div>
-  <div id="schedulerDetails" style="display:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 14px;margin:-8px 0 16px;font-size:12px;color:var(--dim);line-height:1.7"></div>
+  <details class="scheduler-disclosure"><summary>排程与最近任务记录</summary><div id="schedulerDetails" style="display:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 14px;margin:-8px 0 16px;font-size:12px;color:var(--dim);line-height:1.7"></div></details>
 
-  <div class="cards" id="cards"></div>
 
 
   <!-- 融合后的：模型性能与用量矩阵 -->
@@ -1159,7 +1325,7 @@ a:hover{text-decoration:underline}
       <div>
         <div class="eyebrow">设置</div>
         <h2>网关设置</h2>
-        <p>存取、出口、额度、计价、行为工具与进阶治理。每一区块独立保存，排程修改会立即重载调度器。</p>
+        <p>管理访问权限、账号额度与网关行为。每个区块独立保存。</p>
       </div>
       <div class="page-actions">
         <button class="sec" data-action="loadSettings" data-on="click" data-arg="1">重新读取</button>
@@ -1171,6 +1337,7 @@ a:hover{text-decoration:underline}
       <a href="#settings-slots">代理槽</a>
       <a href="#settings-quota">额度治理</a>
       <a href="#settings-pricing">计价</a>
+      <a href="#settings-infrastructure">存储与连接</a>
       <a href="#settings-behavior">行为与工具</a>
       <a href="#settings-advanced">进阶</a>
       <a href="#settings-runtime">运行信息</a>
@@ -1254,7 +1421,7 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">每日 Token 限额 <em id="setDailyTokenState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              账号当日消耗的 token 达到该值后暂停接单，请求自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示不限（不限额）；与「保留积分」各自独立，任一命中都会暂停接单。
+              达到上限后自动切换账号，本地时间 0 点恢复。填 0 不限额；保留积分与每日限额任一触发都会暂停接单。
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -1273,7 +1440,7 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">每日积分限额 <em id="setDailyCreditState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              账号当日消费的积分达到该值后，只允许请求免费模型（目录中标记为 x0.00 的模型），需要花费积分的模型自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示关闭（默认）。
+              达到上限后仅接免费模型，付费请求自动切换账号。本地时间 0 点恢复，填 0 关闭。
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -1292,7 +1459,7 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">按模型每日 Token 限额 <em id="setModelDailyTokenState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              账号在单个模型上当日消耗的 token 达到该值后，该模型自动切到其他账号（同一账号的其他模型不受影响）；本地时间 0 点后自动恢复。填 0 表示不限（默认）。
+              单个模型达到上限后自动切换账号，其他模型继续可用。本地时间 0 点恢复，填 0 不限额。
             </div>
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
@@ -1311,10 +1478,10 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">定价刷新 <em id="setPricingState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              网关每隔这段时间去 OpenRouter 取一次价：每个模型每份不同的价格存成一条<b>定价策略</b>（内容相同就复用同一条，不重复写），并声明「现在生效的是哪一条」。每条请求按它发生时生效的那一条计价，所以之后调价不会改写之前的数字；请求只记它引用的是哪条策略，不内嵌整份价格。取价时还没有价的模型，用之后第一次取到的价补算并标 <code>*</code>。没人引用、又已经不作数的策略会被清掉（每个模型至少留一条，刚取到的那批不动）。取价间隔以<b>分钟</b>计，默认 5 分钟；填 0 表示不自动刷新（仍可用「立即取价」手动取一次）。<span id="setPricingMeta"></span>
+              从 OpenRouter 更新参考价格，历史请求沿用当时价格。缺失价格补算后标记 <code>*</code>。默认每 5 分钟刷新，填 0 改为手动。<span id="setPricingMeta"></span>
             </div>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              取价输入 = 内置目录 <b>∪</b> 网关实时目录里新增的模型，上游新上架的名字无需改代码就会进入下一轮取价；两次取价之间就被调用的新模型，第一笔请求即按内存里的目录<b>按需补价</b>。名字带渠道后缀（如 <code>-lkeap</code>）的模型默认按<b>变体后缀继承</b>向基准模型取价（要求唯一命中，命不中照旧显示未定价）；关掉开关即恢复「只有覆盖表与同名匹配才定价」。
+              新模型自动加入取价。开启「变体后缀继承」后，带渠道后缀的模型可使用唯一匹配的基准模型价格。
             </div>
             <div id="setPricingCurrent"></div>
             <div id="setPricingGaps"></div>
@@ -1334,6 +1501,13 @@ a:hover{text-decoration:underline}
             <button data-action="savePricingVariant" data-on="click">保存</button>
           </div>
         </div>
+      </section>
+
+
+      <section id="settings-infrastructure">
+        <h2>存储与连接</h2>
+        <div class="infrastructure-grid" id="infrastructureStats"><div class="empty">读取运行状态…</div></div>
+        <p class="hint">SQLite 保存账号、设置、用量与会话绑定。单实例无需 Redis；Redis 镜像可在下方按需配置。</p>
       </section>
 
       <section id="settings-behavior">
@@ -1362,7 +1536,7 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页渠道的会话（在 console/as 下建一个带 prompt 的会话）。实测只有网页端对话会被计入官方「每日活跃」，桌面身分的对话不计入。默认开启。
+              为国际版账号增加一次网页渠道对话，用于领取每日活跃奖励。默认开启。
             </div>
             <div style="font-size:12px;color:var(--warn);margin-top:4px">
               注意：网页渠道会真的起一次任务，消耗该账号少量积分，换来的是每日 30/50 积分活跃奖励。
@@ -1383,7 +1557,7 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">本地网络工具 (web_search / web_fetch) <em id="setLocalWebToolsState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              部分客户端（如 Codex App）会宣告 web_search / web_fetch 这类服务端工具，而上游没有对应的执行器：声明送上去，模型看到工具却没有执行器，客户端最后只拿到一句 unsupported call。开启后由本网关代跑——把声明换成自己的同名函数，在本地执行（搜索走 DuckDuckGo，抓页面抓这个 URL）再把结果喂回模型。默认关闭，关闭时声明原样透传，客户端自己声明的搜索工具照常拿到调用。
+              为客户端声明的 web_search / web_fetch 提供本地执行：通过 DuckDuckGo 搜索或读取网页，再将结果返回模型。默认关闭，关闭时原样转发工具声明。
             </div>
             <div style="font-size:12px;color:var(--warn);margin-top:4px">
               注意：开启后网关会主动出网抓取模型给出的 URL（校验 DNS 与每次重定向，只连接已验证的公网地址），且每轮代跑都会多跑一次上游、多消耗该账号的额度；国内网络下 DuckDuckGo 可能连不上，那时模型拿到的是错误文本。
@@ -1405,7 +1579,7 @@ a:hover{text-decoration:underline}
           <div>
             <h2 style="margin:0">进阶设置</h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              账号池治理、排程、Upstash 镜像、上游超时、系统提示词与日志归档。所有修改都会经过后端严格校验；排程修改会立即重载调度器。
+              展开需要调整的分类。排程修改保存后立即生效。
             </div>
           </div>
           <button class="sec" data-action="loadSettings" data-on="click" data-arg="1">重新读取</button>
@@ -1498,7 +1672,7 @@ a:hover{text-decoration:underline}
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
         <div>
           <h2 style="margin:0;font-size:16px;color:var(--fg)">请求归档</h2>
-          <div style="font-size:12px;color:var(--dim)">每请求一行 JSONL；默认保留 7 天 / 100MB（可在设置调整）。IP/UA 默认不记录。</div>
+          <div style="font-size:12px;color:var(--dim)">SQLite 请求历史；JSONL 导出默认保留 7 天 / 100MB。IP/UA 默认不记录。</div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:5px">
@@ -1545,8 +1719,9 @@ a:hover{text-decoration:underline}
     </section>
   </div>
 
-  <footer>每 5 秒自动刷新 · 数据来自本地反代 <span class="mono" id="logfile"></span></footer>
+  <footer>SSE 实时更新 · 数据保存在本地 <span class="mono" id="logfile"></span></footer>
 </main>
+</div><!-- workspace-shell -->
 
 <div class="modal-mask" id="loginModal">
   <div class="modal" role="dialog" aria-modal="true">
@@ -1945,7 +2120,6 @@ function updateUI(){
   const gwName = document.getElementById("activeGatewayName");
   if(gwName) {
     gwName.textContent = isIntlGw ? "国际版 (Global)" : "国内版 (China)";
-    gwName.style.color = isIntlGw ? "var(--accent)" : "#dc2626";
   }
   const ep = document.getElementById("activeEndpoint");
   if(ep) ep.textContent = isIntlGw ? "https://www.workbuddy.ai/v2" : "https://copilot.tencent.com/v2";
@@ -1953,13 +2127,6 @@ function updateUI(){
   const btnToggle = document.getElementById("btnToggleRealm");
   if(btnToggle) {
     btnToggle.textContent = isIntlGw ? "切换默认出口为【国内版】" : "切换默认出口为【国际版】";
-    btnToggle.style.borderColor = isIntlGw ? "#dc2626" : "var(--accent)";
-    btnToggle.style.color = isIntlGw ? "#dc2626" : "var(--accent)";
-  }
-  const cardGw = document.getElementById("cardGatewayCtrl");
-  if(cardGw){
-    cardGw.style.borderColor = isIntlGw ? "rgba(37,99,235,.28)" : "rgba(220,38,38,.28)";
-    cardGw.style.background = isIntlGw ? "rgba(37,99,235,.03)" : "rgba(220,38,38,.03)";
   }
 
   const btnCheckin = document.getElementById("btnCheckin");
@@ -2510,7 +2677,7 @@ async function loadSchedulerStatus(){
     const modeText = (window.VIEW_REALM === 'intl')
       ? (s.mode_intl || '账号 Token 自动保活与凭证常驻 (每日 22:00 集中巡检)')
       : (s.mode_cn || s.mode || '整点排程');
-    if(txt) txt.textContent = s.enabled ? ('运行中 · ' + modeText) : '已暂停';
+    if(txt){ txt.textContent = s.enabled ? '运行中' : '已暂停'; txt.title = modeText; }
     if(times) times.textContent = '上次: ' + (s.last_run_time || '-') + ' · 下次: ' + (s.next_run_time || '-');
     if(btn) btn.textContent = s.enabled ? '暂停调度' : '启用调度';
     if(btnTrig) btnTrig.textContent = (window.VIEW_REALM === 'intl') ? '立即保活刷新' : '立即巡检保活';
@@ -3002,6 +3169,9 @@ function modelLimitPills(a){
   ).join('') + '</div>';
 }
 
+let ACCOUNT_RENDER_DEFERRED = false;
+let ACCOUNT_CREDITS_FETCH_AT = 0;
+let ACCOUNT_CREDITS_FETCHING = false;
 const ACCOUNT_PRIORITY_DRAFTS = new Map();
 const ACCOUNT_PRIORITY_SAVING = new Set();
 
@@ -3037,6 +3207,7 @@ function accountRow(a){
   const flight = (a.inFlight || a.maxInFlight)
               ? '<div style="margin-top:3px"><span class="badge ' + (a.maxInFlight && a.inFlight >= a.maxInFlight ? 'warn' : 's') + ' mini">在途 ' + (a.inFlight || 0) + '/' + (a.maxInFlight || 0) + '</span></div>'
               : '';
+  const pending = (a.pendingFreeTokens || a.pendingCredits) ? '<div class="hint" title="在途消耗预估，仅用于公平调度，完成后按上游实际用量结算">预估在途 ' + fmtTokens(a.pendingFreeTokens || 0) + ' Token · ' + Number(a.pendingCredits || 0).toLocaleString('zh-CN', {maximumFractionDigits:2}) + ' 积分</div>' : '';
   const pills = coolPills(a);
   const limitPills = modelLimitPills(a);
   const err = a.lastError && !(pills && a.lastError === 'HTTP 429 (model throttled)')
@@ -3076,7 +3247,7 @@ function accountRow(a){
     + '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(a.uid.slice(0,8)) + ' · ' + esc(a.source) + ' · 到期 ' + esc(a.expiresIn || '?') + '</div>'
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
     + err + pills + limitPills + '</td>'
-    + '<td style="text-align:center" data-label="状态">' + state + flight + '</td>'
+    + '<td style="text-align:center" data-label="状态">' + state + flight + pending + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
     + '<td style="text-align:center" data-label="优先级">'
     + '<div class="account-priority" style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;justify-content:center">'
@@ -3119,7 +3290,11 @@ function renderAccounts(){
   const box = document.getElementById('accounts');
   const active = document.activeElement;
   if(active && typeof box.contains === 'function' && box.contains(active)
-      && active.dataset && active.dataset.action === 'editAccountPriority') return;
+      && active.dataset && active.dataset.action === 'editAccountPriority'){
+    ACCOUNT_RENDER_DEFERRED = true;
+    return;
+  }
+  ACCOUNT_RENDER_DEFERRED = false;
   const currentView = (window.VIEW_REALM || "intl");
   let list = (window.ACCOUNTS || []).filter(a => (a.realm || 'intl') === currentView);
   // Enabled accounts first, then scheduling priority; ties retain server order.
@@ -3158,7 +3333,7 @@ function renderAccounts(){
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
     + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额渠道。</span></div>'
-    + '<div class="legend"><span>优先级默认 100，数字越小越早调用，点击“保存优先级”后写入账号文件，重启保留；当前优先级没有可用账号时切到下一优先级。同一优先级内，免费模型优先选择今日免费 Token 总量少的账号，付费模型优先选择今日积分消耗少的账号；国内、国际分别均衡。</span></div>';
+    + '<div class="legend"><span>优先级默认 100，数字越小越早调用，点击“保存优先级”后写入 SQLite 并导出账号文件，重启保留；当前优先级没有可用账号时切到下一优先级。同一优先级内，免费模型比较今日免费 Token 加在途预估，付费模型比较今日积分消耗加在途预估；国内、国际分别均衡。</span></div>';
 }
 
 async function loadAccounts(){
@@ -3172,11 +3347,14 @@ async function loadAccounts(){
     renderAccounts();
     updateUI();
     // Auto-fetch credits once if not present
-    if(window.ACCOUNTS.length && window.ACCOUNTS.some(a => !a.credits)){
+    if(window.ACCOUNTS.length && window.ACCOUNTS.some(a => !a.credits)
+        && !ACCOUNT_CREDITS_FETCHING && Date.now() - ACCOUNT_CREDITS_FETCH_AT > 60000){
+      ACCOUNT_CREDITS_FETCHING = true;
+      ACCOUNT_CREDITS_FETCH_AT = Date.now();
       postJSON('/accounts/credits', {}).then(r => {
         window.ACCOUNTS = r.accounts || ACCOUNTS;
         renderAccounts();
-      }).catch(()=>{});
+      }).catch(()=>{}).finally(() => { ACCOUNT_CREDITS_FETCHING = false; });
     }
   }catch(e){ toast('账号加载失败: ' + e.message); }
 }
@@ -3242,6 +3420,11 @@ async function toggleAccount(uid, enable, btn){
     if(btn) btn.disabled = false;
   }
 }
+document.addEventListener('focusout', event => {
+  if(event.target.dataset && event.target.dataset.action === 'editAccountPriority'){
+    setTimeout(() => { if(ACCOUNT_RENDER_DEFERRED) renderAccounts(); }, 0);
+  }
+});
 function editAccountPriority(uid, el){
   ACCOUNT_PRIORITY_DRAFTS.set(uid, el.value);
   const account = (window.ACCOUNTS || []).find(a => a.uid === uid);
@@ -4209,9 +4392,7 @@ let REFRESH_RUNNING = false;
 let REFRESH_QUEUED = false;
 let REFRESH_GEN = 0;
 async function refresh(){
-  // 5 秒轮询。撞上正在飞的那一轮时**排队补跑**，而不是直接丢掉：早先的实现是
-  // `if(REFRESH_BUSY) return;`，切区域/切账号那一下如果正好撞上轮询在飞，这次
-  // 刷新就没了下文，只能干等下一个 5 秒周期——"点了要过几秒才变"就是这么来的。
+  // SSE 和页面切换可能同时请求更新；把重叠刷新合并为一次补跑。
   REFRESH_GEN++;
   if(REFRESH_RUNNING){ REFRESH_QUEUED = true; return; }
   REFRESH_RUNNING = true;
@@ -4261,7 +4442,7 @@ async function refreshInner(gen){
 
   // Sum credits across accounts
   let totRemain = 0, totSize = 0, hasCreds = false;
-  window.ACCOUNTS.forEach(a => {
+  window.ACCOUNTS.filter(a => (a.realm || 'intl') === window.VIEW_REALM).forEach(a => {
     if(a.credits){
       totRemain += (a.credits.remain || 0);
       totSize += (a.credits.size || 0);
@@ -4273,7 +4454,7 @@ async function refreshInner(gen){
   // the pool card must not count it as "正常". The same goes for an account
   // capped by the daily credit guard: it still serves free models, but a
   // paid request will rotate away from it.
-  const accts = window.ACCOUNTS || [];
+  const accts = (window.ACCOUNTS || []).filter(a => (a.realm || 'intl') === window.VIEW_REALM);
   const activeAccts = accts.filter(a => a.enabled && !a.reserveBlocked && !a.dailyLimitBlocked && !a.creditLimitReached).length;
   const totalAccts = accts.length;
   const parkedAccts = accts.filter(a => a.enabled && a.reserveBlocked).length;
@@ -4287,15 +4468,15 @@ async function refreshInner(gen){
   if(disabledAccts) poolNotes.push(disabledAccts + ' 个停用');
   const poolSub = poolNotes.length ? poolNotes.join(' · ') : '全部启用 · 状态健康';
   const pctRemain = totSize > 0 ? ((totRemain / totSize) * 100).toFixed(1) + '%' : '';
-  const subCredit = totSize > 0 ? ('总积分 ' + fmt(totSize) + ' · 剩余 ' + pctRemain) : '当前账号正常';
+  const subCredit = totSize > 0 ? ('总积分 ' + fmt(totSize) + ' · 剩余 ' + pctRemain) : '已查询账号余额';
   const succStr = perf.success_rate_pct != null ? pct(perf.success_rate_pct) : '100.0%';
-  const errSub = perf.errors ? (perf.errors + ' 次异常拦截') : '服务运行平稳';
+  const errSub = (perf.errors || 0) + ' 次失败 · ' + (perf.client_aborted || 0) + ' 次取消';
   // 等价花费的汇率随 /usage 载荷更新（后端定价快照里的值）。
   if(t.usd_cny) costUsdRate = Number(t.usd_cny) || costUsdRate;
 
   document.getElementById('cards').innerHTML =
     card('可用账号池', activeAccts + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + totalAccts + ' 正常</span>', poolSub, 'accent') +
-    card('积分余额', hasCreds ? (fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>') : '正常可用', subCredit, 'accent2') +
+    card('本出口积分余额', hasCreds ? (fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>') : '正常可用', subCredit, 'accent2') +
     card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '本出口累计消耗 ' + fmtTokens(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
     card('OpenRouter 价估算', fmtCost(t.cost_cny), '按 OpenRouter 模型价折算的等价 token 花费' + costToggleHtml(), 'warn') +
     card('请求成功率', succStr, errSub, perf.errors ? 'warn' : 'accent2');
@@ -4475,6 +4656,7 @@ function panelSessionLost(){
   // running means each tick fails, re-opens the gate and logs another 401
   // server-side, which is how a stale tab ends up filling the log.
   PANEL_READY = false;
+  stopPanelStream();
   PANEL_TIMERS.forEach(t => clearInterval(t));
   PANEL_TIMERS = [];
   if(typeof stopLogPolling === 'function') stopLogPolling();
@@ -4524,6 +4706,7 @@ async function submitPanelLogin(){
 async function panelLogout(){
   try { await postJSON('/panel/logout', {}); } catch(e) {}
   PANEL_READY = false;
+  stopPanelStream();
   PANEL_TIMERS.forEach(t => clearInterval(t));
   PANEL_TIMERS = [];
   PANEL_TOKEN = '';
@@ -4556,6 +4739,129 @@ async function bootPanel(){
 let PANEL_READY = false;
 let PANEL_TIMERS = [];
 
+const PANEL_STREAM = {controller:null, generation:0, reconnect:null, connected:false,
+  lastSeen:0, failures:0, pending:new Set(), timer:null, flushing:false};
+function panelStreamState(state, text){
+  const indicator = document.getElementById('liveIndicator');
+  const label = document.getElementById('liveStatusText');
+  if(indicator) indicator.dataset.state = state;
+  if(label) label.textContent = text;
+}
+function stopPanelStream(){
+  PANEL_STREAM.generation++;
+  if(PANEL_STREAM.controller) PANEL_STREAM.controller.abort();
+  PANEL_STREAM.controller = null;
+  PANEL_STREAM.connected = false;
+  if(PANEL_STREAM.reconnect) clearTimeout(PANEL_STREAM.reconnect);
+  if(PANEL_STREAM.timer) clearTimeout(PANEL_STREAM.timer);
+  PANEL_STREAM.reconnect = PANEL_STREAM.timer = null;
+  PANEL_STREAM.pending.clear();
+  panelStreamState('waiting', document.hidden ? '已暂停' : '等待连接');
+}
+function startPanelStream(){
+  stopPanelStream();
+  if(!PANEL_READY || document.hidden) return;
+  connectPanelStream(PANEL_STREAM.generation);
+}
+function queuePanelRefresh(topics){
+  if(!PANEL_READY || document.hidden) return;
+  for(const topic of topics || []){
+    if(['usage','accounts','tasks','scheduler','settings','logs','models'].includes(topic)) PANEL_STREAM.pending.add(topic);
+  }
+  if(!PANEL_STREAM.timer && !PANEL_STREAM.flushing){
+    PANEL_STREAM.timer = setTimeout(flushPanelRefresh, 750);
+  }
+}
+async function flushPanelRefresh(){
+  PANEL_STREAM.timer = null;
+  if(!PANEL_READY || document.hidden || PANEL_STREAM.flushing) return;
+  const topics = new Set(PANEL_STREAM.pending);
+  PANEL_STREAM.pending.clear();
+  PANEL_STREAM.flushing = true;
+  const jobs = [];
+  if(topics.has('usage')){
+    if(currentMainTab === 'gateway') jobs.push(refresh());
+    if(currentMainTab === 'analytics') jobs.push(loadAnalytics(), loadAnalyticsMatrix());
+    if(currentMainTab === 'logs') jobs.push(loadRequestArchive());
+  }
+  if(topics.has('accounts') && ['gateway','accounts','tasks'].includes(currentMainTab)) jobs.push(loadAccounts());
+  if(topics.has('tasks') && currentMainTab === 'tasks') jobs.push(loadGrowthTasks());
+  if(topics.has('scheduler') && ['gateway','tasks'].includes(currentMainTab)) jobs.push(loadSchedulerStatus());
+  if(topics.has('logs') && currentMainTab === 'logs' && logAutoRefresh) jobs.push(fetchNewLogs(false));
+  if(topics.has('models') && currentMainTab === 'models') jobs.push(loadModels());
+  // Settings editors retain unsaved inputs. Their own save handlers reload
+  // confirmed values; another admin's event must not erase a draft.
+  try { await Promise.allSettled(jobs); }
+  finally {
+    PANEL_STREAM.flushing = false;
+    if(PANEL_STREAM.pending.size) queuePanelRefresh([]);
+  }
+}
+function acceptPanelFrame(frame){
+  let event = 'message';
+  const data = [];
+  for(const line of frame.split('\n')){
+    if(line.startsWith('event:')) event = line.slice(6).trim();
+    else if(line.startsWith('data:')) data.push(line.slice(5).trimStart());
+  }
+  if(event === 'session_expired'){ panelSessionLost(); return; }
+  if(event === 'refresh' && data.length){
+    try { queuePanelRefresh(JSON.parse(data.join('\n')).topics); } catch(error){}
+  }
+}
+async function connectPanelStream(generation){
+  if(generation !== PANEL_STREAM.generation || !PANEL_READY || document.hidden) return;
+  const controller = new AbortController();
+  PANEL_STREAM.controller = controller;
+  let reader = null;
+  try {
+    // fetch can carry X-Panel-Token. EventSource cannot set this header;
+    // putting the token in a URL would expose it in history and access logs.
+    const response = await fetch('/api/events?realm=all', {headers:authHeaders(), cache:'no-store', signal:controller.signal});
+    if(response.status === 401 || response.status === 403){ panelSessionLost(); return; }
+    if(!response.ok || !response.body) throw new Error('dashboard stream unavailable');
+    if(generation !== PANEL_STREAM.generation) return;
+    reader = response.body.getReader();
+    PANEL_STREAM.connected = true;
+    PANEL_STREAM.lastSeen = Date.now();
+    panelStreamState('live','实时连接');
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while(generation === PANEL_STREAM.generation && PANEL_READY){
+      const result = await reader.read();
+      if(result.done) break;
+      PANEL_STREAM.lastSeen = Date.now();
+      PANEL_STREAM.failures = 0;
+      buffer = (buffer + decoder.decode(result.value, {stream:true})).replace(/\r\n/g,'\n');
+      if(buffer.length > 131072) throw new Error('dashboard stream frame too large');
+      let boundary;
+      while((boundary = buffer.indexOf('\n\n')) >= 0){
+        acceptPanelFrame(buffer.slice(0,boundary));
+        buffer = buffer.slice(boundary+2);
+      }
+    }
+  } catch(error) {
+    if(error.name === 'AbortError') return;
+  } finally {
+    if(reader){ try { await reader.cancel(); } catch(error){} }
+    if(generation === PANEL_STREAM.generation){
+      PANEL_STREAM.controller = null;
+      PANEL_STREAM.connected = false;
+      if(PANEL_READY && !document.hidden){
+        panelStreamState('retry','正在重连');
+        const delay = Math.min(30000, 3000 * Math.pow(2, Math.min(PANEL_STREAM.failures++, 4)));
+        PANEL_STREAM.reconnect = setTimeout(() => connectPanelStream(generation), delay);
+      }
+    }
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden) stopPanelStream();
+  else if(PANEL_READY){ startPanelStream(); queuePanelRefresh(['usage','accounts','tasks','scheduler','logs']); }
+});
+window.addEventListener('pagehide', stopPanelStream);
+
+
 async function startDashboard(){
   if(PANEL_READY) return;
   PANEL_READY = true;
@@ -4569,22 +4875,14 @@ async function startDashboard(){
   // The head script already resolved this before first paint; re-apply it
   // here so the data loaders for the active page actually run.
   switchMainTab(MAIN_TABS.includes(window.__MAIN_TAB__) ? window.__MAIN_TAB__ : 'gateway');
-  // Polling only starts after the panel is unlocked, so a locked browser
-  // never hammers the server with 401s.
   PANEL_TIMERS.forEach(t => clearInterval(t));
-  PANEL_TIMERS = [
-    setInterval(() => {
-      if(!PANEL_READY) return;
-      if(currentMainTab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
-    }, 5000),
-    setInterval(() => {
-      if(!PANEL_READY) return;
-      if(currentMainTab === 'tasks'){ loadGrowthTasks(); }
-    }, 15000),
-    setInterval(refresh, 5000),
-    setInterval(loadSchedulerStatus, 30000),
-    setInterval(loadAccounts, 15000),
-  ];
+  startPanelStream();
+  // Only disconnected or unsupported streams use the slow recovery poll.
+  PANEL_TIMERS = [setInterval(() => {
+    if(PANEL_READY && !document.hidden && (!PANEL_STREAM.connected || Date.now()-PANEL_STREAM.lastSeen > 45000)){
+      queuePanelRefresh(['usage','accounts','tasks','scheduler','logs']);
+    }
+  }, 30000)];
 }
 
 
@@ -4597,10 +4895,10 @@ async function startDashboard(){
 const ADVANCED_SETTING_GROUPS = [
   {
     id: 'pool', title: '账号池与流量治理',
-    desc: '加权选号、软冷却、熔断、降权、在途租约、成本探索、积分保底与粘性路由。',
+    desc: '公平调度、并发上限、限流恢复与会话绑定。',
     fields: [
-      {key:'weighted_pick', label:'加权选号', type:'bool', hint:'付费模型先选当日积分消耗最少的账号；并列时按剩余积分与闲置补偿加权，关闭时并列账号轮询。'},
-      {key:'free_fair_pick', label:'免费模型 Token 公平调度', type:'bool', hint:'国内、国际分别优先选当日免费 Token 总量最少的可用账号；合并全部免费模型用量，免费请求不绑定会话。'},
+      {key:'weighted_pick', label:'加权选号', type:'bool', hint:'同优先级付费账号先比较当日积分消耗与在途预估；并列时加权，关闭后并列轮询。'},
+      {key:'free_fair_pick', label:'免费模型 Token 公平调度', type:'bool', hint:'国内、国际分别比较当日免费 Token 与在途预估，优先使用量较少的同优先级账号。'},
       {key:'soft_rate', label:'软冷却基数（秒）', type:'number', min:0, step:'any', hint:'遇到上游软限流后的基础冷却秒数。'},
       {key:'soft_rate_max', label:'软冷却上限（秒）', type:'number', min:0, step:'any', hint:'指数退避的封顶秒数。'},
       {key:'breaker_threshold', label:'熔断阈值', type:'int', min:1, hint:'连续失败达到此数后进入熔断。'},
@@ -4612,7 +4910,7 @@ const ADVANCED_SETTING_GROUPS = [
       {key:'idle_weight_per_hour', label:'闲置补偿 / 小时', type:'number', min:0, step:'any', hint:'账号闲置越久权重越高。'},
       {key:'idle_weight_max', label:'闲置补偿上限', type:'number', min:0, step:'any', hint:'闲置补偿最大点数。'},
       {key:'max_in_flight', label:'单账号最大在途', type:'int', min:0, hint:'0 = 不限制；每账号同时处理的请求数。'},
-      {key:'max_in_flight_global', label:'国际版在途上限', type:'int', min:0, hint:'国际版区域总在途上限；0 = 回落单账号上限。'},
+      {key:'max_in_flight_global', label:'国际版账号在途上限', type:'int', min:0, hint:'每个国际版账号的在途上限；0 = 使用单账号通用上限。'},
       {key:'top_n', label:'候选短名单 Top N', type:'int', min:1, hint:'加权随机前先取前 N 名。'},
       {key:'cost_ledger_ttl', label:'成本账本 TTL（秒）', type:'int', min:60, hint:'实测成本层的有效秒数。'},
       {key:'cost_explore_interval', label:'成本探索窗口（秒）', type:'number', min:0, step:'any', hint:'免费层垄断时，每隔多久搭车探索未知号；0 = 关闭。'},
@@ -4646,11 +4944,11 @@ const ADVANCED_SETTING_GROUPS = [
   },
   {
     id: 'redis', title: 'Upstash Redis 镜像',
-    desc: '可选的会话粘性镜像；失败会降级回内存，不影响请求主路径。',
+    desc: '可选会话绑定镜像。单实例已有 SQLite 持久化，无需启用。',
     fields: [
       {key:'url', label:'Upstash REST URL', type:'text', placeholder:'https://...upstash.io', hint:'留空即关闭镜像。'},
-      {key:'token', label:'Upstash Token', type:'secret', placeholder:'token', hint:'只保存在本地 settings.json，不会回显明文。'},
-      {key:'affinity_mirror', label:'启用粘性镜像', type:'bool', hint:'重启后保留账号路由。'},
+      {key:'token', label:'Upstash Token', type:'secret', placeholder:'token', hint:'保存在本地 SQLite 与设置导出文件，不回显明文。'},
+      {key:'affinity_mirror', label:'启用粘性镜像', type:'bool', hint:'额外镜像会话绑定；不提供多副本公平调度。'},
       {key:'ttl_seconds', label:'镜像 TTL（秒）', type:'int', min:60, hint:'默认 604800 = 7 天。'},
     ]
   },
@@ -4666,7 +4964,7 @@ const ADVANCED_SETTING_GROUPS = [
   },
   {
     id: 'prompt', title: '系统提示词',
-    desc: 'PANEL parity 的 prompt.mode；默认 passthrough，不影响旧行为。',
+    desc: '选择透传、替换或追加系统提示词。',
     fields: [
       {key:'mode', label:'提示词模式', type:'select', options:['passthrough','custom','append'], default:'passthrough', hint:'passthrough = 透传；custom = 网关自有；append = 客户端后追加。'},
       {key:'file', label:'提示词文件路径', type:'text', placeholder:'留空 = 内置默认', hint:'custom/append 模式才读取。'},
@@ -4677,7 +4975,7 @@ const ADVANCED_SETTING_GROUPS = [
     desc: '来源记录是个人数据，默认关闭；轮转窗口与大小上限在这里配置。',
     fields: [
       {key:'record_client_info', label:'记录调用来源（IP/UA）', type:'bool', hint:'默认关闭。'},
-      {key:'retention_days', label:'保留天数', type:'int', min:1, hint:'默认 7 天。'},
+      {key:'retention_days', label:'JSONL 导出保留天数', type:'int', min:1, hint:'默认 7 天；SQLite 历史保留由部署配置单独控制。'},
       {key:'archive_max_mb', label:'归档大小上限（MB）', type:'int', min:1, hint:'默认 100MB。'},
     ]
   }
@@ -4695,6 +4993,7 @@ function renderAdvancedSettings(data){
   ADVANCED_SETTINGS_DATA = data || {};
   const box = document.getElementById('advancedSettingsCards');
   if(!box) return;
+  const openGroups = new Set(Array.from(box.querySelectorAll('details[data-adv-group]')).filter(function(el){ return el.open; }).map(function(el){ return el.dataset.advGroup; }));
   box.innerHTML = ADVANCED_SETTING_GROUPS.map(function(group){
     const cfg = (data && data[group.id]) || {};
     const fields = group.fields.map(function(field){
@@ -4722,7 +5021,7 @@ function renderAdvancedSettings(data){
       }
       return '<div style="min-width:190px">' + label + control + hint + '</div>';
     }).join('');
-    return '<section style="margin-bottom:16px"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:12px"><div><h2 style="margin:0;font-size:15px">' + group.title + '</h2><div style="font-size:12px;color:var(--dim);margin-top:4px">' + group.desc + '</div></div></div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px">' + fields + '</div><div style="margin-top:12px"><button data-action="saveAdvancedSettings" data-on="click" data-arg="' + group.id + '">保存' + group.title + '</button></div></section>';
+    return '<details class="advanced-setting" data-adv-group="' + group.id + '"' + (openGroups.has(group.id) ? ' open' : '') + '><summary><div><h3>' + group.title + '</h3><div class="advanced-setting-desc">' + group.desc + '</div></div></summary><div class="advanced-setting-controls">' + fields + '</div><div style="margin-top:16px"><button data-action="saveAdvancedSettings" data-on="click" data-arg="' + group.id + '">保存此分类</button></div></details>';
   }).join('');
 }
 function readAdvancedSettingsGroup(groupId){
@@ -4778,6 +5077,7 @@ async function saveAdvancedSettings(btn, ev, groupId){
 async function loadSettings(showToast){
   try {
     const data = await getJSON('/settings');
+    renderInfrastructure(data);
     const passwordHint = document.getElementById('panelPasswordOverrideHint');
     if(passwordHint) passwordHint.style.display = data.panel_password_startup_override ? 'block' : 'none';
     const snapshotHint = document.getElementById('settingsSnapshotHint');
@@ -5833,6 +6133,8 @@ async function autoAssignSlots(){
 
 function switchMainTab(tab){
   currentMainTab = tab;
+  updateWorkspace(tab);
+  closeSidebar();
   try {
     const url = new URL(window.location.href);
     url.searchParams.set('tab', tab);
@@ -5854,6 +6156,7 @@ function switchMainTab(tab){
     if(!btn || !page) return;
     const on = (name === tab);
     btn.classList.toggle('active', on);
+    if(on) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
     page.classList.toggle('active', on);
   });
   if(tab === 'accounts'){ loadAccounts(); loadProxySlots(); }
@@ -5883,12 +6186,8 @@ let logFetching = false;
 let logUserScrolledUp = false;
 
 function startLogPolling(){
-  if(logPollTimer) clearInterval(logPollTimer);
-  logPollTimer = setInterval(() => {
-    if(logAutoRefresh && currentMainTab === 'logs'){
-      fetchNewLogs(false);
-    }
-  }, 2000);
+  stopLogPolling();
+  if(logAutoRefresh && currentMainTab === 'logs') fetchNewLogs(false);
 }
 
 function stopLogPolling(){
@@ -6701,7 +7000,7 @@ function renderAnalytics(data){
   const totalReq = (currentSum.requests || 0) + (currentSum.errors || 0);
   const successPct = totalReq > 0 ? ((currentSum.requests / totalReq) * 100).toFixed(1) : '100.0';
   if(elReqCount) elReqCount.textContent = fmt(currentSum.requests || 0) + ' 次';
-  if(elReqSuccess) elReqSuccess.textContent = '成功率 ' + successPct + '% · 失败 ' + (currentSum.errors || 0);
+  if(elReqSuccess) elReqSuccess.textContent = '成功率 ' + successPct + '% · 失败 ' + (currentSum.errors || 0) + ' · 取消 ' + (currentSum.client_aborted || 0);
 
   // KPI 6: API 等价花费（跟随范围切换；货币切换按钮挂在这里）
   if(data.usd_cny) costUsdRate = Number(data.usd_cny) || costUsdRate;
@@ -6874,8 +7173,58 @@ function renderKeyTable(data){
  * 'unsafe-inline' script allowance. Elements carry
  *   data-action=<action> data-on=click|change|input|keydown|scroll
  * plus optional data-arg / data-uid / data-name payloads. */
+
+function updateWorkspace(tab){
+  const labels = {gateway:'总览',accounts:'账号池',tasks:'任务中心',analytics:'用量与成本',models:'模型库',logs:'请求与日志',settings:'设置'};
+  const title = document.getElementById('workspaceCurrentPage');
+  if(title) title.textContent = labels[tab] || labels.gateway;
+  document.title = (labels[tab] || labels.gateway) + ' · Workbody-FHUB';
+}
+function closeSidebar(){
+  document.body.classList.remove('sidebar-open');
+  const button = document.getElementById('mobileMenuButton');
+  if(button) button.setAttribute('aria-expanded','false');
+}
+function toggleSidebar(){
+  const opened = document.body.classList.toggle('sidebar-open');
+  const button = document.getElementById('mobileMenuButton');
+  if(button) button.setAttribute('aria-expanded', String(opened));
+  if(opened){
+    const first = document.querySelector('#workspaceMenu .main-nav-btn.active');
+    if(first) first.focus();
+  }
+}
+document.addEventListener('keydown', event => {
+  if(!document.body.classList.contains('sidebar-open')) return;
+  if(event.key === 'Escape'){
+    closeSidebar();
+    const button = document.getElementById('mobileMenuButton');
+    if(button) button.focus();
+  }
+  if(event.key === 'Tab'){
+    const focusable = Array.from(document.querySelectorAll('#workspaceMenu a, #workspaceMenu button')).filter(el => el.offsetParent !== null);
+    const first = focusable[0], last = focusable[focusable.length-1];
+    if(event.shiftKey && document.activeElement === first){ event.preventDefault(); last.focus(); }
+    else if(!event.shiftKey && document.activeElement === last){ event.preventDefault(); first.focus(); }
+  }
+});
+function renderInfrastructure(data){
+  const target = document.getElementById('infrastructureStats');
+  if(!target) return;
+  const db = data.storage || {}, pool = data.transport || {};
+  const rows = [
+    ['本地存储', db.engine === 'sqlite' ? 'SQLite · WAL' : 'JSON', '账号与配置 ' + fmt(db.documents || 0) + ' · 请求流水 ' + fmt(db.usage_records || 0)],
+    ['上游连接', fmt(pool.reused || 0) + ' 次复用', '空闲 ' + (pool.idle || 0) + ' · 使用中 ' + (pool.active || 0)],
+    ['面板更新', 'SSE 实时推送', '心跳 ' + (data.sse_heartbeat_seconds || 15) + ' 秒 · 断线自动重连']
+  ];
+  target.innerHTML = rows.map(row => '<div class="infrastructure-item"><div class="k">' + esc(row[0]) + '</div><div class="v">' + esc(row[1]) + '</div><div class="s">' + esc(row[2]) + '</div></div>').join('');
+}
+updateWorkspace(window.__MAIN_TAB__ || 'gateway');
+
 const ACTION_HANDLERS = {
   switchMainTab: (el, ev, arg) => switchMainTab(arg),
+  toggleSidebar: () => toggleSidebar(),
+  closeSidebar: () => closeSidebar(),
   toggleLanguage: () => wbToggleLanguage(),
   submitPanelLoginOnEnter: (el, ev) => { if(ev.key === 'Enter') submitPanelLogin(); },
   submitPanelLogin: () => submitPanelLogin(),

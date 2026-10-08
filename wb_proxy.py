@@ -38,6 +38,14 @@ import secrets
 import socket
 import sys
 import threading
+import contextlib
+import functools
+import wb_database
+import wb_events
+import wb_fairness
+import wb_http
+import wb_stream
+import wb_storage
 import time
 import urllib.error
 import urllib.request
@@ -64,6 +72,18 @@ from wb_version import VERSION
 import wb_modelsdev
 import wb_probes
 IS_WINDOWS = os.name == "nt"
+# Selection, confirmed accounting and reservation removal share one lock.
+# Network I/O is outside it; only the short local accounting operation is held.
+_SCHEDULING_LOCK = threading.RLock()
+
+
+def _serialized_scheduling(function):
+    @functools.wraps(function)
+    def synchronized(*args, **kwargs):
+        with _SCHEDULING_LOCK:
+            return function(*args, **kwargs)
+    return synchronized
+
 def launcher_hint(port):
     """Platform-appropriate launcher command for starting on another port."""
     if IS_WINDOWS:
@@ -270,7 +290,7 @@ def identify_key(supplied):
     extra = () if panel_keys_managed() or configured_keys() else (API_KEY,)
     return wb_settings.match_api_key(ACCOUNTS_DIR, supplied, extra_keys=extra)
 def _empty_stats():
-    return {"requests": 0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
+    return {"requests": 0, "errors": 0, "client_aborted": 0, "prompt_tokens": 0, "completion_tokens": 0,
             "reasoning_tokens": 0, "cached_tokens": 0, "total_tokens": 0,
             "credit": 0.0, "cost_cny": 0.0, "cost_missing": {},
             "started": time.time(), "by_model": {},
@@ -524,7 +544,7 @@ def row_outcome(row):
         return o
     return "failed" if row.get("error") else "completed"
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_ms=None, fp=None,
-                account=None, outcome="completed", key=None, effort=None, realm=None):
+                account=None, outcome="completed", key=None, effort=None, realm=None, upstream=None):
     """Record one finished request as exactly one JSONL row.
 
     A request without a usage block still gets a row (flagged usage_missing):
@@ -566,9 +586,9 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     if account:
         row["account"] = account
     acc = POOL.get(account) if (account and POOL) else None
-    row["realm"] = realm or (acc.realm if acc else CURRENT_REALM)
+    row["realm"] = realm or getattr(upstream, "_realm", None) or (acc.realm if acc else CURRENT_REALM)
     row.update(_request_context_fields())
-    if (account and POOL and not usage_missing and fields.get("total_tokens")
+    if (outcome == "completed" and account and POOL and not usage_missing and fields.get("total_tokens")
             and fields.get("has_credit")):
         try:
             POOL.note_model_cost(account, model, fields.get("credit"))
@@ -617,7 +637,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         for k in USAGE_FIELDS:
             if k in fields:
                 per[k] += fields[k]
-    _persist_usage(row, "usage persist failed")
+    _persist_usage(row, "usage persist failed", upstream=upstream)
+    wb_fairness.observe(row)
     try:
         t_tokens = fields.get("total_tokens", 0)
         dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
@@ -678,29 +699,38 @@ def _request_context_fields():
     return fields
 
 
-def _persist_usage(row, fail_label):
-    """Append one usage row as a JSONL line.
-
-    usage-summary.json used to be rewritten on every single request - a full
-    json.dumps of the running totals, a uniquely named temp file and an
-    os.replace, plus the deep copy that fed it. Nothing in the tree ever
-    loads that file (every aggregate re-reads usage.jsonl), so the work was
-    pure overhead on the request path. One append per request now.
-    """
-    try:
-        os.makedirs(USAGE_DIR, exist_ok=True)
-        # Share wb_reqlog's lock so an append can never race the read->replace
-        # window of a rotation (audit BUG-3).
-        with wb_reqlog.LOCK:
-            with open(USAGE_LOG, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception as exc:
-        log("%s: %s" % (fail_label, exc))
+def _persist_usage(row, fail_label, upstream=None):
+    """Commit confirmed consumption before removing its pending reservation."""
+    database_written = False
+    with _SCHEDULING_LOCK:
+        try:
+            os.makedirs(USAGE_DIR, exist_ok=True)
+            # Appends and rotation share this lock. SQLite is authoritative;
+            # JSONL remains an export for existing tools and older versions.
+            with wb_reqlog.LOCK:
+                database = wb_database.for_usage(USAGE_LOG)
+                if database:
+                    database.append_usage(row)
+                    database_written = True
+                with open(USAGE_LOG, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            database_written = True
+        except Exception as exc:
+            log("%s: %s" % (fail_label, exc))
+        finally:
+            with _daily_usage_lock:
+                _daily_usage["at"] = 0.0
+            if upstream is not None:
+                upstream.release()
+    if not database_written:
         return
-    # Fairness must see the request just completed, rather than assigning
-    # another 15 seconds of traffic using the old token/credit counters.
-    with _daily_usage_lock:
-        _daily_usage["at"] = 0.0
+    for cache, lock in ((_snap_cache, _snap_lock), (_perf_cache, _perf_lock),
+                        (_analytics_cache, _analytics_lock), (_count_cache, _count_lock)):
+        with lock:
+            cache.clear()
+    with _byacct_lock:
+        _byacct_cache.update(at=0.0, data=None)
+    wb_events.BROKER.publish("usage", "accounts", realm=row.get("realm"))
     try:
         cfg = logging_config_cached()
         wb_reqlog.rotate_if_needed(USAGE_LOG, cfg["archive_max_mb"],
@@ -708,9 +738,24 @@ def _persist_usage(row, fail_label):
     except Exception as exc:
         log("request archive rotation failed: %s" % exc, level="WARN")
 
+
+@contextlib.contextmanager
+def usage_reader(since=None, until=None):
+    """Indexed SQLite records, falling back to a legacy installation's log."""
+    database = wb_database.for_usage(USAGE_LOG)
+    if database:
+        rows = database.usage_rows(since=since, until=until, raw=True)
+        try:
+            yield rows
+        finally:
+            rows.close()
+    else:
+        with open(USAGE_LOG, encoding="utf-8") as source:
+            yield source
+
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
-                 outcome="failed", hint=None, key=None, realm=None):
+                 outcome="failed", hint=None, key=None, realm=None, upstream=None):
     """Record one failed request as exactly one JSONL row.
 
     Passing the account uid records which account the request was bound to, so
@@ -756,7 +801,7 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
     if account:
         row["account"] = account
         acc = POOL.get(account) if POOL else None
-        row["realm"] = acc.realm if acc else CURRENT_REALM
+        row["realm"] = getattr(upstream, "_realm", None) or (acc.realm if acc else CURRENT_REALM)
     if realm:
         row["realm"] = realm
     row["billing_mode"] = usage_billing_mode(row)
@@ -767,7 +812,7 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         if elapsed_ms is not None:
             _usage["wall_ms_sum"] += elapsed_ms
             _usage["wall_samples"] += 1
-    _persist_usage(row, "error persist failed")
+    _persist_usage(row, "error persist failed", upstream=upstream)
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
     return row
@@ -1048,6 +1093,27 @@ def _daily_state_copy(source):
     }
 
 
+def _fold_daily_row(row, state, free_models):
+    uid = row.get("account")
+    if not uid:
+        return
+    try:
+        tokens = max(0, int(row.get("total_tokens") or 0)) if not row.get("usage_missing") else 0
+    except (TypeError, ValueError, OverflowError):
+        tokens = 0
+    state["tokens"][uid] = state["tokens"].get(uid, 0) + tokens
+    credit = _counted_credit(row)
+    if credit:
+        state["credits"][uid] = state["credits"].get(uid, 0.0) + credit
+    if usage_billing_mode(row, free_models) == "free":
+        free = state["free_tokens"]
+        free[uid] = free.get(uid, 0) + tokens
+    mid = row.get("model")
+    if mid:
+        per = state["models"].setdefault(uid, {})
+        per[mid] = per.get(mid, 0) + tokens
+
+
 def _scan_daily_usage(offset, state, path=None):
     """Fold rows at/after today's local midnight into `state`.
 
@@ -1078,28 +1144,9 @@ def _scan_daily_usage(offset, state, path=None):
                 continue
             if (row.get("at") or 0) < midnight:
                 continue
-            # Same rule as the analytics scan: a client cancellation is not a
-            # consumed request, and its token counts are incomplete.
-            if row_outcome(row) == "client_aborted":
-                continue
-            uid = row.get("account")
-            if not uid:
-                continue
-            try:
-                tokens = max(0, int(row.get("total_tokens") or 0))
-            except (TypeError, ValueError, OverflowError):
-                tokens = 0
-            state["tokens"][uid] = state["tokens"].get(uid, 0) + tokens
-            credit = _counted_credit(row)
-            if credit:
-                state["credits"][uid] = state["credits"].get(uid, 0.0) + credit
-            if usage_billing_mode(row, free_models) == "free":
-                free = state["free_tokens"]
-                free[uid] = free.get(uid, 0) + tokens
-            mid = row.get("model")
-            if mid:
-                per = state["models"].setdefault(uid, {})
-                per[mid] = per.get(mid, 0) + tokens
+            # A cancelled request can still carry confirmed upstream usage.
+            # Missing usage contributes no invented tokens or credit.
+            _fold_daily_row(row, state, free_models)
     return state, offset
 
 
@@ -1119,6 +1166,19 @@ def daily_usage_stats(ttl=None):
         c = _daily_usage
         if c["day"] == day and (now - c["at"]) < ttl:
             return _daily_state_copy(c) if c["totals"] is not None else None
+        database = wb_database.for_usage(USAGE_LOG)
+        if database:
+            rebuild = c["day"] != day or c["totals"] is None or "sqlite_sequence" not in c
+            state = {"tokens": {}, "credits": {}, "models": {}, "free_tokens": {}} if rebuild else _daily_state_copy(c)
+            offset = 0 if rebuild else c["sqlite_sequence"]
+            sequence = database.connection().execute("SELECT COALESCE(MAX(sequence),0) FROM usage_records").fetchone()[0]
+            free_models = free_models_by_realm()
+            for row in database.usage_rows(since=_local_midnight(), after_sequence=offset, before_sequence=sequence):
+                _fold_daily_row(row, state, free_models)
+            _daily_usage.update(day=day, totals=state["tokens"], credits=state["credits"],
+                                models=state["models"], free_tokens=state["free_tokens"], at=now,
+                                sqlite_sequence=max(offset, sequence))
+            return _daily_state_copy(_daily_usage)
         try:
             archives = wb_reqlog.archive_files(os.path.dirname(USAGE_LOG))
             archives_stamp = tuple((path, wb_reqlog._file_stamp(path)) for path in archives)
@@ -1173,6 +1233,7 @@ def seconds_until_local_midnight():
     return max(60, int(nxt - time.time()))
 
 
+@_serialized_scheduling
 def apply_daily_token_limit(refresh=False):
     """Push the daily token setting and today's counts into the pool."""
     if POOL is None:
@@ -1182,6 +1243,7 @@ def apply_daily_token_limit(refresh=False):
     return POOL.apply_daily_token_limit(limit, usage)
 
 
+@_serialized_scheduling
 def apply_daily_credit_limit(refresh=False):
     """Push the daily credit setting, today's spend and the free-model view
     into the pool."""
@@ -1197,6 +1259,7 @@ def apply_daily_credit_limit(refresh=False):
     return POOL.apply_daily_credit_limit(limit, credits, free_models)
 
 
+@_serialized_scheduling
 def apply_model_daily_token_limit(refresh=False):
     """Push the per-model daily token setting and today's counts into the pool."""
     if POOL is None:
@@ -1305,7 +1368,7 @@ def _usage_snapshot_uncached(realm=None, since=None, until=None):
     snap = _empty_stats()
     snap["started"] = _usage.get("started", time.time())
     try:
-        with open(USAGE_LOG, encoding="utf-8") as fh:
+        with usage_reader(since, until) as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -1329,23 +1392,18 @@ def _usage_snapshot_uncached(realm=None, since=None, until=None):
                 # when it happened, so a later price change cannot rewrite
                 # yesterday's totals.
                 cost = wb_pricing.cost_for_row(row)
-                if outcome != "completed":
+                # Consumption is independent of completion. Only confirmed
+                # usage is present on cancelled rows; absent usage adds zero.
+                for k in USAGE_FIELDS:
+                    if k in row:
+                        snap[k] += (row[k] or 0)
+                _fold_cost(snap, cost, row.get("model"))
+                if outcome == "client_aborted":
+                    snap["client_aborted"] += 1
+                elif outcome != "completed":
                     snap["errors"] += 1
-                    # Credit is money already spent: a request that failed
-                    # after the upstream had billed for it still consumed
-                    # credit, so it is summed here exactly like the analytics
-                    # page sums it. Token totals keep the completed-only rule
-                    # this page has always used, and a client abort is skipped
-                    # because its usage block is incomplete.
-                    if outcome != "client_aborted":
-                        snap["credit"] += (row.get("credit") or 0)
-                        _fold_cost(snap, cost, row.get("model"))
                 else:
                     snap["requests"] += 1
-                    for k in USAGE_FIELDS:
-                        if k in row:
-                            snap[k] += (row[k] or 0)
-                    _fold_cost(snap, cost, row.get("model"))
                     m = row.get("model") or "unknown"
                     rr = row_realm(row)
                     per = snap["by_model"].setdefault(m, {"requests": 0, "accounts": {}, "cost_cny": 0.0, **{k: 0 for k in USAGE_FIELDS}})
@@ -1393,9 +1451,9 @@ def usage_timeseries(realm=None, range=None, since=None, until=None,
     """Bucketed token/credit series for the analytics chart (M4 D5).
 
     Bucket size auto-scales with the window: minute (<=6h), hour (<=14d),
-    day otherwise; an explicit bucket_seconds overrides it. Completed
-    requests contribute tokens; every non-client-aborted row contributes
-    credit (money already spent).
+    day otherwise; an explicit bucket_seconds overrides it. Confirmed
+    consumption contributes regardless of completion; cancellations have a
+    separate count and do not inflate completed or failed requests.
     """
     r = realm_scope(realm, CURRENT_REALM)
     lo, hi = range_window(range, since, until)
@@ -1414,7 +1472,7 @@ def usage_timeseries(realm=None, range=None, since=None, until=None,
         step = 86400
     buckets = {}
     try:
-        with open(USAGE_LOG, encoding="utf-8") as fh:
+        with usage_reader(lo, hi) as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -1430,7 +1488,7 @@ def usage_timeseries(realm=None, range=None, since=None, until=None,
                     continue
                 key = int((at - lo) // step)
                 bucket = buckets.setdefault(key, {
-                    "at": lo + key * step, "requests": 0, "errors": 0,
+                    "at": lo + key * step, "requests": 0, "errors": 0, "client_aborted": 0,
                     "prompt_tokens": 0, "completion_tokens": 0,
                     "reasoning_tokens": 0, "cached_tokens": 0,
                     "total_tokens": 0, "credit": 0.0,
@@ -1438,14 +1496,14 @@ def usage_timeseries(realm=None, range=None, since=None, until=None,
                 outcome = row_outcome(row)
                 if outcome == "completed":
                     bucket["requests"] += 1
-                    for field in ("prompt_tokens", "completion_tokens",
-                                  "reasoning_tokens", "cached_tokens",
-                                  "total_tokens"):
-                        bucket[field] += (row.get(field) or 0)
+                elif outcome == "client_aborted":
+                    bucket["client_aborted"] += 1
                 else:
                     bucket["errors"] += 1
-                if outcome != "client_aborted":
-                    bucket["credit"] += (row.get("credit") or 0)
+                for field in ("prompt_tokens", "completion_tokens",
+                              "reasoning_tokens", "cached_tokens", "total_tokens"):
+                    bucket[field] += (row.get(field) or 0)
+                bucket["credit"] += (_counted_credit(row) or 0)
     except FileNotFoundError:
         pass
     except Exception as exc:
@@ -1463,6 +1521,10 @@ def _tail_lines(path, max_lines, chunk=256 * 1024):
     The usage log passes 20MB within a day. Scanning it end to end on every
     dashboard poll was the dominant cost behind slow /usage/* responses.
     """
+    database = wb_database.for_usage(path)
+    if database:
+        rows = list(database.usage_rows(limit=max_lines, raw=True))
+        return [row.encode("utf-8") for row in reversed(rows)]
     lines = []
     try:
         with open(path, "rb") as fh:
@@ -1530,6 +1592,15 @@ def count_usage_rows(realm=None):
 
 
 def _count_usage_rows_uncached(realm=None):
+    database = wb_database.for_usage(USAGE_LOG)
+    if database:
+        if not realm:
+            return database.connection().execute("SELECT COUNT(*) FROM usage_records").fetchone()[0]
+        total = database.connection().execute("SELECT COUNT(*) FROM usage_records WHERE realm=?", (realm,)).fetchone()[0]
+        for (payload,) in database.connection().execute("SELECT payload FROM usage_records WHERE realm IS NULL"):
+            if row_matches_realm(json.loads(payload), realm):
+                total += 1
+        return total
     needles = ()
     if realm:
         needles = ('"realm": "%s"' % realm, '"realm":"%s"' % realm)
@@ -1580,42 +1651,55 @@ def recent_usage(limit=100, realm=None, page=1):
     target_count = page * limit
     matching = []
     chunk = 256 * 1024
-    try:
-        with open(USAGE_LOG, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            pos = fh.tell()
-            buf = b""
-            while pos > 0 and len(matching) < target_count:
-                step = min(chunk, pos)
-                pos -= step
-                fh.seek(pos)
-                buf = fh.read(step) + buf
-                parts = buf.split(b"\n")
-                buf = parts[0]
-                for raw in reversed(parts[1:]):
-                    st = raw.strip()
-                    if not st:
-                        continue
-                    try:
-                        item = json.loads(st.decode("utf-8", "replace"))
-                    except Exception:
-                        continue
-                    if realm and not row_matches_realm(item, realm):
-                        continue
-                    matching.append(item)
-                    if len(matching) >= target_count:
-                        break
-            if len(matching) < target_count and buf.strip():
-                try:
-                    item = json.loads(buf.strip().decode("utf-8", "replace"))
-                    if not realm or row_matches_realm(item, realm):
+    database = wb_database.for_usage(USAGE_LOG)
+    if database:
+        records = database.usage_rows(realm=realm, descending=True)
+        try:
+            for item in records:
+                if realm and not row_matches_realm(item, realm):
+                    continue
+                matching.append(item)
+                if len(matching) >= target_count:
+                    break
+        finally:
+            records.close()
+    else:
+        try:
+            with open(USAGE_LOG, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                pos = fh.tell()
+                buf = b""
+                while pos > 0 and len(matching) < target_count:
+                    step = min(chunk, pos)
+                    pos -= step
+                    fh.seek(pos)
+                    buf = fh.read(step) + buf
+                    parts = buf.split(b"\n")
+                    buf = parts[0]
+                    for raw in reversed(parts[1:]):
+                        st = raw.strip()
+                        if not st:
+                            continue
+                        try:
+                            item = json.loads(st.decode("utf-8", "replace"))
+                        except Exception:
+                            continue
+                        if realm and not row_matches_realm(item, realm):
+                            continue
                         matching.append(item)
-                except Exception:
-                    pass
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        log("recent_usage read failed: %s" % exc)
+                        if len(matching) >= target_count:
+                            break
+                if len(matching) < target_count and buf.strip():
+                    try:
+                        item = json.loads(buf.strip().decode("utf-8", "replace"))
+                        if not realm or row_matches_realm(item, realm):
+                            matching.append(item)
+                    except Exception:
+                        pass
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log("recent_usage read failed: %s" % exc)
     start_idx = (page - 1) * limit
     end_idx = start_idx + limit
     page_rows = matching[start_idx:end_idx]
@@ -1681,14 +1765,13 @@ def realm_state_file():
 def load_persisted_realm():
     global CURRENT_REALM
     path = realm_state_file()
-    if os.path.isfile(path):
+    if os.path.isfile(path) or wb_storage.has_document(path):
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                d = json.load(fh)
-                r = d.get("realm")
-                if r in ("intl", "cn"):
-                    CURRENT_REALM = r
-                    return CURRENT_REALM
+            d = wb_storage.read_private_json(path)
+            r = d.get("realm")
+            if r in ("intl", "cn"):
+                CURRENT_REALM = r
+                return CURRENT_REALM
         except Exception as e:
             log("could not load active realm: %s" % e)
     return CURRENT_REALM
@@ -1697,9 +1780,9 @@ def save_persisted_realm(realm):
     if realm in ("intl", "cn"):
         CURRENT_REALM = realm
         try:
-            os.makedirs(ACCOUNTS_DIR, exist_ok=True)
-            with open(realm_state_file(), "w", encoding="utf-8") as fh:
-                json.dump({"realm": realm, "updated_at": time.time(), "updated_iso": time.strftime("%Y-%m-%d %H:%M:%S")}, fh, indent=2)
+            wb_storage.write_private_json(realm_state_file(), {
+                "realm": realm, "updated_at": time.time(),
+                "updated_iso": time.strftime("%Y-%m-%d %H:%M:%S")})
             log("persisted active realm '%s' to disk" % realm)
         except Exception as exc:
             log("failed to persist active realm: %s" % exc)
@@ -1891,7 +1974,7 @@ def _usage_by_account_uncached():
     """Aggregate the JSONL log per account id."""
     buckets = {}
     try:
-        with open(USAGE_LOG, encoding="utf-8") as fh:
+        with usage_reader() as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -1900,20 +1983,21 @@ def _usage_by_account_uncached():
                     row = json.loads(line)
                 except Exception:
                     continue
-                if row.get("error"):
-                    continue
                 key = row.get("account") or "(unattributed)"
                 bucket = buckets.setdefault(key, {
-                    "account": key, "requests": 0, "prompt_tokens": 0,
+                    "account": key, "requests": 0, "errors": 0, "client_aborted": 0, "prompt_tokens": 0,
                     "completion_tokens": 0, "reasoning_tokens": 0,
                     "cached_tokens": 0, "total_tokens": 0, "models": {},
                 })
-                bucket["requests"] += 1
+                outcome = row_outcome(row)
+                count_field = "requests" if outcome == "completed" else "client_aborted" if outcome == "client_aborted" else "errors"
+                bucket[count_field] += 1
                 for field in ("prompt_tokens", "completion_tokens",
                               "reasoning_tokens", "cached_tokens", "total_tokens"):
                     bucket[field] += row.get(field) or 0
                 model = row.get("model") or "?"
-                bucket["models"][model] = bucket["models"].get(model, 0) + 1
+                if outcome == "completed":
+                    bucket["models"][model] = bucket["models"].get(model, 0) + 1
     except FileNotFoundError:
         pass
     except Exception as exc:
@@ -1954,7 +2038,7 @@ def compute_usage_analytics(ttl=None, realm=None, range=None, since=None, until=
 
 def _new_analytics_stat():
         return {
-            "requests": 0, "errors": 0,
+            "requests": 0, "errors": 0, "client_aborted": 0,
             "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0,
             "cached_tokens": 0, "total_tokens": 0,
             "credit": 0.0,
@@ -1994,9 +2078,9 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
     served by many upstream accounts, and one account can serve many keys, so
     the two tables are views of the same spend, not a decomposition of it.
     """
-    if os.path.exists(USAGE_LOG):
+    if wb_database.for_usage(USAGE_LOG) or os.path.exists(USAGE_LOG):
         try:
-            with open(USAGE_LOG, encoding="utf-8") as fh:
+            with usage_reader() as fh:
                 for line in fh:
                     line = line.strip()
                     if not line:
@@ -2007,15 +2091,10 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                         continue
                     if realm and not row_matches_realm(r, realm):
                         continue
-                    # Only a genuine gateway/upstream failure is an error.
-                    # A client cancellation is not: its token counts are
-                    # incomplete, and folding them into the ratios this page
-                    # reports would understate cache hit and speed. It is
-                    # counted in perf_stats instead.
+                    # Confirmed partial consumption contributes to totals;
+                    # cancellation has its own count and no speed sample.
                     outcome = row_outcome(r)
-                    if outcome == "client_aborted":
-                        continue
-                    is_err = outcome != "completed"
+                    is_err = outcome not in ("completed", "client_aborted")
                     cost = wb_pricing.cost_for_row(r)
                     at = r.get("at", 0)
                     # Same bounds as /usage and /usage/perf, so the three
@@ -2025,7 +2104,9 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                     acct_uid = r.get("account") or "(unattributed)"
                     m_id = r.get("model") or "(unknown)"
                     def feed(stat_obj, is_error):
-                        if is_error:
+                        if outcome == "client_aborted":
+                            stat_obj["client_aborted"] += 1
+                        elif is_error:
                             stat_obj["errors"] += 1
                         else:
                             stat_obj["requests"] += 1
@@ -2038,9 +2119,11 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                         stat_obj["reasoning_tokens"] += (r.get("reasoning_tokens") or 0)
                         stat_obj["cached_tokens"] += (r.get("cached_tokens") or 0)
                         stat_obj["total_tokens"] += (r.get("total_tokens") or 0)
-                        stat_obj["credit"] += (r.get("credit") or 0)
+                        stat_obj["credit"] += (_counted_credit(r) or 0)
                         if cost["known"]:
                             stat_obj["cost_cny"] += cost["cny"]
+                        if outcome == "client_aborted":
+                            return
                         if r.get("ttft_ms"):
                             stat_obj["ttft_sum"] += r["ttft_ms"]
                             stat_obj["ttft_n"] += 1
@@ -2056,7 +2139,7 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                         # Model distribution counts successful requests only:
                         # a failed call attributed to a model would show up as
                         # demand for it when the caller got nothing.
-                        if is_error:
+                        if outcome != "completed":
                             return
                         tm = tgt_all.setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
                         tm["requests"] += 1
@@ -2401,6 +2484,10 @@ def runtime_settings_view():
         "chat_slot_wait_seconds": CHAT_SLOT_WAIT_SECONDS,
         "panel_password_startup_override": PANEL_PASSWORD_STARTUP_OVERRIDE,
         "settings_using_snapshot": wb_settings.using_settings_snapshot(ACCOUNTS_DIR),
+        "storage": wb_database.DATABASE.snapshot() if wb_database.DATABASE else {"engine": "json"},
+        "transport": wb_http.POOL.snapshot(),
+        "sse_heartbeat_seconds": wb_stream.HEARTBEAT_SECONDS,
+        "dashboard_stream": "/api/events",
         "version": VERSION,
     }
 def current_account():
@@ -2513,6 +2600,7 @@ def log(msg, level=None, tag=None):
     sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
     sys.stderr.flush()
     add_log_entry(msg, level=level, tag=tag)
+    wb_events.BROKER.publish("logs", "tasks", "scheduler")
 
 def get_logs(limit=200, level="", tag="", search="", since_id=0):
     with _LOG_LOCK:
@@ -4523,6 +4611,10 @@ def _apply_stream_idle_timeout(response, seconds):
         return False
     if seconds <= 0:
         return False
+    setter = getattr(response, "set_read_timeout", None)
+    if setter:
+        setter(seconds)
+        return True
     fp = getattr(response, "fp", None)
     raw = getattr(fp, "raw", None)
     sock = getattr(raw, "_sock", None)
@@ -4545,10 +4637,13 @@ class _LeasedResponse(object):
     including a client disconnecting midway through a stream.
     """
 
-    def __init__(self, response, account):
+    def __init__(self, response, account, reservation_id=None):
         self._response = response
         self._account = account
+        self._realm = account.realm
         self._released = False
+        self._reservation_id = reservation_id
+        self._release_lock = threading.Lock()
 
     def __getattr__(self, name):
         return getattr(self._response, name)
@@ -4579,6 +4674,15 @@ class _LeasedResponse(object):
         finally:
             self.release()
 
+    def abort(self):
+        # Keep the account reservation until the handler records partial
+        # consumption; only the transport is interrupted here.
+        abort = getattr(self._response, "abort", None)
+        if abort:
+            abort()
+        else:
+            self._response.close()
+
     def read(self, *args, **kwargs):
         return self._response.read(*args, **kwargs)
 
@@ -4586,12 +4690,10 @@ class _LeasedResponse(object):
         return self._response.readline(*args, **kwargs)
 
     def release(self):
-        if not self._released:
-            self._released = True
-            try:
-                self._account.release()
-            except Exception:
-                pass
+        with self._release_lock:
+            if not self._released:
+                self._released = True
+                self._account.release(self._reservation_id)
 
 
 def upstream_error_status(message):
@@ -4666,11 +4768,17 @@ def open_upstream(payload, session_key=None, target_realm=None,
     # once per retry, so a settings read never lands in the retry loop.
     header_timeout, idle_timeout = upstream_timeouts()
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
+    reservation_estimate = wb_fairness.estimate(upstream_body, realm)
     for _attempt in range(max_attempts):
         if deadline is not None and time.monotonic() >= deadline:
             raise wb_webflow.WebToolLimitError("web tool time limit exceeded")
-        account = POOL.pick_for_session(realm=realm, session_key=session_key,
-                                        exclude=tried, model=model) if POOL else None
+        with _SCHEDULING_LOCK:
+            apply_daily_token_limit()
+            apply_daily_credit_limit()
+            apply_model_daily_token_limit()
+            account, reservation_id = POOL.reserve_for_session(
+                upstream_body, realm=realm, session_key=session_key,
+                exclude=tried, model=model, estimate=reservation_estimate) if POOL else (None, None)
         if account is None:
             if transient_hits and _attempt < max_attempts - 1:
                 tried.clear()
@@ -4678,38 +4786,32 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 continue
             break
         if account.realm != realm:
+            account.release(reservation_id)
             if session_key and POOL: POOL.affinity.unbind(session_key)
             continue
         tried.add(account.uid)
         last_uid = account.uid
-        cfg = wb_accounts.get_realm_config(account.realm)
-        chat_url = account.chat_base_url() + CHAT_PATH
-        # The cache key is account scoped, so it is rebuilt per candidate rather
-        # than once up front. Opt-in only: measurement showed the upstream
-        # caches prefixes without it (see prompt_cache_key_enabled).
-        if prompt_cache_key_enabled():
-            attempt_body = inject_prompt_cache_key(upstream_body, account.uid, session_key)
-        else:
-            attempt_body = upstream_body
-        attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            chat_url, data=attempt_data, method="POST",
-            headers=account.headers(purpose="chat", session_meta=session_meta))
         try:
-            if not account.acquire():
-                tried.add(account.uid)
-                continue
+            resp = None
             try:
+                chat_url = account.chat_base_url() + CHAT_PATH
+                attempt_body = inject_prompt_cache_key(upstream_body, account.uid, session_key) \
+                    if prompt_cache_key_enabled() else upstream_body
+                req = urllib.request.Request(
+                    chat_url, data=json.dumps(attempt_body, ensure_ascii=False).encode("utf-8"), method="POST",
+                    headers=account.headers(purpose="chat", session_meta=session_meta))
                 timeout = min(header_timeout, max(0.001, deadline - time.monotonic())) if deadline else header_timeout
                 resp = wb_accounts.urlopen(req, timeout=timeout,
                                            proxy=account.proxy)
+                _apply_stream_idle_timeout(resp, min(idle_timeout, max(0.001, deadline - time.monotonic())) if deadline else idle_timeout)
+                account.note_success(model=model)
+                reset_switch_counter(account, model)
+                return _LeasedResponse(resp, account, reservation_id), account, upstream_effort_of(upstream_body, model)
             except Exception:
-                account.release()
+                if resp is not None:
+                    resp.close()
+                account.release(reservation_id)
                 raise
-            _apply_stream_idle_timeout(resp, min(idle_timeout, max(0.001, deadline - time.monotonic())) if deadline else idle_timeout)
-            account.note_success(model=model)
-            reset_switch_counter(account, model)
-            return _LeasedResponse(resp, account), account, upstream_effort_of(upstream_body, model)
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
@@ -5603,7 +5705,7 @@ def build_citations(text, sources):
 
 
 def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_start,
-                                drop_tools=False):
+                                drop_tools=False, cancel_check=None):
     """Append real tool results to the shared history and open a bounded followup.
 
     WebToolFlow enforces hard budgets before execution and withdraws exhausted
@@ -5613,6 +5715,8 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
     if flow is None:
         flow = holder["web_flow"] = wb_webflow.WebToolFlow(holder.get("base_body"))
     flow.execute(internal_calls, holder.get("round_message"))
+    if cancel_check:
+        cancel_check()
     holder["web_sources"] = flow.sources
     body = flow.followup_body()
     holder["round_started_at"] = time.time()
@@ -6468,6 +6572,11 @@ def stream_messages_events(raw_iter, model, holder=None):
             chunk = json.loads(data)
         except Exception:
             continue
+        # Keep confirmed usage visible to the handler before emitting any
+        # frame: a client may disconnect during message_start or a delta.
+        if isinstance(chunk.get("usage"), dict):
+            state["usage"] = chunk["usage"]
+            holder["usage"] = state["usage"]
         if isinstance(chunk.get("error"), dict):
             state["failed"] = True
             err = chunk["error"]
@@ -6481,11 +6590,6 @@ def stream_messages_events(raw_iter, model, holder=None):
         start = ensure_start(chunk)
         if start:
             yield start
-        # Capture usage before the choices guard: the final upstream frame
-        # carries both the usage block and the finish_reason (and no delta),
-        # so skipping it here would zero out every streaming usage row.
-        if isinstance(chunk.get("usage"), dict):
-            state["usage"] = chunk["usage"]
         choices = chunk.get("choices") if isinstance(chunk.get("choices"), list) else []
         if not choices:
             continue
@@ -7310,6 +7414,9 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (socket.timeout, ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
+        finally:
+            if wb_database.DATABASE:
+                wb_database.DATABASE.close_thread()
     server_version = "Workbody-FHUB/" + VERSION
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
@@ -7322,7 +7429,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/logs", "/usage", "/accounts", "/scheduler",
                     "/health", "/panel/status", "/realm", "/favicon.ico"
                 )
-                if any(req_path == p or req_path.startswith(p + "/") for p in quiet_prefixes):
+                if self._is_panel_route(req_path) or any(req_path == p or req_path.startswith(p + "/") for p in quiet_prefixes):
                     return
         except Exception:
             pass
@@ -7635,12 +7742,42 @@ class Handler(BaseHTTPRequestHandler):
         return token
     def _panel_ok(self):
         return PANEL.valid(self._panel_token())
+
+    def _get_panel_events(self, query):
+        requested = query.get("realm", [None])[0]
+        if requested not in (None, "all", "cn", "intl"):
+            return self._error(400, "invalid realm")
+        subscription = wb_events.BROKER.subscribe(None if requested == "all" else requested)
+        if subscription is None:
+            return self._error(503, "dashboard stream connection limit reached")
+        token = self._panel_token()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"retry: 3000\n: connected\n\n")
+            self.wfile.flush()
+            while PANEL.valid(token):
+                event = subscription.next(timeout=wb_stream.HEARTBEAT_SECONDS)
+                self.wfile.write(wb_events.frame(event) if event else b": heartbeat\n\n")
+                self.wfile.flush()
+            self.wfile.write(b"event: session_expired\ndata: {}\n\n")
+            self.wfile.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            subscription.close()
     @staticmethod
     def _is_panel_route(path):
         """Management endpoints shown in the web panel.
         Model listings stay reachable with the API key alone so that plain
         OpenAI clients can keep discovering models.
         """
+        if path == "/api/events":
+            return True
         if path.startswith("/accounts"):
             return True
         if path.startswith("/usage") or path.startswith("/v1/usage"):
@@ -7674,6 +7811,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_dashboard()
         if path == "/panel/status":
             return self._get_panel_status()
+        if path == "/api/events":
+            return self._get_panel_events(query)
         if path == "/health":
             return self._get_health()
         if path == "/realm":
@@ -7896,7 +8035,7 @@ class Handler(BaseHTTPRequestHandler):
         stats = entry["window"] if entry else _new_analytics_stat()
         # An allowlist keeps account identities, other keys and log paths out
         # of the public endpoint, including when the shared cache is reused.
-        response = {name: stats[name] for name in ("requests", "errors", "prompt_tokens",
+        response = {name: stats[name] for name in ("requests", "errors", "client_aborted", "prompt_tokens",
                     "completion_tokens", "reasoning_tokens", "cached_tokens", "total_tokens")}
         response.update(ok=True, object="usage", unit="tokens", realm=realm,
                         channel={"cn": "workbuddy-cn", "intl": "workbuddy-intl"}[realm],
@@ -9652,77 +9791,81 @@ class Handler(BaseHTTPRequestHandler):
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, session_meta=None, effort=None, web_flow=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "close")
         if cors_origin_allowed(self.path):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        flow = web_flow or (wb_webflow.WebToolFlow(base_body) if web_tools_active(base_body) else None)
-        holder = {"custom_names": custom_names, "request_meta": request_meta,
-                  "namespace_map": namespace_map, "base_body": base_body,
-                  "realm": realm, "session_meta": session_meta, "web_flow": flow}
-        timing = wb_metrics.GenerationTiming(t_start)
-        round_recorded = False
-        try:
-            rounds = 0
-            while True:
-                round_recorded = False
-                holder["usage"] = None
-                holder["usage_before_round"] = flow.usage if flow else None
-                for field in ("internal_calls", "suppress_completion", "round_message", "client_calls"):
-                    holder.pop(field, None)
-                holder["suppress_lifecycle"] = rounds > 0
-                raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
-                for frame in stream_responses_events(timing.wrap(raw), model, holder):
-                    self.wfile.write(clean_responses_frame(frame))
-                    self.wfile.flush()
-                usage = holder.get("usage")
-                if flow:
-                    flow.usage = wb_webflow.add_usage(flow.usage, usage)
-                record_usage(model, usage, stream=True, elapsed_ms=int((time.time() - t_start) * 1000),
-                             **timing.fields(), fp=fp, account=account.uid,
-                             key=self._key_id(), effort=effort)
-                round_recorded = True
-                internal = holder.get("internal_calls") or []
-                if not internal:
-                    break
-                if holder.get("client_calls"):
-                    flow.execute(internal, holder.get("round_message"))
-                    for frame in mixed_web_result_frames(holder, flow):
-                        self.wfile.write(clean_responses_frame(frame))
-                        self.wfile.flush()
-                    break
-                upstream.close()
-                upstream, account, _ = follow_up_with_tool_results(
-                    internal, holder, model, session_key, t_start)
-                timing = wb_metrics.GenerationTiming(holder.get("round_started_at", time.time()))
-                rounds += 1
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            if not round_recorded:
-                record_usage(model, holder.get("usage"), stream=True,
-                             elapsed_ms=int((time.time() - t_start) * 1000), **timing.fields(), fp=fp,
-                             account=account.uid, outcome="client_aborted", key=self._key_id(), effort=effort)
-        except Exception as exc:
-            message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream stream aborted: %s" % exc
-            partial_usage = None if round_recorded else (holder.get("usage") or getattr(flow, "current_usage", None))
-            record_error(model, 502, message, account=account.uid, stream=True,
-                         usage=partial_usage, fp=fp,
-                         elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id())
-            response = dict(holder.get("round_response") or {})
-            response.update(id=holder.get("response_id") or _new_id("resp_"),
-                            object="response", status="failed", model=model,
-                            error={"code": "web_tool_limit" if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream_error",
-                                   "message": message})
-            failed_usage = wb_webflow.add_usage(flow.usage if flow else None, partial_usage)
-            if failed_usage:
-                response["usage"] = _responses_usage(failed_usage)
+        with wb_stream.HeartbeatWriter(self.wfile, lambda: upstream) as writer:
+            flow = web_flow or (wb_webflow.WebToolFlow(base_body) if web_tools_active(base_body) else None)
+            holder = {"custom_names": custom_names, "request_meta": request_meta,
+                      "namespace_map": namespace_map, "base_body": base_body,
+                      "realm": realm, "session_meta": session_meta, "web_flow": flow}
+            timing = wb_metrics.GenerationTiming(t_start)
+            round_recorded = False
             try:
-                self.wfile.write(web_response_frame(holder, "response.failed", {"response": response}))
-                self.wfile.flush()
-            except (OSError, ValueError):
-                pass
-        finally:
-            upstream.close()
+                rounds = 0
+                while True:
+                    round_recorded = False
+                    holder["usage"] = None
+                    holder["usage_before_round"] = flow.usage if flow else None
+                    for field in ("internal_calls", "suppress_completion", "round_message", "client_calls"):
+                        holder.pop(field, None)
+                    holder["suppress_lifecycle"] = rounds > 0
+                    raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
+                    for frame in stream_responses_events(
+                            timing.wrap(writer.iterate(raw)), model, holder):
+                        writer.write(clean_responses_frame(frame))
+                        writer.flush()
+                    usage = holder.get("usage")
+                    if flow:
+                        flow.usage = wb_webflow.add_usage(flow.usage, usage)
+                    record_usage(model, usage, stream=True, elapsed_ms=int((time.time() - t_start) * 1000),
+                                 **timing.fields(), fp=fp, account=account.uid, upstream=upstream,
+                                 key=self._key_id(), effort=effort)
+                    round_recorded = True
+                    internal = holder.get("internal_calls") or []
+                    if not internal:
+                        break
+                    if holder.get("client_calls"):
+                        flow.execute(internal, holder.get("round_message"))
+                        writer.check()
+                        for frame in mixed_web_result_frames(holder, flow):
+                            writer.write(clean_responses_frame(frame))
+                            writer.flush()
+                        break
+                    upstream.close()
+                    upstream, account, _ = follow_up_with_tool_results(
+                        internal, holder, model, session_key, t_start, cancel_check=writer.check)
+                    timing = wb_metrics.GenerationTiming(holder.get("round_started_at", time.time()))
+                    rounds += 1
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                if not round_recorded:
+                    record_usage(model, holder.get("usage") or getattr(flow, "current_usage", None), stream=True,
+                                 elapsed_ms=int((time.time() - t_start) * 1000), **timing.fields(), fp=fp,
+                                 account=account.uid, upstream=upstream, outcome="client_aborted", key=self._key_id(), effort=effort)
+            except Exception as exc:
+                message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream stream aborted: %s" % exc
+                partial_usage = None if round_recorded else (holder.get("usage") or getattr(flow, "current_usage", None))
+                record_error(model, 502, message, account=account.uid, upstream=upstream, stream=True,
+                             usage=partial_usage, fp=fp,
+                             elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id())
+                response = dict(holder.get("round_response") or {})
+                response.update(id=holder.get("response_id") or _new_id("resp_"),
+                                object="response", status="failed", model=model,
+                                error={"code": "web_tool_limit" if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream_error",
+                                       "message": message})
+                failed_usage = wb_webflow.add_usage(flow.usage if flow else None, partial_usage)
+                if failed_usage:
+                    response["usage"] = _responses_usage(failed_usage)
+                try:
+                    writer.write(web_response_frame(holder, "response.failed", {"response": response}))
+                    writer.flush()
+                except (OSError, ValueError):
+                    pass
+            finally:
+                upstream.close()
 
     def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, web_flow=None):
         flow = web_flow or (wb_webflow.WebToolFlow(base_body) if web_tools_active(base_body) else None)
@@ -9738,7 +9881,7 @@ class Handler(BaseHTTPRequestHandler):
                 if flow:
                     flow.usage = wb_webflow.add_usage(flow.usage, usage)
                 record_usage(model, usage, stream=False, elapsed_ms=int((time.time() - t_start) * 1000),
-                             **timing.fields(), fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                             **timing.fields(), fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
                 round_recorded = True
                 calls = internal_calls_from_chat(chat_obj, web_tools=flow is not None)
                 if not calls:
@@ -9764,7 +9907,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, result)
         except Exception as exc:
             message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream/web follow-up failed: %s" % exc
-            record_error(model, 502, message, account=account.uid,
+            record_error(model, 502, message, account=account.uid, upstream=upstream,
                          elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id(),
                          usage=None if round_recorded else getattr(flow, "current_usage", None))
             return self._error(502, message)
@@ -9884,12 +10027,12 @@ class Handler(BaseHTTPRequestHandler):
             result = chat_to_messages(chat_obj)
             wall = int((time.time() - t_start) * 1000)
             record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
-                         **timing.fields(), fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                         **timing.fields(), fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
             return self._json(200, result)
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
             record_error(model, 502, "messages upstream error: %s" % exc,
-                         elapsed_ms=wall, account=account.uid, key=self._key_id())
+                         elapsed_ms=wall, account=account.uid, upstream=upstream, key=self._key_id())
             return self._anthropic_error(502, "upstream stream error: %s" % exc)
         finally:
             try:
@@ -9902,48 +10045,51 @@ class Handler(BaseHTTPRequestHandler):
                                   session_meta=None, effort=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("X-Accel-Buffering", "no")
         self.send_header("Connection", "close")
         if cors_origin_allowed(self.path):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        holder = {"usage": None}
-        timing = wb_metrics.GenerationTiming(t_start)
-        try:
-            for frame in stream_messages_events(timing.wrap(upstream), model, holder):
-                self.wfile.write(frame)
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            wall = int((time.time() - t_start) * 1000)
-            record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                         **timing.fields(),
-                         fp=fp, account=account.uid,
-                         outcome="client_aborted", key=self._key_id(), effort=effort)
-            return
-        except Exception as exc:
-            wall = int((time.time() - t_start) * 1000)
-            record_error(model, 502, "messages stream aborted: %s" % exc,
-                         elapsed_ms=wall, account=account.uid,
-                         usage=holder.get("usage"), stream=True,
-                         **timing.fields(), fp=fp, outcome="upstream_aborted",
-                         key=self._key_id())
+        with wb_stream.HeartbeatWriter(self.wfile, lambda: upstream) as writer:
+            holder = {"usage": None}
+            timing = wb_metrics.GenerationTiming(t_start)
             try:
-                self.wfile.write(anthropic_sse_frame("error", {
-                    "error": {"type": "api_error", "message": str(exc)}}))
-                self.wfile.flush()
-            except Exception:
-                pass
+                for frame in stream_messages_events(
+                        timing.wrap(writer.iterate(upstream)), model, holder):
+                    writer.write(frame)
+                    writer.flush()
+                wall = int((time.time() - t_start) * 1000)
+                record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+                             **timing.fields(),
+                             fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                wall = int((time.time() - t_start) * 1000)
+                record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
+                             **timing.fields(),
+                             fp=fp, account=account.uid, upstream=upstream,
+                             outcome="client_aborted", key=self._key_id(), effort=effort)
+                return
+            except Exception as exc:
+                wall = int((time.time() - t_start) * 1000)
+                record_error(model, 502, "messages stream aborted: %s" % exc,
+                             elapsed_ms=wall, account=account.uid, upstream=upstream,
+                             usage=holder.get("usage"), stream=True,
+                             **timing.fields(), fp=fp, outcome="upstream_aborted",
+                             key=self._key_id())
+                try:
+                    writer.write(anthropic_sse_frame("error", {
+                        "error": {"type": "api_error", "message": str(exc)}}))
+                    writer.flush()
+                except Exception:
+                    pass
+                return
+            finally:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
             return
-        finally:
-            try:
-                upstream.close()
-            except Exception:
-                pass
-        wall = int((time.time() - t_start) * 1000)
-        record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                     **timing.fields(),
-                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-        return
 
     def _open_upstream_error(self, exc, model, t_start, key=None):
         """Record and answer an open_upstream failure with one status."""
@@ -10161,84 +10307,93 @@ class Handler(BaseHTTPRequestHandler):
     def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
             self.send_header("Connection", "close")
             if cors_origin_allowed(self.path):
                 self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            emitted = False
-            last_usage = None
-            timing = wb_metrics.GenerationTiming(t_start)
-            streamed_text = []
-            try:
-                for line in timing.wrap(upstream):
-                    data = strip_data_prefix(line.decode("utf-8", "replace"))
-                    if not data or data == "[DONE]" or data.startswith(":"):
-                        continue
+            with wb_stream.HeartbeatWriter(self.wfile, lambda: upstream) as writer:
+                emitted = False
+                last_usage = None
+                timing = wb_metrics.GenerationTiming(t_start)
+                streamed_text = []
+                try:
+                    for line in timing.wrap(writer.iterate(upstream)):
+                        data = strip_data_prefix(line.decode("utf-8", "replace"))
+                        if not data or data == "[DONE]" or data.startswith(":"):
+                            continue
+                        try:
+                            maybe = json.loads(data)
+                            u = maybe.get("usage")
+                            if u:
+                                if last_usage is None or (u.get("total_tokens") or 0) >= (last_usage.get("total_tokens") or 0):
+                                    last_usage = u
+                            for ch in (maybe.get("choices") or []):
+                                delta = ch.get("delta") or {}
+                                if delta.get("content"):
+                                    streamed_text.append(delta["content"])
+                                if delta.get("reasoning_content"):
+                                    streamed_text.append(delta["reasoning_content"])
+                        except Exception:
+                            pass
+                        cleaned = clean_chunk(data)
+                        if not cleaned:
+                            continue
+                        emitted = True
+                        writer.write(f"data: {cleaned}\n\n".encode("utf-8"))
+                        writer.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    # Client hung up; still account for what upstream produced.
+                    wall = int((time.time() - t_start) * 1000)
+                    record_usage(model, last_usage, stream=True,
+                                 elapsed_ms=wall, **timing.fields(),
+                                 fp=fp, account=account.uid, upstream=upstream,
+                                 outcome="client_aborted", key=self._key_id(), effort=effort)
+                    return
+                except Exception as exc:
+                    # Upstream quit mid-stream (timeout, incomplete read, ...).
+                    # The client would otherwise get a truncated stream with no
+                    # terminal marker, and the traceback reached the HTTP layer.
+                    wall = int((time.time() - t_start) * 1000)
+                    record_error(model, 502, "stream aborted: %s" % exc,
+                                 elapsed_ms=wall, account=account.uid, upstream=upstream,
+                                usage=last_usage, stream=True, **timing.fields(),
+                                 fp=fp, outcome="upstream_aborted", key=self._key_id())
                     try:
-                        maybe = json.loads(data)
-                        u = maybe.get("usage")
-                        if u:
-                            if last_usage is None or (u.get("total_tokens") or 0) >= (last_usage.get("total_tokens") or 0):
-                                last_usage = u
-                        for ch in (maybe.get("choices") or []):
-                            delta = ch.get("delta") or {}
-                            if delta.get("content"):
-                                streamed_text.append(delta["content"])
-                            if delta.get("reasoning_content"):
-                                streamed_text.append(delta["reasoning_content"])
+                        writer.write(b"data: [DONE]\n\n")
+                        writer.flush()
                     except Exception:
                         pass
-                    cleaned = clean_chunk(data)
-                    if not cleaned:
-                        continue
-                    emitted = True
-                    self.wfile.write(f"data: {cleaned}\n\n".encode("utf-8"))
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                # Client hung up; still account for what upstream produced.
+                    return
+                try:
+                    if not emitted:
+                        err = json.dumps({"error": {"message": "empty upstream stream", "type": "server_error"}})
+                        writer.write(f"data: {err}\n\n".encode("utf-8"))
+                    writer.write(b"data: [DONE]\n\n")
+                    writer.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    record_usage(model, last_usage, stream=True,
+                                 elapsed_ms=int((time.time() - t_start) * 1000), **timing.fields(),
+                                 fp=fp, account=account.uid, upstream=upstream,
+                                 outcome="client_aborted", key=self._key_id(), effort=effort)
+                    return
                 wall = int((time.time() - t_start) * 1000)
+                if last_usage is None or (last_usage.get("total_tokens") or 0) == 0:
+                    full_s = "".join(streamed_text)
+                    if full_s:
+                        comp = estimate_tokens(full_s)
+                        last_usage = {
+                            "prompt_tokens": max(1, comp // 2),
+                            "completion_tokens": comp,
+                            "total_tokens": max(1, comp // 2) + comp,
+                            "completion_tokens_details": {"reasoning_tokens": 0},
+                            "prompt_tokens_details": {"cached_tokens": 0},
+                        }
                 record_usage(model, last_usage, stream=True,
                              elapsed_ms=wall, **timing.fields(),
-                             fp=fp, account=account.uid,
-                             outcome="client_aborted", key=self._key_id(), effort=effort)
+                             fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
                 return
-            except Exception as exc:
-                # Upstream quit mid-stream (timeout, incomplete read, ...).
-                # The client would otherwise get a truncated stream with no
-                # terminal marker, and the traceback reached the HTTP layer.
-                wall = int((time.time() - t_start) * 1000)
-                record_error(model, 502, "stream aborted: %s" % exc,
-                             elapsed_ms=wall, account=account.uid,
-                            usage=last_usage, stream=True, **timing.fields(),
-                             fp=fp, outcome="upstream_aborted", key=self._key_id())
-                try:
-                    self.wfile.write(b"data: [DONE]\n\n")
-                    self.wfile.flush()
-                except Exception:
-                    pass
-                return
-            if not emitted:
-                err = json.dumps({"error": {"message": "empty upstream stream", "type": "server_error"}})
-                self.wfile.write(f"data: {err}\n\n".encode("utf-8"))
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-            wall = int((time.time() - t_start) * 1000)
-            if last_usage is None or (last_usage.get("total_tokens") or 0) == 0:
-                full_s = "".join(streamed_text)
-                if full_s:
-                    comp = estimate_tokens(full_s)
-                    last_usage = {
-                        "prompt_tokens": max(1, comp // 2),
-                        "completion_tokens": comp,
-                        "total_tokens": max(1, comp // 2) + comp,
-                        "completion_tokens_details": {"reasoning_tokens": 0},
-                        "prompt_tokens_details": {"cached_tokens": 0},
-                    }
-            record_usage(model, last_usage, stream=True,
-                         elapsed_ms=wall, **timing.fields(),
-                         fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-            return
 
     def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None):
         timing = wb_metrics.GenerationTiming(t_start)
@@ -10246,12 +10401,12 @@ class Handler(BaseHTTPRequestHandler):
             result = aggregate_stream(timing.wrap(upstream), model, None)
         except Exception as exc:
             record_error(model, 502, str(exc), elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=account.uid, key=self._key_id())
+                         account=account.uid, upstream=upstream, key=self._key_id())
             return self._error(502, f"upstream stream error: {exc}")
         wall = int((time.time() - t_start) * 1000)
         record_usage(model, result.get("usage"), stream=False,
                      elapsed_ms=wall, **timing.fields(),
-                     fp=fp, account=account.uid, key=self._key_id(), effort=effort)
+                     fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
         return self._json(200, result)
 
 def main():
@@ -10359,6 +10514,10 @@ def _bootstrap_runtime(args):
     SYSTEM_PROMPT = args.system_prompt
     if args.accounts_dir:
         ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
+    database = wb_database.configure(ACCOUNTS_DIR, USAGE_DIR, log=log)
+    history = list(database.usage_rows(limit=2000))
+    for row in reversed(history):
+        wb_fairness.observe(row)
     # LAN mode must not ship a known key: the gateway spends the account's own
     # upstream quota, so a guessable default lets anyone on the network drain
     # it. Generate one on first use, persist it, and reuse it afterwards.

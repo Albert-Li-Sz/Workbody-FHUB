@@ -1,10 +1,10 @@
 # API 与余额协议说明
 
-适用版本：**1.0.9**。
+适用版本：**1.1.0**。
 
 ## 地址与鉴权
 
-客户端 Base URL 通常为 `http://<服务器IP>:8788/v1`，请求头使用面板生成的网关 Key：
+客户端 Base URL 通常为 `https://<公网IP>/v1`（独立 HTTP 编排为 `http://127.0.0.1:8788/v1`），请求头使用面板生成的网关 Key：
 
 ```http
 Authorization: Bearer <WORKBODY_API_KEY>
@@ -135,6 +135,8 @@ curl 'http://127.0.0.1:8788/api/billing/usage?range=today' \
 
 `range` 可用 `today`、`week`、`month`、`all`、`custom`，默认全部历史；`since`、`until` 使用 Unix 秒。自定义范围示例：`?range=custom&since=1791388800&until=1791475200`。无记录返回零。推理 Token 已包含在输出计数内，总 Token 不额外重复相加；数据来源为网关日志，不包含绕过本网关的厂商调用。
 
+返回的 `requests` 为完成次数，`errors` 为失败次数，`client_aborted` 为客户端取消次数。Token／积分总计包含取消及失败前已经确认的消耗。
+
 ## Token 显示
 
 面板统一使用十进制单位：`K=1,000`、`M=1,000,000`、`B=1,000,000,000`，最多两位小数。例如 `8300 → 8.3K`、`131072 → 131.07K`、`1250000000 → 1.25B`；跨单位四舍五入后会提升单位。
@@ -151,3 +153,18 @@ curl 'http://127.0.0.1:8788/api/billing/usage?range=today' \
 | 503 | 渠道配置异常、余额不完整或当前适配所需数据不可用 |
 
 错误遵循 `{"error": {"message": "...", "type": "...", "code": ...}}`。管理路由 `/accounts/*`、`/settings/*`、`/usage/*` 面向管理面板，受管理鉴权保护；客户端使用上文的 billing 入口。
+
+## SSE 与面板事件
+
+三种生成接口使用 `stream:true` 返回 SSE，默认无内容 15 秒时发送 `: heartbeat` 注释。响应包含 `X-Accel-Buffering: no` 和 `Cache-Control: no-cache, no-transform`，每帧及时刷新；心跳不算 Token 或首字时间。当前没有 WebSocket 生成端点。
+
+控制台事件入口为 `GET /api/events?realm=all`，支持 `cn`、`intl`、`all`。需要有效面板会话，使用 `X-Panel-Token` 请求头，不接受 URL 中的面板 Token。推送合并后的刷新主题与版本号，控制台按当前页面读取受鉴权的数据。
+
+```text
+event: refresh
+data: {"topics":["accounts","usage"],"revision":12,"at":1791417600}
+```
+
+事件连接包含心跳和重连提示，每实例最多 64 个订阅。会话过期返回 `session_expired`；客户端应重新登录。断线后重新读取当前状态，无需重放历史通知。前端使用支持自定义鉴权头的 fetch 流，支持自动重连与不可用时的 30 秒恢复刷新。
+
+生成取消时已确认的部分用量计入消费，`client_aborted` 单独计数，不纳入有效生成速度。未知用量不会使用调度预估替代。[调度说明](account-scheduling.md)

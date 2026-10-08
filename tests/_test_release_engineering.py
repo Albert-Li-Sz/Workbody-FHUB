@@ -61,7 +61,10 @@ class DockerTests(unittest.TestCase):
         text = read("docker-compose.yml")
         self.assertIn("ghcr.io/albert-li-sz/workbody-fhub:" + VERSION, text)
         self.assertNotIn("build:", text)
-        self.assertIn('"0.0.0.0:8788:8788"', text)
+        self.assertIn('"127.0.0.1:${WB_DIRECT_PORT:-8788}:8788"', text)
+        self.assertIn("ghcr.io/albert-li-sz/workbody-fhub-nginx:" + VERSION, text)
+        self.assertIn('"${WB_HTTP_PORT:-80}:80"', text)
+        self.assertIn('"${WB_HTTPS_PORT:-443}:443"', text)
         self.assertNotIn("ghcr.io/ardeyouxipianyi", text)
         ignored = read(".dockerignore")
         for pattern in ("accounts/", "usage/", ".env", "*.info"):

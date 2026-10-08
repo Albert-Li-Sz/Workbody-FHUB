@@ -1,7 +1,7 @@
 """Canonical application version and checks for release artifact consistency."""
 from pathlib import Path
 
-VERSION = "1.0.9"
+VERSION = "1.1.0"
 
 
 def verify_artifacts(root=None, tag=None):
@@ -11,6 +11,10 @@ def verify_artifacts(root=None, tag=None):
     expected = {
         "Dockerfile": 'org.opencontainers.image.version="%s"' % VERSION,
         "docker-compose.yml": "ghcr.io/albert-li-sz/workbody-fhub:" + VERSION,
+        "docker-compose.direct.yml": "ghcr.io/albert-li-sz/workbody-fhub:" + VERSION,
+        "deploy/nginx/Dockerfile": 'org.opencontainers.image.version="%s"' % VERSION,
+        "update.py": 'VERSION = "%s"' % VERSION,
+        "update.sh": "UPDATE_VERSION=" + VERSION,
         "README.md": "当前版本 **%s**" % VERSION,
     }
     for name, marker in expected.items():

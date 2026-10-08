@@ -1,3 +1,4 @@
+# Optional local/LAN HTTP deployment without the Nginx certificate service.
 name: workbody-fhub
 services:
   workbody-fhub:
@@ -5,7 +6,7 @@ services:
     restart: unless-stopped
     user: "${PUID:-0}:${PGID:-0}"
     ports:
-      - "127.0.0.1:${WB_DIRECT_PORT:-8788}:8788"
+      - "${WB_BIND_ADDRESS:-127.0.0.1}:${WB_DIRECT_PORT:-8788}:8788"
     environment:
       HOST: 0.0.0.0
       PORT: 8788
@@ -22,25 +23,3 @@ services:
     volumes:
       - ./accounts:/app/accounts
       - ./usage:/app/usage
-  nginx:
-    image: ${WORKBODY_NGINX_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.0}
-    restart: unless-stopped
-    stop_grace_period: 30s
-    depends_on:
-      workbody-fhub:
-        condition: service_healthy
-    ports:
-      - "${WB_HTTP_PORT:-80}:80"
-      - "${WB_HTTPS_PORT:-443}:443"
-    environment:
-      TZ: Asia/Shanghai
-      WB_TLS_MODE: ${WB_TLS_MODE:-auto}
-      WB_PUBLIC_IP: ${WB_PUBLIC_IP:-}
-      WB_TLS_DOMAINS: ${WB_TLS_DOMAINS:-}
-      WB_ACME_EMAIL: ${WB_ACME_EMAIL:-}
-      WB_ACME_STAGING: ${WB_ACME_STAGING:-0}
-      WB_ACME_CHECK_SECONDS: ${WB_ACME_CHECK_SECONDS:-21600}
-      WB_ACME_RETRY_SECONDS: ${WB_ACME_RETRY_SECONDS:-1800}
-    volumes:
-      - ./.tls:/etc/letsencrypt
-      - ./.acme:/var/lib/letsencrypt

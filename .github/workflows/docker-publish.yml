@@ -1,17 +1,17 @@
-name: Publish Workbody-FHUB image
+name: Publish Workbody-FHUB images
 
 on:
   release:
     types: [ published ]
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
     - uses: actions/checkout@v4
       with:
@@ -58,14 +58,21 @@ jobs:
       run: |
         OWNER="${{ github.repository_owner }}"
         TARGETS="ghcr.io/${OWNER,,}/workbody-fhub"
+        NGINX_TARGETS="ghcr.io/${OWNER,,}/workbody-fhub-nginx"
         if [ -n "$DOCKERHUB_USER" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
           TARGETS="$TARGETS
         ${DOCKERHUB_USER}/workbody-fhub"
+          NGINX_TARGETS="$NGINX_TARGETS
+        ${DOCKERHUB_USER}/workbody-fhub-nginx"
         fi
         echo "list<<EOF" >> $GITHUB_OUTPUT
         echo "$TARGETS" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
         echo "primary=ghcr.io/${OWNER,,}/workbody-fhub" >> $GITHUB_OUTPUT
+        echo "nginx_list<<EOF" >> $GITHUB_OUTPUT
+        echo "$NGINX_TARGETS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        echo "nginx_primary=ghcr.io/${OWNER,,}/workbody-fhub-nginx" >> $GITHUB_OUTPUT
     - name: Extract Docker metadata
       uses: docker/metadata-action@v5
       id: meta
@@ -78,6 +85,7 @@ jobs:
           type=raw,value=${{ github.event.release.tag_name }}
           type=semver,pattern={{version}}
     - name: Build and push Docker image
+      id: app_build
       uses: docker/build-push-action@v6
       with:
         context: .
@@ -85,6 +93,25 @@ jobs:
         platforms: linux/amd64,linux/arm64
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+    - name: Extract Nginx Docker metadata
+      uses: docker/metadata-action@v5
+      id: nginx_meta
+      with:
+        images: ${{ steps.images.outputs.nginx_list }}
+        flavor: latest=false
+        tags: |
+          type=raw,value=${{ github.event.release.tag_name }}
+          type=semver,pattern={{version}}
+    - name: Build and push Nginx image
+      uses: docker/build-push-action@v6
+      id: nginx_build
+      with:
+        context: .
+        file: deploy/nginx/Dockerfile
+        push: true
+        platforms: linux/amd64,linux/arm64
+        tags: ${{ steps.nginx_meta.outputs.tags }}
+        labels: ${{ steps.nginx_meta.outputs.labels }}
     - name: Verify the published image on both architectures
       env:
         IMAGE: ${{ steps.images.outputs.primary }}
@@ -93,9 +120,38 @@ jobs:
     - name: Promote verified stable images to latest
       if: ${{ !github.event.release.prerelease }}
       env:
-        IMAGE_TARGETS: ${{ steps.images.outputs.list }}
+        IMAGE_TARGETS: |
+          ${{ steps.images.outputs.list }}
+          ${{ steps.images.outputs.nginx_list }}
         RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: |
         while IFS= read -r target; do
+          [ -n "$target" ] || continue
           docker buildx imagetools create --tag "$target:latest" "$target:$RELEASE_TAG"
         done <<< "$IMAGE_TARGETS"
+    - name: Attach image receipts and refresh release checksums
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_REPO: ${{ github.repository }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+        APP_IMAGE: ${{ steps.images.outputs.primary }}
+        APP_DIGEST: ${{ steps.app_build.outputs.digest }}
+        NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
+        NGINX_DIGEST: ${{ steps.nginx_build.outputs.digest }}
+      run: |
+        python - <<'PY'
+        import json, os, pathlib, subprocess
+        receipt = {'tag': os.environ['RELEASE_TAG'],
+                   'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                   'platforms': ['linux/amd64', 'linux/arm64'],
+                   'images': {name: {'image': os.environ[name + '_IMAGE'], 'digest': os.environ[name + '_DIGEST']}
+                              for name in ('APP', 'NGINX')}}
+        pathlib.Path('images.json').write_text(json.dumps(receipt, indent=2) + '\n')
+        PY
+        gh release upload "$RELEASE_TAG" images.json --clobber
+        mkdir -p release-assets
+        gh release download "$RELEASE_TAG" --dir release-assets --clobber
+        cd release-assets
+        rm -f checksums.txt
+        sha256sum * > checksums.txt
+        gh release upload "$RELEASE_TAG" checksums.txt --clobber

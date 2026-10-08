@@ -1,10 +1,14 @@
 # 核心机密数据（千万不能上传到公共仓库）
 accounts/*.json
+accounts/*.sqlite*
+accounts/*.db*
 !accounts/README.txt
 
 # 运行时日志和用量统计
 usage/*.jsonl
 usage/*.json
+usage/*.sqlite*
+usage/*.db*
 !usage/README.txt
 usage/*.bak*
 
@@ -33,3 +37,9 @@ docker-compose.override.yml
 .env
 .env.*
 dist/
+.tls/
+.acme/
+.update-backups/
+.update.lock
+compose.runtime.json
+*.update-tmp

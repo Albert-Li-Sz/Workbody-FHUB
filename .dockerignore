@@ -24,3 +24,11 @@ tools/
 dist/
 *.tar
 *.tar.gz
+.tls/
+.acme/
+*.sqlite*
+*.db*
+.update-backups/
+.update.lock
+compose.runtime.json
+*.update-tmp

@@ -1,0 +1,8 @@
+# Optional source build overlay. Public installations use the released images.
+services:
+  workbody-fhub:
+    build: .
+  nginx:
+    build:
+      context: .
+      dockerfile: deploy/nginx/Dockerfile
