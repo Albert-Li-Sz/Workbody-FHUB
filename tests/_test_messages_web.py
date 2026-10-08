@@ -1,5 +1,6 @@
 """Messages search orchestration, replay and failure accounting without live APIs."""
 import copy
+from contextlib import closing
 from email.message import Message
 import io
 import json
@@ -345,7 +346,7 @@ class ReplayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "workbody.sqlite3")
             # Simulate an existing v1.1.0 database with no web_replay table.
-            with sqlite3.connect(path) as old:
+            with closing(sqlite3.connect(path)) as old:
                 old.execute("PRAGMA user_version=1")
             database = D.Database(path, directory, directory)
             with mock.patch.object(D, "DATABASE", database):
