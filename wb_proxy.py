@@ -19,6 +19,7 @@ import http.client
 from collections import deque
 import re
 import json
+import math
 import os
 MAX_PAYLOAD_BYTES = int(os.environ.get("WB_MAX_PAYLOAD_BYTES", 50 * 1024 * 1024))  # 50MB limit
 # Upstream chat calls may hold a handler thread for up to 600s, and every
@@ -345,17 +346,18 @@ def _extract_usage(usage):
     if not usage:
         return {}
     details = usage.get("completion_tokens_details") or {}
+    credit = _counted_credit(usage)
     return {
         "prompt_tokens": usage.get("prompt_tokens") or 0,
         "completion_tokens": usage.get("completion_tokens") or 0,
         "reasoning_tokens": details.get("reasoning_tokens") or 0,
         "cached_tokens": _best_cached_tokens(usage),
         "total_tokens": usage.get("total_tokens") or 0,
-        "credit": usage.get("credit") or 0,
+        "credit": credit or 0,
         # PANEL's hasCredit: a usage block without a credit field means the
         # cost is unknown (tier 1), not measured-free (tier 0). Only a real
         # observation may move (account, model) into the cost ledger.
-        "has_credit": "credit" in usage,
+        "has_credit": credit is not None,
     }
 def row_realm(row):
     """The realm a log row belongs to.
@@ -377,6 +379,40 @@ def row_realm(row):
     if model:
         return detect_model_realm(model)
     return "intl"
+
+
+def _counted_credit(row):
+    """A usable measured credit amount, or None for invalid/missing data."""
+    if isinstance(row.get("credit"), bool):
+        return None
+    try:
+        credit = float(row.get("credit"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(credit) or credit < 0:
+        return None
+    return credit
+
+
+def usage_billing_mode(row, free_models=None):
+    """Separate free-token load from paid traffic using observed cost first.
+
+    New rows retain their classification so later catalogue changes do not
+    rewrite today's fairness. Older rows fall back to the realm catalogue
+    when they do not contain a measured credit value.
+    """
+    credit = _counted_credit(row)
+    if credit is not None and credit > 0:
+        return "paid"
+    if row.get("has_credit"):
+        return "free" if credit == 0 else "unknown"
+    mode = row.get("billing_mode")
+    if mode in ("free", "paid", "unknown"):
+        return mode
+    if free_models is None:
+        free_models = free_models_by_realm()
+    return ("free" if row.get("model") in (free_models.get(row_realm(row)) or ())
+            else "paid")
 
 
 def row_matches_realm(row, realm):
@@ -538,6 +574,7 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
             POOL.note_model_cost(account, model, fields.get("credit"))
         except Exception:
             pass
+    row["billing_mode"] = usage_billing_mode(row)
 
     # Always written, even when the caller presented no key. The empty value is
     # what separates "ran without a key" from rows written before the field
@@ -660,6 +697,10 @@ def _persist_usage(row, fail_label):
     except Exception as exc:
         log("%s: %s" % (fail_label, exc))
         return
+    # Fairness must see the request just completed, rather than assigning
+    # another 15 seconds of traffic using the old token/credit counters.
+    with _daily_usage_lock:
+        _daily_usage["at"] = 0.0
     try:
         cfg = logging_config_cached()
         wb_reqlog.rotate_if_needed(USAGE_LOG, cfg["archive_max_mb"],
@@ -718,6 +759,7 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         row["realm"] = acc.realm if acc else CURRENT_REALM
     if realm:
         row["realm"] = realm
+    row["billing_mode"] = usage_billing_mode(row)
     row.update(_request_context_fields())
     row["key"] = key or ""
     with _lock:
@@ -986,6 +1028,7 @@ _STATS_TTL = float(os.environ.get("WB_STATS_TTL", 15))
 # reads rows that arrived since the last scan.
 # ---------------------------------------------------------------------------
 _daily_usage = {"day": "", "totals": None, "credits": None, "models": None,
+                "free_tokens": None,
                 "offset": 0, "at": 0.0, "main_id": None, "archives_stamp": None}
 _daily_usage_lock = threading.Lock()
 
@@ -993,14 +1036,15 @@ _daily_usage_lock = threading.Lock()
 def _daily_state_copy(source):
     """Copy the cached per-account counters into a fresh scan state.
 
-    Three views of the same rows: uid -> total tokens, uid -> credit spent,
-    uid -> {model: tokens}. The copy keeps a later scan from mutating the
+    Four views of the same rows: total tokens, credit spent, per-model tokens
+    and tokens consumed by free models. The copy keeps a later scan from mutating the
     cached dicts in place while readers hold them.
     """
     return {
         "tokens": dict(source.get("totals") or {}),
         "credits": dict(source.get("credits") or {}),
         "models": {k: dict(v) for k, v in (source.get("models") or {}).items()},
+        "free_tokens": dict(source.get("free_tokens") or {}),
     }
 
 
@@ -1012,6 +1056,7 @@ def _scan_daily_usage(offset, state, path=None):
     this read raced the writer.
     """
     midnight = _local_midnight()
+    free_models = free_models_by_realm()
     with open(path or USAGE_LOG, encoding="utf-8") as fh:
         fh.seek(offset)
         while True:
@@ -1040,11 +1085,17 @@ def _scan_daily_usage(offset, state, path=None):
             uid = row.get("account")
             if not uid:
                 continue
-            tokens = row.get("total_tokens") or 0
+            try:
+                tokens = max(0, int(row.get("total_tokens") or 0))
+            except (TypeError, ValueError, OverflowError):
+                tokens = 0
             state["tokens"][uid] = state["tokens"].get(uid, 0) + tokens
-            credit = row.get("credit") or 0
+            credit = _counted_credit(row)
             if credit:
                 state["credits"][uid] = state["credits"].get(uid, 0.0) + credit
+            if usage_billing_mode(row, free_models) == "free":
+                free = state["free_tokens"]
+                free[uid] = free.get(uid, 0) + tokens
             mid = row.get("model")
             if mid:
                 per = state["models"].setdefault(uid, {})
@@ -1056,7 +1107,8 @@ def daily_usage_stats(ttl=None):
     """Today's per-account usage folded from the log, cached for `ttl` seconds.
 
     Returns {"tokens": uid -> tokens, "credits": uid -> credit spent,
-    "models": uid -> {model: tokens}}, or None when the log could not be read
+    "models": uid -> {model: tokens}, "free_tokens": uid -> free tokens},
+    or None when the log could not be read
     at all; callers keep that distinct from zero so a failed read never parks
     an account.
     """
@@ -1065,8 +1117,8 @@ def daily_usage_stats(ttl=None):
     now = time.time()
     with _daily_usage_lock, wb_reqlog.LOCK:
         c = _daily_usage
-        if c["day"] == day and c["totals"] is not None and (now - c["at"]) < ttl:
-            return _daily_state_copy(c)
+        if c["day"] == day and (now - c["at"]) < ttl:
+            return _daily_state_copy(c) if c["totals"] is not None else None
         try:
             archives = wb_reqlog.archive_files(os.path.dirname(USAGE_LOG))
             archives_stamp = tuple((path, wb_reqlog._file_stamp(path)) for path in archives)
@@ -1078,7 +1130,7 @@ def daily_usage_stats(ttl=None):
                        or c.get("archives_stamp") != archives_stamp
                        or offset > (main_stat.st_size if main_stat else 0))
             if rebuild:
-                state = {"tokens": {}, "credits": {}, "models": {}}
+                state = {"tokens": {}, "credits": {}, "models": {}, "free_tokens": {}}
                 for path in archives:
                     state, _ = _scan_daily_usage(0, state, path=path)
                 offset = 0
@@ -1090,12 +1142,13 @@ def daily_usage_stats(ttl=None):
                 raise FileNotFoundError(USAGE_LOG)
         except Exception as exc:
             log("daily token scan failed: %s" % exc)
-            _daily_usage.update({"day": day, "totals": None, "offset": 0,
+            _daily_usage.update({"day": day, "totals": None, "free_tokens": None, "offset": 0,
                                  "at": time.time()})
             return None
         _daily_usage.update({"day": day, "totals": state["tokens"],
                              "credits": state["credits"],
-                             "models": state["models"], "offset": offset,
+                             "models": state["models"], "free_tokens": state["free_tokens"],
+                             "offset": offset,
                              "at": time.time(), "main_id": main_id,
                              "archives_stamp": archives_stamp})
         return _daily_state_copy(_daily_usage)
@@ -1125,9 +1178,7 @@ def apply_daily_token_limit(refresh=False):
     if POOL is None:
         return 0
     limit = wb_settings.daily_token_limit(ACCOUNTS_DIR)
-    usage = None
-    if limit > 0:
-        usage = daily_tokens_by_account(ttl=0 if refresh else None)
+    usage = daily_tokens_by_account(ttl=0 if refresh else None)
     return POOL.apply_daily_token_limit(limit, usage)
 
 
@@ -1137,11 +1188,12 @@ def apply_daily_credit_limit(refresh=False):
     if POOL is None:
         return 0
     limit = wb_settings.daily_credit_limit(ACCOUNTS_DIR)
-    credits = None
     free_models = free_models_by_realm()
-    if limit > 0:
-        stats = daily_usage_stats(ttl=0 if refresh else None)
-        credits = stats["credits"] if stats is not None else None
+    stats = daily_usage_stats(ttl=0 if refresh else None)
+    credits = stats["credits"] if stats is not None else None
+    apply_free = getattr(POOL, "apply_free_token_usage", None)
+    if apply_free is not None:
+        apply_free(stats["free_tokens"] if stats is not None else None)
     return POOL.apply_daily_credit_limit(limit, credits, free_models)
 
 
@@ -1150,10 +1202,8 @@ def apply_model_daily_token_limit(refresh=False):
     if POOL is None:
         return 0
     limit = wb_settings.model_daily_token_limit(ACCOUNTS_DIR)
-    per_model = None
-    if limit > 0:
-        stats = daily_usage_stats(ttl=0 if refresh else None)
-        per_model = stats["models"] if stats is not None else None
+    stats = daily_usage_stats(ttl=0 if refresh else None)
+    per_model = stats["models"] if stats is not None else None
     return POOL.apply_model_daily_token_limit(limit, per_model)
 
 

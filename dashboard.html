@@ -3062,6 +3062,12 @@ function accountRow(a){
        + '<span style="color:var(--dim)">未查询</span>'
        + '<span class="badge mini" style="font-size:10px;padding:1px 5px;cursor:pointer" data-action="openCreditsDetail" data-on="click" data-uid="' + uidAttr + '" title="点击查询积分明细">查询</span>'
        + '</div>');
+  const todayCredit = a.dailyCreditsToday == null ? ''
+    : '<div class="hint" title="付费模型优先选择同优先级内当日积分消耗少的账号">今日消费 '
+      + Number(a.dailyCreditsToday).toLocaleString('zh-CN', {maximumFractionDigits:2}) + ' 积分</div>';
+  const freeTokenText = a.freeTokensToday == null ? ''
+    : '<div class="hint" title="免费模型按账号当天全部免费模型的 Token 总量均衡，国内与国际分别计算">今日免费 '
+      + fmtTokens(a.freeTokensToday) + '</div>';
   return '<tr>'
     + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + '</td>'
     + '<td style="text-align:left" data-label="账号">'
@@ -3082,9 +3088,9 @@ function accountRow(a){
     + (prioritySaving || !priorityValid || !priorityDirty ? ' disabled' : '') + '>保存优先级</button>'
     + '<span class="priority-status" role="status" style="font-size:11px;color:var(--dim);width:100%">'
     + (prioritySaving ? '保存中…' : !priorityValid ? '请填写非负整数' : priorityDirty ? '未保存' : '已保存 · 重启保留') + '</span></div></td>'
-    + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
+    + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + todayCredit + '</td>'
     + '<td style="text-align:right" data-label="请求">' + fmt(usage.requests) + '</td>'
-    + '<td style="text-align:right" data-label="总 token">' + fmtTokens(usage.total_tokens) + '</td>'
+    + '<td style="text-align:right" data-label="总 token">' + fmtTokens(usage.total_tokens) + freeTokenText + '</td>'
     + '<td style="text-align:right" data-label="缓存">' + fmtTokens(usage.cached_tokens) + '</td>'
     + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle">'
     + '<div class="acct-actions-col">'
@@ -3152,7 +3158,7 @@ function renderAccounts(){
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
     + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额渠道。</span></div>'
-    + '<div class="legend"><span>优先级默认 100，数字越小越早调用，点击“保存优先级”后写入账号文件，重启保留；当前优先级没有可用账号时切到下一优先级。同一优先级内，免费模型按区域公平轮询，收费模型沿用选号与会话粘性设置。</span></div>';
+    + '<div class="legend"><span>优先级默认 100，数字越小越早调用，点击“保存优先级”后写入账号文件，重启保留；当前优先级没有可用账号时切到下一优先级。同一优先级内，免费模型优先选择今日免费 Token 总量少的账号，付费模型优先选择今日积分消耗少的账号；国内、国际分别均衡。</span></div>';
 }
 
 async function loadAccounts(){
@@ -4593,8 +4599,8 @@ const ADVANCED_SETTING_GROUPS = [
     id: 'pool', title: '账号池与流量治理',
     desc: '加权选号、软冷却、熔断、降权、在途租约、成本探索、积分保底与粘性路由。',
     fields: [
-      {key:'weighted_pick', label:'加权选号', type:'bool', hint:'按积分比例与闲置补偿加权抽取账号，关闭则恢复轮询。'},
-      {key:'free_fair_pick', label:'免费模型公平调度', type:'bool', hint:'国内、国际分别按免费模型轮询可用账号；免费请求不使用会话粘性，收费模型保持原选号策略。'},
+      {key:'weighted_pick', label:'加权选号', type:'bool', hint:'付费模型先选当日积分消耗最少的账号；并列时按剩余积分与闲置补偿加权，关闭时并列账号轮询。'},
+      {key:'free_fair_pick', label:'免费模型 Token 公平调度', type:'bool', hint:'国内、国际分别优先选当日免费 Token 总量最少的可用账号；合并全部免费模型用量，免费请求不绑定会话。'},
       {key:'soft_rate', label:'软冷却基数（秒）', type:'number', min:0, step:'any', hint:'遇到上游软限流后的基础冷却秒数。'},
       {key:'soft_rate_max', label:'软冷却上限（秒）', type:'number', min:0, step:'any', hint:'指数退避的封顶秒数。'},
       {key:'breaker_threshold', label:'熔断阈值', type:'int', min:1, hint:'连续失败达到此数后进入熔断。'},

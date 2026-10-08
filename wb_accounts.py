@@ -1,6 +1,7 @@
 import re
 import base64
 import json
+import math
 import os
 import ssl
 import sys
@@ -414,6 +415,10 @@ class Account(object):
         # unknown count.
         self.daily_token_limit = 0
         self.daily_tokens_today = None
+        # Fairness uses free-model tokens across the whole local day, rather
+        # than request counts or tokens spent on paid models. Restored from
+        # usage.jsonl by the proxy, including when every daily cap is off.
+        self.free_tokens_today = None
         # Panel-parity governance state (runtime only, like model_cooldowns):
         # consecutive soft limits, consecutive failures feeding the breaker,
         # consecutive unknown failures feeding the degrade window, the idle
@@ -544,6 +549,7 @@ class Account(object):
             "dailyTokensToday": (int(self.daily_tokens_today)
                                  if isinstance(self.daily_tokens_today, int)
                                  else None),
+            "freeTokensToday": self.free_tokens_today,
             "dailyLimitBlocked": self.daily_limit_blocked(),
             "dailyCreditLimit": int(self.daily_credit_limit or 0),
             "dailyCreditsToday": (round(float(self.daily_credits_today), 2)
@@ -1867,6 +1873,8 @@ class AccountPool(object):
             credit = float(credit or 0)
         except (TypeError, ValueError):
             return
+        if not math.isfinite(credit) or credit < 0:
+            return
         tier = 2 if credit > 0 else 0
         now = time.time()
         with self._lock:
@@ -2065,6 +2073,17 @@ class AccountPool(object):
                                  % str(account.uid)[:8])
         return value
 
+    def apply_free_token_usage(self, usage=None):
+        """Restore today's total free-token load without imposing a cap."""
+        if usage is not None:
+            with self._lock:
+                for account in self.accounts:
+                    try:
+                        account.free_tokens_today = max(
+                            0, int(usage.get(account.uid, 0) or 0))
+                    except (TypeError, ValueError, OverflowError):
+                        account.free_tokens_today = None
+
     def apply_model_daily_token_limit(self, value=None, per_model=None):
         """Re-resolve the per-model daily token guard for every account.
 
@@ -2157,7 +2176,23 @@ class AccountPool(object):
                     if cfg.get("weighted_pick", True):
                         preferred = self._apply_credit_floor(preferred, model, cfg, now)
                     if not any(a.ready(model=model) for a in preferred):
-                        return account
+                        # A paid session may keep its cache only while its
+                        # account is still among the least-spent peers.
+                        # Otherwise the next send must join credit fairness.
+                        if not model:
+                            return account
+                        with self._lock:
+                            peers = [a for a in self.accounts
+                                     if (not realm or a.realm == realm)
+                                     and a.uid not in exclude
+                                     and getattr(a, "priority", DEFAULT_PRIORITY)
+                                     == getattr(account, "priority", DEFAULT_PRIORITY)]
+                        if cfg.get("weighted_pick", True):
+                            peers = self._apply_credit_floor(peers, model, cfg, now)
+                        peers = [a for a in peers if a.ready(model=model)]
+                        if (self._model_free_for(account, model, now)
+                                or account in wb_pool.least_credit_spent(peers)):
+                            return account
                 self.affinity.unbind(session_key)
         account = self.pick(realm=realm, exclude=exclude, model=model)
         if account and session_key and not fair_free:
@@ -2171,10 +2206,16 @@ class AccountPool(object):
         return tier == 0 or (tier == 1 and account.model_is_free(model))
 
     def _pick_fair_free(self, candidates, realm, model):
-        # Advance under the pool lock, so concurrent arrivals do not share a
-        # cursor position. A UID cursor survives changes in the eligible set.
+        # Free models share one token budget per account and realm. Rotate
+        # only among the least-loaded accounts; advance atomically so equal
+        # loads do not keep assigning concurrent arrivals to the same UID.
         with self._lock:
-            key = (realm or "all", model)
+            key = (realm or "all", "free")
+            minimum = min(wb_pool.free_tokens_today(a) for a in candidates)
+            candidates = [a for a in candidates
+                          if wb_pool.free_tokens_today(a) == minimum]
+            flight = min(a.in_flight for a in candidates)
+            candidates = [a for a in candidates if a.in_flight == flight]
             last_uid = self._free_cursors.get(key)
             positions = {a.uid: i for i, a in enumerate(self.accounts)}
             last = positions.get(last_uid, -1)
@@ -2190,12 +2231,14 @@ class AccountPool(object):
         by credits share plus idle compensation, the Top-5 shortlist is drawn
         from, and a candidate used within the last 100ms is skipped so a burst
         cannot stampede one credential. weighted_pick=false restores the
-        legacy cursor round-robin for anyone who wants the old order.
-        Free catalogue models use a separate realm/model cursor by default;
-        the cost ledger must not starve accounts that have not been tried yet.
+        cursor round-robin among equally spent accounts.
+        Free models prefer the lowest total free-token use today within the
+        realm, rotating equal loads. Paid models prefer the lowest credit
+        spend today, using balance weights to break ties. The cost ledger
+        must not starve accounts that have not been tried yet.
         Priority tiers are tried from low to high. Unavailable or protected
         accounts do not prevent falling back to the next tier; within a tier
-        the existing free, weighted and cursor rules still apply.
+        token fairness, credit fairness and configured cursor rules apply.
         """
         exclude = exclude or set()
         now = time.time()
@@ -2229,16 +2272,23 @@ class AccountPool(object):
                     if cfg.get("free_fair_pick", True) and free_candidates:
                         account = self._pick_fair_free(free_candidates, realm, model)
                     else:
+                        if model and not free_candidates:
+                            candidates = wb_pool.least_credit_spent(candidates)
                         account = wb_pool.choose(candidates, cfg, now=now)
             else:
+                candidates = [a for a in tier if a.ready(model=model)]
+                if not candidates:
+                    continue
+                free_candidates = [a for a in candidates
+                                   if self._model_free_for(a, model, now)]
                 if cfg.get("free_fair_pick", True):
-                    free_candidates = [a for a in tier
-                                       if self._model_free_for(a, model, now) and a.ready(model=model)]
                     if free_candidates:
                         account = self._pick_fair_free(free_candidates, realm, model)
                 if account is None:
+                    if model and not free_candidates:
+                        candidates = wb_pool.least_credit_spent(candidates)
                     total = len(snapshot)
-                    tier_uids = {a.uid for a in tier}
+                    tier_uids = {a.uid for a in candidates}
                     for offset in range(total):
                         index = (start + offset) % total
                         cand = snapshot[index]

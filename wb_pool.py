@@ -1,16 +1,15 @@
-"""Panel-parity pool governance rules.
+"""Pool governance and usage-based account selection rules.
 
 Pure decision logic ported from the panel project's internal/pool package
 (weighted picking plus soft-rate / breaker / degrade backoff maths) into this
 gateway's Python shape. Per-account state lives on wb_accounts.Account; this
 module never touches the network or disk.
 
-Defaults mirror the panel project so the behaviour the operator gets is the
-one that was exercised there. Every value can be overridden from
-accounts/settings.json ("pool" object) and reads back with the same meaning
-on upgrade: an install that never writes the object keeps its previous
-behaviour plus the new weighted picking.
+Governance defaults mirror the panel project. Free fairness compares token
+load; paid fairness compares measured credit spend, using balance weights
+for ties. Pool settings live in accounts/settings.json ("pool" object).
 """
+import math
 import random
 
 DEFAULTS = {
@@ -181,6 +180,34 @@ def credits_remain(account):
         return int(credits.get("remain"))
     except (TypeError, ValueError):
         return None
+
+
+def free_tokens_today(account):
+    """Counted tokens across this account's free models for the local day."""
+    try:
+        return max(0, int(getattr(account, "free_tokens_today", None) or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def credits_spent_today(account):
+    """Counted credit spend, independent of paid-model token volume."""
+    try:
+        value = float(getattr(account, "daily_credits_today", None) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return max(0.0, value) if math.isfinite(value) else 0.0
+
+
+def least_credit_spent(candidates):
+    """Keep accounts with the lowest counted credit spend today."""
+    candidates = list(candidates)
+    if not candidates:
+        return []
+    minimum = min(credits_spent_today(a) for a in candidates)
+    return [a for a in candidates
+            if math.isclose(credits_spent_today(a), minimum,
+                            rel_tol=1e-12, abs_tol=1e-9)]
 
 
 def account_weight(account, max_remain, now, cfg):
