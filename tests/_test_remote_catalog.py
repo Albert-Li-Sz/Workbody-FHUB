@@ -218,6 +218,15 @@ class RemoteCatalogTests(unittest.TestCase):
         self.assertEqual(item["reasoning_efforts"], ["low", "medium", "high"])
         self.assertEqual(item["reasoning_default_effort"], "medium")
 
+    def test_partial_live_reasoning_preserves_bundled_efforts(self):
+        meta = dict(INTL_META)
+        meta["deepseek-v4.1-flash"] = {"credits": "x0.00", "reasoning": {"effort": "max"}}
+        P.fetch_remote_product_config = lambda realm: (INTL_IDS, meta) if realm == "intl" else None
+        entries = dict(P.fetch_models("intl"))
+        item = P.model_entry("deepseek-v4.1-flash", entries["deepseek-v4.1-flash"])
+        self.assertEqual(item["reasoning_efforts"], ["low", "high", "max"])
+        self.assertIsNone(P.model_fixed_effort("deepseek-v4.1-flash"))
+
     def test_bundled_efforts_fill_in_when_the_live_entry_has_none(self):
         """A silent live entry falls back to the snapshot, and says so once."""
         logged = []

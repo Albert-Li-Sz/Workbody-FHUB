@@ -1,6 +1,6 @@
 # 部署、HTTPS 与数据迁移
 
-适用版本：**1.1.2**。协议见 [API 说明](api.md)，账号规则见[调度说明](account-scheduling.md)，旧安装见[升级与回滚](upgrading.md)。
+适用版本：**1.1.3**。协议见 [API 说明](api.md)，账号规则见[调度说明](account-scheduling.md)，旧安装见[升级与回滚](upgrading.md)。
 
 ## 公网 Docker Compose
 
@@ -154,7 +154,7 @@ docker compose start
 
 启用自动 HTTPS 使用 `--https`；默认不会更改原反代。数据库首次启动自动迁移，账号优先级和 Key 渠道保留。升级后的配置固定在私有 `compose.runtime.json`，使用 `docker compose -f compose.runtime.json` 管理；不要直接切换到新版默认 YAML。
 
-确认 `/health` 的版本为 `1.1.2`；启用证书服务后另行确认 `/tls/status` 为 `ready`。发布或拉取镜像不会自动改变正在运行的旧进程。
+确认 `/health` 的版本为 `1.1.3`；启用证书服务后另行确认 `/tls/status` 为 `ready`。发布或拉取镜像不会自动改变正在运行的旧进程。
 
 ### 回滚
 

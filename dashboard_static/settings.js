@@ -203,45 +203,21 @@ async function loadSettings(showToast){
         : (data.api_keys || []).length ? '(无启用 Key，API 请求将被拒绝)' : '(启动 Key 校验)';
       keyState.style.color = required ? 'var(--accent2)' : 'var(--dim)';
     }
-    const reserveValue = Number(data.reserve_credits || 0);
-    const reserveInput = document.getElementById('setReserveCredits');
-    if(reserveInput) reserveInput.value = String(reserveValue);
-      const reserveState = document.getElementById('setReserveState');
-      if(reserveState){
-        reserveState.textContent = reserveValue > 0 ? ('(低于 ' + reserveValue + ' 暂停接单)') : '(未启用)';
-        reserveState.style.color = reserveValue > 0 ? 'var(--accent2)' : 'var(--dim)';
-      }
-      const dailyTokValue = Number(data.daily_token_limit || 0);
-      const dailyTokInput = document.getElementById('setDailyTokenLimit');
-      if(dailyTokInput) dailyTokInput.value = String(dailyTokValue);
-      const dailyTokState = document.getElementById('setDailyTokenState');
-      if(dailyTokState){
-        dailyTokState.textContent = dailyTokValue > 0 ? ('(每账号每天 ' + fmtTokens(dailyTokValue) + ' token)') : '(不限)';
-        dailyTokState.style.color = dailyTokValue > 0 ? 'var(--accent2)' : 'var(--dim)';
-      }
-      const dailyCredValue = Number(data.daily_credit_limit || 0);
-      const dailyCredInput = document.getElementById('setDailyCreditLimit');
-      if(dailyCredInput) dailyCredInput.value = String(dailyCredValue);
-      const dailyCredState = document.getElementById('setDailyCreditState');
-      if(dailyCredState){
-        dailyCredState.textContent = dailyCredValue > 0 ? ('(每账号每天 ' + fmt(dailyCredValue) + ' 积分，超出后仅免费模型)') : '(已关闭)';
-        dailyCredState.style.color = dailyCredValue > 0 ? 'var(--accent2)' : 'var(--dim)';
-      }
-      const modelTokValue = Number(data.model_daily_token_limit || 0);
-      const modelTokInput = document.getElementById('setModelDailyTokenLimit');
-      if(modelTokInput) modelTokInput.value = String(modelTokValue);
-      const modelTokState = document.getElementById('setModelDailyTokenState');
-      if(modelTokState){
-        modelTokState.textContent = modelTokValue > 0 ? ('(每账号每模型每天 ' + fmtTokens(modelTokValue) + ' token)') : '(不限)';
-        modelTokState.style.color = modelTokValue > 0 ? 'var(--accent2)' : 'var(--dim)';
-      }
+    loadLimitInputs(data);
+    const refreshHours = document.getElementById('setCreditsRefreshHours');
+    if(refreshHours) refreshHours.value = String(data.credits_refresh_hours ?? 0.5);
+    const previousPricing = window.PRICING_ENABLED !== false;
+    window.PRICING_ENABLED = data.pricing_enabled !== false;
+    const pricingEnabled = document.getElementById('setPricingEnabled');
+    if(pricingEnabled) pricingEnabled.checked = window.PRICING_ENABLED;
+    if(previousPricing !== window.PRICING_ENABLED && typeof refreshAllCostViews === 'function') refreshAllCostViews();
       const pricingMinutes = Number(data.pricing_refresh_minutes || 0);
       const pricingInput = document.getElementById('setPricingMinutes');
       if(pricingInput) pricingInput.value = String(pricingMinutes);
       const pricingState = document.getElementById('setPricingState');
       if(pricingState){
-        pricingState.textContent = pricingMinutes > 0 ? ('(每 ' + pricingMinutes + ' 分钟)') : '(未启用)';
-        pricingState.style.color = pricingMinutes > 0 ? 'var(--accent2)' : 'var(--dim)';
+        pricingState.textContent = !window.PRICING_ENABLED ? '(已关闭)' : pricingMinutes > 0 ? ('(每 ' + pricingMinutes + ' 分钟)') : '(手动取价)';
+        pricingState.style.color = window.PRICING_ENABLED && pricingMinutes > 0 ? 'var(--accent2)' : 'var(--dim)';
       }
       const variantOn = data.pricing_variant_inherit !== false;
       const variantInput = document.getElementById('setPricingVariant');
@@ -334,52 +310,71 @@ async function savePanelPassword(btn){
   }
 }
 
-async function saveReserveCredits(btn){
-  const el = document.getElementById('setReserveCredits');
-  const value = Math.floor(Number((el || {}).value || 0));
-  if(!Number.isFinite(value) || value < 0){ toast('请填写 0 或正整数', 'warn'); return; }
-  if(btn) btn.disabled = true;
-  try {
-    await postJSON('/settings/save', {reserve_credits: value});
-    toast(value > 0 ? ('已启用：余额低于 ' + value + ' 的账号暂停接单') : '已关闭保留积分', 'ok');
-    loadSettings();
-  } catch(e) {
-    toast('保存失败: ' + e.message, 'bad');
-  } finally {
-    if(btn) btn.disabled = false;
-  }
+const LIMIT_INPUTS = {
+  reserve_credits: ['setReserveCredits', 'setReserveState'],
+  daily_token_limit: ['setDailyTokenLimit', 'setDailyTokenState'],
+  daily_credit_limit: ['setDailyCreditLimit', 'setDailyCreditState'],
+  model_daily_token_limit: ['setModelDailyTokenLimit', 'setModelDailyTokenState'],
+  expiring_window_days: ['setExpiringWindow', 'setExpiringState']
+};
+function loadLimitInputs(data){
+  Object.entries(LIMIT_INPUTS).forEach(([key, [id, stateId]]) => {
+    const row = (data.limits || {})[key] || {global: data[key] || 0, intl: null, cn: null};
+    const globalValue = Number(row.global || 0);
+    [['', 'global'], ['Intl', 'intl'], ['Cn', 'cn']].forEach(([suffix, scope]) => {
+      const input = document.getElementById(id + suffix);
+      if(input){
+        input.value = row[scope] == null ? '' : String(row[scope]);
+        if(suffix) input.placeholder = '继承 ' + globalValue;
+      }
+    });
+    const state = document.getElementById(stateId);
+    if(state){
+      const summary = value => value > 0 ? (/token/.test(key) ? fmtTokens(value) : String(value)) : '关闭';
+      state.textContent = '全局 ' + summary(globalValue) + ' · 国际 ' + summary(row.intl ?? globalValue) + ' · 国内 ' + summary(row.cn ?? globalValue);
+    }
+  });
 }
-
-async function saveDailyTokenLimit(btn){
-  const el = document.getElementById('setDailyTokenLimit');
-  const value = Math.floor(Number((el || {}).value || 0));
-  if(!Number.isFinite(value) || value < 0){ toast('请填写 0 或正整数（token）', 'warn'); return; }
-  if(btn) btn.disabled = true;
-  try {
-    await postJSON('/settings/save', {daily_token_limit: value});
-    toast(value > 0 ? ('已启用：账号当日超过 ' + fmtTokens(value) + ' token 后暂停接单') : '已设为不限（0 = 不限额）', 'ok');
-    loadSettings();
-  } catch(e) {
-    toast('保存失败: ' + e.message, 'bad');
-  } finally {
-    if(btn) btn.disabled = false;
+async function saveLimitRow(key, btn){
+  const ids = LIMIT_INPUTS[key];
+  if(!ids) return;
+  const row = {};
+  for(const [suffix, scope] of [['', 'global'], ['Intl', 'intl'], ['Cn', 'cn']]){
+    const input = document.getElementById(ids[0] + suffix);
+    const raw = input ? input.value.trim() : '';
+    const value = suffix && raw === '' ? null : Number(raw || 0);
+    if(value !== null && (!Number.isSafeInteger(value) || value < 0 || (key === 'expiring_window_days' && value > 3650))){
+      toast('请填写非负整数，渠道留空表示继承；临期窗口最多 3650 天', 'warn'); return;
+    }
+    row[scope] = value;
   }
+  if(btn) btn.disabled = true;
+  try{
+    await postJSON('/settings/save', {limits: {[key]: row}});
+    toast('渠道设置已保存', 'ok');
+    await loadSettings();
+  }catch(e){ toast('保存失败: ' + e.message, 'bad'); }
+  finally{ if(btn) btn.disabled = false; }
 }
-
-async function saveDailyCreditLimit(btn){
-  const el = document.getElementById('setDailyCreditLimit');
-  const value = Math.floor(Number((el || {}).value || 0));
-  if(!Number.isFinite(value) || value < 0){ toast('请填写 0 或正整数（积分）', 'warn'); return; }
+async function saveReserveCredits(btn){ return saveLimitRow('reserve_credits', btn); }
+async function saveDailyTokenLimit(btn){ return saveLimitRow('daily_token_limit', btn); }
+async function saveDailyCreditLimit(btn){ return saveLimitRow('daily_credit_limit', btn); }
+async function saveExpiringWindow(btn){ return saveLimitRow('expiring_window_days', btn); }
+async function saveCreditsRefreshHours(btn){
+  const input = document.getElementById('setCreditsRefreshHours');
+  const value = Number(input ? input.value : 0.5);
+  if(!Number.isFinite(value) || value < 0 || value > 72){ toast('刷新间隔需在 0–72 小时之间', 'warn'); return; }
   if(btn) btn.disabled = true;
-  try {
-    await postJSON('/settings/save', {daily_credit_limit: value});
-    toast(value > 0 ? ('已启用：账号当日超过 ' + value + ' 积分后仅免费模型可用') : '已关闭每日积分限额', 'ok');
-    loadSettings();
-  } catch(e) {
-    toast('保存失败: ' + e.message, 'bad');
-  } finally {
-    if(btn) btn.disabled = false;
-  }
+  try{ await postJSON('/settings/save', {credits_refresh_hours: value}); toast('刷新间隔已保存', 'ok'); await loadSettings(); }
+  catch(e){ toast('保存失败: ' + e.message, 'bad'); }
+  finally{ if(btn) btn.disabled = false; }
+}
+async function savePricingEnabled(btn){
+  const enabled = !!(document.getElementById('setPricingEnabled') || {}).checked;
+  if(btn) btn.disabled = true;
+  try{ await postJSON('/settings/save', {pricing_enabled: enabled}); await loadSettings(); toast(enabled ? '已开启费用估算' : '已关闭费用估算', 'ok'); }
+  catch(e){ toast('保存失败: ' + e.message, 'bad'); }
+  finally{ if(btn) btn.disabled = false; }
 }
 
 async function savePricingMinutes(btn){
@@ -398,21 +393,7 @@ async function savePricingMinutes(btn){
   }
 }
 
-async function saveModelDailyTokenLimit(btn){
-  const el = document.getElementById('setModelDailyTokenLimit');
-  const value = Math.floor(Number((el || {}).value || 0));
-  if(!Number.isFinite(value) || value < 0){ toast('请填写 0 或正整数（token）', 'warn'); return; }
-  if(btn) btn.disabled = true;
-  try {
-    await postJSON('/settings/save', {model_daily_token_limit: value});
-    toast(value > 0 ? ('已启用：账号单模型当日超过 ' + fmtTokens(value) + ' token 后该模型切走') : '已设为不限（0 = 不限额）', 'ok');
-    loadSettings();
-  } catch(e) {
-    toast('保存失败: ' + e.message, 'bad');
-  } finally {
-    if(btn) btn.disabled = false;
-  }
-}
+async function saveModelDailyTokenLimit(btn){ return saveLimitRow('model_daily_token_limit', btn); }
 
 async function loadPricingStatus(){
   const meta = document.getElementById('setPricingMeta');
@@ -421,6 +402,7 @@ async function loadPricingStatus(){
   try {
     const st = await getJSON('/pricing');
     const bits = [];
+    if(st.master_enabled === false) bits.push('费用估算已关闭；Token 和实际积分继续记录');
     if(st.current_at_label) bits.push('当前生效 ' + st.current_at_label + ' 那一份（' + (st.models || 0) + ' 个模型）');
     else bits.push('还没取过价，暂用出厂快照');
     if(st.last_run_label) bits.push('上次取价 ' + st.last_run_label);
@@ -611,6 +593,7 @@ async function saveLocalWebTools(btn){
 /* ---- API key list: several keys, each bound to an upstream exit ---- */
 let API_KEY_ROWS = [];
 let DELETED_KEY_ROWS = [];
+let DELETED_KEY_IDS = [];
 
 function randomKeyValue(){
   const bytes = new Uint8Array(18);
@@ -811,10 +794,12 @@ async function saveSingleKey(index, btn){
 
   if(btn) btn.disabled = true;
   try {
-    await saveApiKeys();
+    if(!await saveApiKeys()){ row._editing = true; return; }
     toast('API Key [' + row.name + '] 已保存', 'ok');
   } catch(e){
     toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
   }
 }
 
@@ -827,9 +812,15 @@ async function toggleKeyRow(index){
   }
   row.enabled = !row.enabled;
   try {
-    await saveApiKeys();
+    if(!await saveApiKeys()){
+      row.enabled = !row.enabled;
+      renderKeyRows();
+      return;
+    }
     toast(row.enabled ? 'Key [' + row.name + '] 已启用' : 'Key [' + row.name + '] 已禁用', 'ok');
   } catch(e){
+    row.enabled = !row.enabled;
+    renderKeyRows();
     toast('操作失败: ' + e.message, 'bad');
   }
 }
@@ -838,9 +829,14 @@ async function removeKeyRow(index){
   const row = API_KEY_ROWS[index];
   if(!row) return;
   if(!confirm('确定删除 API Key [' + (row.name || '未命名') + '] 吗？密钥会被抹掉且无法恢复；看板里它已经产生的历史用量仍会保留这个名字。')) return;
+  if(row.id && !DELETED_KEY_IDS.includes(row.id)) DELETED_KEY_IDS.push(row.id);
   API_KEY_ROWS.splice(index, 1);
   try {
-    await saveApiKeys();
+    if(!await saveApiKeys()){
+      DELETED_KEY_IDS = DELETED_KEY_IDS.filter(id => id !== row.id);
+      await loadSettings();
+      return;
+    }
     toast('已删除 API Key', 'ok');
   } catch(e){
     toast('删除失败: ' + e.message, 'bad');
@@ -912,7 +908,8 @@ async function writeClipboard(text){
 }
 
 async function saveApiKeys(btn){
-  const payload = API_KEY_ROWS.map(row => ({
+  const deletedIds = DELETED_KEY_IDS.slice();
+  const payload = API_KEY_ROWS.filter(row => !deletedIds.includes(row.id)).map(row => ({
     id: row.id || '',
     name: row.name || '',
     realm: row.realm || '',
@@ -921,22 +918,24 @@ async function saveApiKeys(btn){
     // Blank means "keep the stored key", which the server honours per row.
     key: (row.key || '').trim(),
   }));
-  const newRow = API_KEY_ROWS.find(row => !row.masked && !(row.key || '').trim());
+  const newRow = API_KEY_ROWS.find(row => !row.masked && !row.id && !(row.key || '').trim());
   if(newRow){
     toast('新增的行还没有填写 Key', 'warn');
-    return;
+    return false;
   }
   // Several callers save without going through a button (saveSingleKey,
   // toggleKeyRow, removeKeyRow), so a missing button must not abort the save.
   if(btn) btn.disabled = true;
   try {
-    await postJSON('/settings/save', {api_keys: payload});
+    await postJSON('/settings/save', {api_keys: payload, deleted_api_key_ids: deletedIds});
+    DELETED_KEY_IDS = DELETED_KEY_IDS.filter(id => !deletedIds.includes(id));
     toast('已保存 ' + payload.length + ' 个 Key', 'ok');
-    loadSettings();
+    await loadSettings();
+    return true;
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
+    return false;
   } finally {
     if(btn) btn.disabled = false;
   }
 }
-

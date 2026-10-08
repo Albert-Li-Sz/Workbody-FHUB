@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-10-07",
+  "reviewed_on": "2026-10-09",
   "origin": {
     "url": "https://github.com/Albert-Li-Sz/Workbody-FHUB.git"
   },
@@ -9,15 +9,82 @@
       "remote": "upstream-workbuddy",
       "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub.git",
       "branch": "main",
-      "reviewed_commit": "21713cb455cc6ed97f62b7c7f2471f6492db48d9",
+      "reviewed_commit": "e4e8e495901fcf9f2d0893cd5fb42c05cc5b7976",
       "integration": "selective-merge",
       "references": [
         {
           "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/136",
           "reviewed_commit": "5c39bc18b20b10c254953d254aab0022f60f6551",
           "status": "integrated-locally"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/180",
+          "reviewed_commit": "01a45c229ee565bd88fd099187f6b4dbc67f649f",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/177",
+          "reviewed_commit": "41872af8d68a067934eed6c573a556c6111d0b6e",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/178",
+          "reviewed_commit": "74ea87e859d48fd550415edf1890e87ac0200f2d",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/179",
+          "reviewed_commit": "e94dee93b946974c5e590c2305ceed6a2defed24",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/174",
+          "reviewed_commit": "396014e584b99176d6a39ff171fc63e3cb63c5be",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/186",
+          "reviewed_commit": "5a04d080d8f2c87c4fe2e9388614419a3f487ea9",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/185",
+          "reviewed_commit": "37b6e6fb81ab9d12a7b5a66a6c90fb3f46e70cc8",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/184",
+          "reviewed_commit": "6887e3a095562b76bb79502544e3722c3f638128",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/149",
+          "reviewed_commit": "9ac97c88f81c17ffca01a56145598091eb83a6e3",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/130",
+          "reviewed_commit": "30e354384b36e63882e362fd4fa21baeece2931f",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
+        },
+        {
+          "url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/133",
+          "reviewed_commit": "1a7c41b1d77c1f1ea536e4509f3d24733ca053b6",
+          "status": "integrated",
+          "details": "docs/upstream-sync-2026-10-09.md"
         }
-      ]
+      ],
+      "reviewed_version": "1.6.17"
     }
   ]
 }

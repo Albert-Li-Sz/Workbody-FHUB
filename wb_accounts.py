@@ -2,6 +2,7 @@ import re
 import base64
 import json
 import math
+import datetime
 import os
 import ssl
 import sys
@@ -199,6 +200,7 @@ RESOURCE_SUMMARY_PATH = "/billing/meter/get-user-resource-summary"
 RESOURCE_FREE_PACKAGES_PATH = "/billing/meter/get-user-resource-free-packages"
 RESOURCE_PAID_PACKAGES_PATH = "/billing/meter/get-user-resource-paid-packages"
 CHECKIN_STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
+ENTERPRISE_USAGE_PATH = "/billing/meter/get-enterprise-user-usage"
 
 LOGIN_PENDING = 11217
 LOGIN_TTL_SECONDS = 600
@@ -244,6 +246,45 @@ def normalize_epoch(value):
 CN_REALM_MARKERS = ("copilot.tencent.com", "codebuddy.cn", "workbuddy.cn")
 INTL_REALM_MARKERS = ("workbuddy.ai", "codebuddy.ai")
 REALM_MARKERS = {"cn": CN_REALM_MARKERS, "intl": INTL_REALM_MARKERS}
+
+EXPIRY_SENTINEL_DAYS = 730
+
+
+def credit_expiry_epoch(value):
+    if isinstance(value, bool) or value in (None, "", 0, "0"):
+        return None
+    try:
+        stamp = float(value)
+        if stamp > 1e11:
+            stamp /= 1000
+    except (TypeError, ValueError, OverflowError):
+        try:
+            stamp = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+    return stamp if math.isfinite(stamp) and stamp > 0 else None
+
+
+def deduction_end_text(acc):
+    """包的「抵扣截止时间」——积分到这个点就不能再抵扣，即作废时刻。
+
+    取上游的 DeductionEndTime（epoch 毫秒或日期）。上游没给就返回空串，调用方
+    回退到 CycleEndTime。实测 Bonus Pack / 裂变包 / 体验版的 CycleEndTime
+    与 DeductionEndTime 完全一致，但免费包/体验版这类包的 CycleEndTime 只是
+    每月的计费周期边界，两者能差 8 年——所以到期要认这个字段。
+    """
+    raw = acc.get("DeductionEndTime")
+    if raw in (None, "", 0, "0"):
+        return ""
+    stamp = credit_expiry_epoch(raw)
+    if stamp is None:
+        return ""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stamp))
+    except (OSError, ValueError, OverflowError):
+        return ""
+
+
 
 def realm_evidence(token, domain=None):
     """从 token / 域名里看区域，看不出返回 None（不要瞎猜成 intl）。
@@ -379,6 +420,8 @@ class Account(object):
         self.access_token = token
         self.refresh_token = str(data.get("refreshToken") or "")
         self.expires_at = normalize_epoch(data.get("expiresAt")) or jwt_exp(token)
+        if not self.enterprise_id:
+            self.enterprise_id = self.jwt_enterprise_id(token)
         self.added_at = data.get("addedAt") or time.time()
         self.source = str(data.get("source") or "oauth")
         self.proxy_slot = str(data.get("proxySlot") or "").strip()
@@ -464,6 +507,10 @@ class Account(object):
         # refresh token concurrently and the last writer wins, so a freshly
         # minted token can be overwritten by a stale snapshot.
         self._refresh_lock = threading.Lock()
+        self._credits_lock = threading.Lock()
+        self._credits_failures = 0
+        self._credits_retry_at = 0.0
+        self.expiring_window_days = 0
         self._refresh_failures = 0
         self._refresh_retry_at = 0.0
         self._save_lock = threading.Lock()
@@ -1169,17 +1216,21 @@ class Account(object):
                 create_time = str(raw_create)
 
         end_time_str = acc.get("CycleEndTime") or acc.get("ExpiredTime") or ""
+        # 到期认「抵扣截止时间」而不是「周期结束时间」：周期结束只是计费周期
+        # 的边界，积分未必跟着作废。免费包/体验版这两个字段能差 8 年，只认
+        # CycleEndTime 会让这类账号每到月底都被误判成「即将到期」。
+        expire_time_str = deduction_end_text(acc) or end_time_str
         days_left = None
         is_expired = False
-        if end_time_str:
-            try:
-                clean_time = end_time_str.replace("T", " ")[:19]
-                end_ts = time.mktime(time.strptime(clean_time, "%Y-%m-%d %H:%M:%S"))
-                diff_sec = end_ts - time.time()
+        no_expiry = False
+        expire_at = credit_expiry_epoch(expire_time_str)
+        if expire_at is not None:
+            diff_sec = expire_at - time.time()
+            if diff_sec > EXPIRY_SENTINEL_DAYS * 86400.0:
+                no_expiry = True
+            else:
                 days_left = round(diff_sec / 86400.0, 1)
                 is_expired = diff_sec < 0
-            except Exception:
-                pass
 
         in_usage = bool(acc.get("InUsage"))
         if not in_usage and not is_expired and remain > 0 and used > 0:
@@ -1202,6 +1253,9 @@ class Account(object):
             "auto_renew": bool(acc.get("AutoRenewFlag") or acc.get("SupportAutoRenew")),
             "cycle_start_time": acc.get("CycleStartTime") or "",
             "cycle_end_time": end_time_str,
+            "expire_time": expire_time_str,
+            "expire_at": expire_at,
+            "no_expiry": no_expiry,
             "days_left": days_left,
             "is_expired": is_expired,
             "status": acc.get("Status", 0),
@@ -1312,6 +1366,8 @@ class Account(object):
                 "package_code": ep.get("package_code", ""),
                 "remain": ep["remain"],
                 "cycle_end_time": ep["cycle_end_time"],
+                "expire_time": ep.get("expire_time"),
+                "expire_at": ep.get("expire_at"),
                 "days_left": ep["days_left"],
             }
 
@@ -1380,6 +1436,8 @@ class Account(object):
                 "package_code": ep.get("package_code", ""),
                 "remain": ep["remain"],
                 "cycle_end_time": ep["cycle_end_time"],
+                "expire_time": ep.get("expire_time"),
+                "expire_at": ep.get("expire_at"),
                 "days_left": ep["days_left"],
             }
 
@@ -1401,8 +1459,111 @@ class Account(object):
             self.save(os.path.dirname(self.path))
         return {"ok": True, "credits": self.credits}
 
-    def fetch_credits(self):
+    def jwt_enterprise_id(self, token=None):
+        """企业空间 id，取自 token 自身（或已存的 accessToken）。
+
+        企业账号是登录时切到企业空间换来的 token（token_source=enterprise_switch），
+        账号文件里的 enterpriseId 常常是空的——只有 token 里有。拿不到就返回 ""。
+        """
+        return str(_jwt_claims(token or self.access_token).get("enterprise_id") or "")
+
+
+    def is_enterprise(self):
+        """True when this account belongs to an enterprise (team) space.
+
+        Enterprise members have no personal resource packages, so the personal
+        billing endpoint always answers TotalCount=0 and the panel shows 0/0.
+        Their credit lives on /billing/meter/get-enterprise-user-usage instead.
+        """
+        return bool(self.enterprise_id or self.jwt_enterprise_id())
+
+
+    def _fetch_credits_enterprise(self):
+        """企业账号积分：周期内已用 + 周期额度，剩余 = 额度 - 已用。
+
+        上游只回 4 个字段：credit（本周期已消耗，实测随时间单调递增）、
+        limitNum（周期额度）、cycleStartTime / cycleEndTime。没有包列表，
+        所以合成一个包条目，让看板的明细弹窗与到期提示照常工作。
+        """
+        cfg = get_realm_config(self.realm)
+        url = cfg["billing_upstream"] + ENTERPRISE_USAGE_PATH
+        headers = self.headers(purpose="billing")
+        headers["X-Client-Platform"] = "web"
+        try:
+            res = http_json(url, data=b"{}", method="POST", headers=headers,
+                            timeout=15, proxy=self.proxy)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        data = res.get("data") if isinstance(res, dict) else None
+        if not isinstance(res, dict) or res.get("code") not in (None, 0, "0") or not isinstance(data, dict):
+            return {"ok": False, "error": "enterprise billing returned no usable data"}
+        try:
+            if isinstance(data.get("credit"), bool) or isinstance(data.get("limitNum"), bool):
+                raise ValueError("invalid enterprise quota")
+            used, size = float(data["credit"]), float(data["limitNum"])
+            if not all(math.isfinite(value) and value >= 0 for value in (used, size)):
+                raise ValueError("invalid enterprise quota")
+            used, size = round(used, 2), round(size, 2)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {"ok": False, "error": "enterprise billing returned an invalid quota"}
+        # 上游只给额度与已用；已用超过额度（或额度缺失）时不要算出负余额。
+        remain = round(max(0.0, size - used), 2) if size > 0 else 0.0
+
+        cycle_start = str(data.get("cycleStartTime") or "")
+        cycle_end = str(data.get("cycleEndTime") or data.get("cycleResetTime") or "")
+        # 企业额度按周期重置（额度回满），不是到期作废：cycleEndTime 到期后
+        # 额度是回满而不是清零。所以它不参与到期倒计时——把它算成「即将到期」
+        # 会让企业账号永远落在临期窗口里。
+        days_left = None
+        is_expired = False
+        no_expiry = True
+
+        package = {
+            "name": "企业额度" if size else "企业周期额度",
+            "package_code": "enterprise",
+            "product_name": "",
+            "sub_product_name": "",
+            "grant_reason": "企业空间发放",
+            "resource_id": "",
+            "deal_name": "",
+            "create_time": cycle_start,
+            "remain": remain,
+            "used": used,
+            "size": size,
+            "unit": "credits",
+            "in_usage": bool(used > 0),
+            "auto_renew": True,
+            "cycle_start_time": cycle_start,
+            "cycle_end_time": cycle_end,
+            "expire_time": "",
+            "no_expiry": no_expiry,
+            "days_left": days_left,
+            "is_expired": is_expired,
+            "status": 0,
+        }
+        self.credits = {
+            "remain": remain,
+            "used": used,
+            "size": size,
+            "used_percent": ("%.1f%%" % (used / size * 100)) if size > 0 else "0.0%",
+            "remain_percent": ("%.1f%%" % (remain / size * 100)) if size > 0 else "100.0%",
+            "is_paid_user": True,
+            "is_enterprise": True,
+            "checkin": None,
+            "earliest_expiring": None,
+            "packages": [package] if size > 0 else [],
+            "updated_at": time.time(),
+            "updated_iso": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if self.path and os.path.exists(os.path.dirname(self.path)):
+            self.save(os.path.dirname(self.path))
+        return {"ok": True, "credits": self.credits}
+
+
+    def _fetch_credits_raw(self):
         if self.realm == "cn":
+            if self.is_enterprise():
+                return self._fetch_credits_enterprise()
             try:
                 res = self._fetch_credits_cn_detailed()
                 if res.get("ok"):
@@ -1410,6 +1571,100 @@ class Account(object):
             except Exception:
                 pass
         return self._fetch_credits_fallback()
+
+
+    def soonest_expiring_days(self):
+        """Days until the earliest credit package that still has credits left.
+
+        None when nothing can be said: no credit data, no package with a
+        usable remainder, or an end date the upstream never gave.
+
+        Packages the upstream never really expires are skipped. The enterprise
+        quota resets its allowance rather than voiding it, and the free plan /
+        trial packs carry a deduction deadline years out, so both are marked
+        `no_expiry` where they are built. Treating either as an expiry would
+        make those accounts look permanently "about to lapse" - the free plan
+        would even look urgent at every month end, when its billing cycle rolls
+        over but its credits keep working.
+        """
+        credits = self.credits
+        if not isinstance(credits, dict):
+            return None
+        soonest = None
+        for package in (credits.get("packages") or []):
+            if not isinstance(package, dict):
+                continue
+            # `no_expiry` is the general rule; the package_code check is a
+            # belt-and-braces guard for credit blobs written before the flag
+            # existed, which are still on disk until the next refresh.
+            if package.get("no_expiry"):
+                continue
+            if package.get("package_code") == "enterprise":
+                continue
+            if package.get("is_expired"):
+                continue
+            deadline = credit_expiry_epoch(package.get("expire_at") or package.get("expire_time"))
+            days = ((deadline - time.time()) / 86400 if deadline is not None
+                    else package.get("days_left"))
+            if deadline is None and isinstance(days, (int, float)):
+                updated = credit_expiry_epoch(credits.get("updated_at"))
+                if updated is not None:
+                    days -= max(0, time.time() - updated) / 86400
+            remain = package.get("remain")
+            if (isinstance(days, bool) or not isinstance(days, (int, float))
+                    or not math.isfinite(days) or days < 0):
+                continue
+            if (isinstance(remain, bool) or not isinstance(remain, (int, float))
+                    or not math.isfinite(remain) or remain <= 0):
+                continue
+            if soonest is None or days < soonest:
+                soonest = float(days)
+        return soonest
+
+
+    def in_expiring_window(self):
+        """True when this account should jump the dispatch queue.
+
+        Unknown or missing credit data is never a preference: an account the
+        gateway cannot judge keeps its plain round-robin turn instead of being
+        pushed to the front on a guess.
+        """
+        try:
+            window = int(self.expiring_window_days or 0)
+        except (TypeError, ValueError):
+            window = 0
+        if window <= 0:
+            return False
+        soonest = self.soonest_expiring_days()
+        return soonest is not None and soonest <= window
+
+
+    def fetch_credits(self, force=True, ttl=1800):
+        """Refresh the balance; a refresh that shows credits again also lifts
+        an early 402 park (revive_balance_cooldown).
+
+        Serialised per account: the background refresher and the sign-in /
+        daily-activity tasks all land here, and without the lock two
+        overlapping calls would each spend an upstream billing request and
+        then race to publish whichever answer came back second.
+        """
+        with self._credits_lock:
+            now = time.time()
+            if not force:
+                if now < self._credits_retry_at:
+                    return {"ok": False, "error": "balance refresh is backing off"}
+                credits = self.credits if isinstance(self.credits, dict) else {}
+                updated = credit_expiry_epoch(credits.get("updated_at"))
+                if updated is not None and now - updated < ttl:
+                    return {"ok": True, "credits": self.credits, "cached": True}
+            res = self._fetch_credits_raw()
+            if isinstance(res, dict) and res.get("ok"):
+                self._credits_failures, self._credits_retry_at = 0, 0.0
+                self.revive_balance_cooldown()
+            else:
+                self._credits_failures += 1
+                self._credits_retry_at = now + min(600, 30 * 2 ** min(self._credits_failures - 1, 5))
+            return res
 
     def _set_last_error(self, message):
         """Record refresh errors alongside the state shown in the panel."""
@@ -1771,6 +2026,13 @@ class SessionAffinity(object):
             mirror = self.mirror
         self._store(key, None)
 
+def _realm_limit(values, realm):
+    if not isinstance(values, dict):
+        return wb_settings._limit_number(values)
+    override = values.get(realm)
+    return wb_settings._limit_number(values.get("global") if override is None else override)
+
+
 class AccountPool(object):
     def __init__(self, directory, log=None):
         self.dir = directory
@@ -1780,12 +2042,15 @@ class AccountPool(object):
         self._lock = threading.RLock()
         self._cursor = 0
         self._free_cursors = {}
+        self._expiry_weights = {}
         self.pool_cfg = wb_pool.normalize(None)
         self.affinity = SessionAffinity(background=True)
         self._refresh_queue = wb_background.WorkQueue("credential-refresh", workers=2, max_pending=5000,
                                                      on_error=lambda exc: self.log("credential refresh failed: %s" % exc))
         self._refresh_stop = threading.Event()
         self._refresh_thread = None
+        self._refresh_job_lock = threading.Lock()
+        self._refresh_job = None
         # Panel-parity cost ledger: (uid, model) -> {tier, at, credit}.
         # tier 0 = measured free, 2 = measured paid, absent/stale = unknown.
         self.cost_ledger = {}
@@ -1809,6 +2074,7 @@ class AccountPool(object):
                     self.accounts.append(account)
             self.apply_pool_config()
             self.apply_reserve_credits()
+            self.apply_expiring_window()
             return self.accounts
 
     def list_public(self, realm=None):
@@ -1858,6 +2124,7 @@ class AccountPool(object):
             self.apply_pool_config()
             self.apply_proxy_slots()
             self.apply_reserve_credits()
+            self.apply_expiring_window()
             return account
 
     def remove(self, uid):
@@ -2106,6 +2373,14 @@ class AccountPool(object):
         self.affinity.configure_mirror(mirror, mirror_ttl)
         return cfg
 
+    def apply_expiring_window(self, values=None):
+        if values is None:
+            values = wb_settings.limit_values(self.dir, "expiring_window_days")
+        with self._lock:
+            for account in self.accounts:
+                account.expiring_window_days = _realm_limit(values, account.realm)
+        return values
+
     def apply_reserve_credits(self, value=None):
         """Re-resolve the low-credit guard for every account.
 
@@ -2116,14 +2391,12 @@ class AccountPool(object):
         import wb_settings
 
         if value is None:
-            value = wb_settings.reserve_credits(self.dir)
-        try:
-            value = max(0, int(value or 0))
-        except (TypeError, ValueError):
-            value = 0
+            value = wb_settings.limit_values(self.dir, "reserve_credits")
+        values = value
+        value = _realm_limit(values, None)
         with self._lock:
             for account in self.accounts:
-                account.reserve_credits = value
+                account.reserve_credits = _realm_limit(values, account.realm)
         return value
 
     def apply_daily_token_limit(self, value=None, usage=None):
@@ -2138,15 +2411,13 @@ class AccountPool(object):
         import wb_settings
 
         if value is None:
-            value = wb_settings.daily_token_limit(self.dir)
-        try:
-            value = max(0, int(value or 0))
-        except (TypeError, ValueError):
-            value = 0
+            value = wb_settings.limit_values(self.dir, "daily_token_limit")
+        values = value
+        value = _realm_limit(values, None)
         with self._lock:
             for account in self.accounts:
                 was_blocked = account.daily_limit_blocked()
-                account.daily_token_limit = value
+                account.daily_token_limit = _realm_limit(values, account.realm)
                 if usage is not None:
                     try:
                         account.daily_tokens_today = int(usage.get(account.uid, 0))
@@ -2158,7 +2429,7 @@ class AccountPool(object):
                         self.log("account %s parked: daily token limit reached "
                                  "(%s/%s tokens today)"
                                  % (str(account.uid)[:8],
-                                    account.daily_tokens_today, value))
+                                    account.daily_tokens_today, account.daily_token_limit))
                     else:
                         self.log("account %s resumed: daily token limit cleared"
                                  % str(account.uid)[:8])
@@ -2177,15 +2448,13 @@ class AccountPool(object):
         import wb_settings
 
         if value is None:
-            value = wb_settings.daily_credit_limit(self.dir)
-        try:
-            value = max(0, int(value or 0))
-        except (TypeError, ValueError):
-            value = 0
+            value = wb_settings.limit_values(self.dir, "daily_credit_limit")
+        values = value
+        value = _realm_limit(values, None)
         with self._lock:
             for account in self.accounts:
                 was_blocked = account.credit_limit_reached()
-                account.daily_credit_limit = value
+                account.daily_credit_limit = _realm_limit(values, account.realm)
                 if credits is not None:
                     try:
                         account.daily_credits_today = float(
@@ -2201,7 +2470,7 @@ class AccountPool(object):
                         self.log("account %s capped: daily credit limit reached "
                                  "(%s/%s credits today), free models only"
                                  % (str(account.uid)[:8],
-                                    account.daily_credits_today, value))
+                                    account.daily_credits_today, account.daily_credit_limit))
                     else:
                         self.log("account %s resumed: daily credit limit cleared"
                                  % str(account.uid)[:8])
@@ -2229,15 +2498,13 @@ class AccountPool(object):
         import wb_settings
 
         if value is None:
-            value = wb_settings.model_daily_token_limit(self.dir)
-        try:
-            value = max(0, int(value or 0))
-        except (TypeError, ValueError):
-            value = 0
+            value = wb_settings.limit_values(self.dir, "model_daily_token_limit")
+        values = value
+        value = _realm_limit(values, None)
         with self._lock:
             for account in self.accounts:
                 was_blocked = account.blocked_model_names()
-                account.model_daily_token_limit = value
+                account.model_daily_token_limit = _realm_limit(values, account.realm)
                 if per_model is not None:
                     raw = per_model.get(account.uid) or {}
                     try:
@@ -2250,7 +2517,7 @@ class AccountPool(object):
                     self.log("account %s model %s parked: daily token limit "
                              "reached (%s/%s tokens today)"
                              % (str(account.uid)[:8], mid,
-                                (account.model_daily_tokens or {}).get(mid), value))
+                                (account.model_daily_tokens or {}).get(mid), account.model_daily_token_limit))
                 for mid in sorted(was_blocked - now_blocked):
                     self.log("account %s model %s resumed: daily token limit "
                              "cleared" % (str(account.uid)[:8], mid))
@@ -2287,12 +2554,67 @@ class AccountPool(object):
         return sum(1 for a in snapshot if a.enabled and a.access_token
                    and a.ready(model=model, allow_refresh=allow_refresh))
 
+    def credential_refresh_status(self, job_id=None):
+        with self._refresh_job_lock:
+            job = self._refresh_job
+            if job is None or job_id and job_id != job["id"]:
+                return None
+            results = list(job["results"])
+            return {"id": job["id"], "total": job["total"], "completed": len(results),
+                    "running": len(results) < job["total"], "results": results,
+                    "started_at": job["started_at"]}
+
+    def start_manual_refresh(self):
+        """One bounded batch shared by panel tabs, using the existing workers."""
+        with self._lock:
+            targets = list(self.accounts)
+        with self._refresh_job_lock:
+            active = self._refresh_job
+            if active and len(active["results"]) < active["total"]:
+                job_id = active["id"]
+            else:
+                job = {"id": uuid.uuid4().hex, "total": len(targets),
+                       "started_at": time.time(), "results": []}
+                self._refresh_job = job
+                job_id = job["id"]
+
+                def run(account):
+                    ok, error = False, None
+                    try:
+                        if self.get(account.uid) is not account:
+                            error = "account was removed"
+                        else:
+                            ok = bool(account.refresh())
+                            account.save(self.dir)
+                            error = None if ok else account.last_error
+                    except Exception as exc:
+                        ok = False
+                        error = str(exc)
+                    finally:
+                        with self._refresh_job_lock:
+                            job["results"].append({"uid": account.uid, "ok": ok, "error": error})
+                        if wb_database.DATABASE:
+                            wb_database.DATABASE.close_thread()
+
+                for account in targets:
+                    if not self._refresh_queue.submit("manual:" + str(account.uid),
+                                                      lambda a=account: run(a)):
+                        job["results"].append({"uid": account.uid, "ok": False,
+                                               "error": "refresh queue is full or stopped"})
+        return self.credential_refresh_status(job_id)
+
     def start_credential_refresh(self):
         if self._refresh_thread is not None:
             return
         def refresh_account(account):
             try:
                 account.refresh(force=False)
+            finally:
+                if wb_database.DATABASE:
+                    wb_database.DATABASE.close_thread()
+        def refresh_balance(account, ttl):
+            try:
+                account.fetch_credits(force=False, ttl=ttl)
             finally:
                 if wb_database.DATABASE:
                     wb_database.DATABASE.close_thread()
@@ -2307,6 +2629,24 @@ class AccountPool(object):
                         if account.enabled and account.refresh_token and exp and exp - now <= 300:
                             if now >= account._refresh_retry_at:
                                 self._refresh_queue.submit(account.uid, lambda a=account: refresh_account(a))
+                    # Stagger expiry data refreshes instead of scanning every
+                    # balance at once. At most one account is queued per tick.
+                    ttl = wb_settings.credits_refresh_hours(self.dir) * 3600
+                    if ttl > 0:
+                        stale = []
+                        for account in accounts:
+                            if not account.enabled or not account.access_token or account.expiring_window_days <= 0:
+                                continue
+                            if now < account._credits_retry_at:
+                                continue
+                            credits = account.credits if isinstance(account.credits, dict) else {}
+                            updated = credit_expiry_epoch(credits.get("updated_at")) or 0
+                            if now - updated >= ttl:
+                                stale.append((updated, account))
+                        if stale:
+                            account = min(stale, key=lambda entry: entry[0])[1]
+                            self._refresh_queue.submit("credits:" + str(account.uid),
+                                lambda a=account, t=ttl: refresh_balance(a, t))
                     self._refresh_stop.wait(15)
             finally:
                 if wb_database.DATABASE:
@@ -2419,6 +2759,32 @@ class AccountPool(object):
             self._free_cursors[key] = account.uid
             return account
 
+    def _pick_expiring_paid(self, candidates, realm, model, now):
+        if not model or any(self._model_free_for(account, model, now) for account in candidates):
+            return None
+        urgent = []
+        days_by_uid = {}
+        for account in candidates:
+            days = account.soonest_expiring_days()
+            if days is not None and 0 <= days <= account.expiring_window_days and account.expiring_window_days > 0:
+                urgent.append(account)
+                days_by_uid[account.uid] = days
+        if not urgent:
+            return None
+        key = (realm or "all", getattr(urgent[0], "priority", DEFAULT_PRIORITY))
+        with self._lock:
+            previous = self._expiry_weights.get(key, {})
+            state = {account.uid: previous.get(account.uid, 0) for account in urgent}
+            total = 0
+            for account in urgent:
+                weight = max(1, int(round(account.expiring_window_days - days_by_uid[account.uid])) + 1)
+                state[account.uid] += weight
+                total += weight
+            chosen = max(urgent, key=lambda account: state[account.uid])
+            state[chosen.uid] -= total
+            self._expiry_weights[key] = state
+            return chosen
+
     def pick(self, realm=None, exclude=None, model=None, allow_refresh=True):
         """Pick the next account for model.
 
@@ -2450,6 +2816,13 @@ class AccountPool(object):
         account = None
         for priority in sorted(tiers):
             tier = tiers[priority]
+            if model and any(getattr(candidate, "expiring_window_days", 0) > 0 for candidate in tier):
+                expiring_candidates = [a for a in tier if a.ready(model=model, allow_refresh=allow_refresh)]
+                if cfg.get("weighted_pick", True):
+                    expiring_candidates = self._apply_credit_floor(expiring_candidates, model, cfg, now)
+                account = self._pick_expiring_paid(expiring_candidates, realm, model, now)
+                if account is not None:
+                    break
             if cfg.get("weighted_pick", True):
                 candidates = [a for a in tier if a.ready(model=model, allow_refresh=allow_refresh)]
                 if not candidates:

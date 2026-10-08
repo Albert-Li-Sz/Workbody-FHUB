@@ -913,7 +913,7 @@ let costUsdRate = 7.1;
 function costSymbol(){ return costCurrency === 'USD' ? '$' : '￥'; }
 // 小额保留更多小数位，避免 0.00x 被显示成 0.00；与费用估算的展示口径一致。
 function fmtCost(cny){
-  if(cny == null || cny === '') return '—';
+  if(window.PRICING_ENABLED === false || cny == null || cny === '') return '—';
   const raw = Number(cny) || 0;
   const n = costCurrency === 'USD' ? raw / (costUsdRate || 1) : raw;
   const a = Math.abs(n);

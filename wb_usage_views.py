@@ -1,19 +1,14 @@
 """Incremental analytics maps: fold new SQL sequences, keep views bounded."""
 import collections
 import copy
-import os
 import threading
 import wb_pricing
 
 
 def pricing_epoch():
-    result = []
+    result = [wb_pricing.pricing_enabled(), wb_pricing.variant_inherit_enabled()]
     for path in (wb_pricing.policies_path(), wb_pricing.timeline_path(), wb_pricing.overrides_path()):
-        try:
-            stat = os.stat(path)
-            result.append((path, stat.st_mtime_ns, stat.st_size))
-        except OSError:
-            result.append((path, None))
+        result.append((path, wb_pricing._file_key(path)))
     return tuple(result)
 
 

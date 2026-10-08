@@ -466,6 +466,13 @@ def run_checks(filter_name):
                 "document.querySelector('#slotList tbody tr') ? getComputedStyle(document.querySelector('#slotList tbody tr')).display : 'none'"
             )
             check("slots-cards", disp == "grid", disp)
+            quota = page.evaluate("""(() => {
+                const table = document.querySelector('#settings-quota table');
+                const row = table.querySelector('tbody tr');
+                return {display:getComputedStyle(row).display, inputs:table.querySelectorAll('input').length,
+                        width:Math.round(table.getBoundingClientRect().width)};
+            })()""")
+            check("quota-cards", quota['display'] == 'grid' and quota['inputs'] == 15 and quota['width'] <= 390, quota)
             kv = page.evaluate(
                 "getComputedStyle(document.querySelector('#pageSettings table:not(.data-cards)')).display"
             )

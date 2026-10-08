@@ -410,27 +410,31 @@ function renderUsageSeries(data){
   ctx.fillText(lastLabel, Math.max(pad.l, cssW - pad.r - ctx.measureText(lastLabel).width), cssH - 6);
 }
 
+let CREDIT_HISTORY_ROWS = [];
+function creditAccountLabel(uid){
+  const account = (window.ACCOUNTS || []).find(a => String(a.uid) === String(uid));
+  return account && account.nickname ? account.nickname : String(uid || '').slice(0, 8);
+}
+function renderCreditHistory(){
+  const tbody = document.querySelector('#creditHistoryTable tbody');
+  if(!tbody) return;
+  tbody.innerHTML = CREDIT_HISTORY_ROWS.map(x => '<tr>'
+    + '<td>' + esc(x.iso || '') + '</td>'
+    + '<td>' + esc(x.model || '') + '</td>'
+    + '<td title="' + esc(x.account || '') + '">' + esc(creditAccountLabel(x.account)) + '</td>'
+    + '<td>' + fmt(x.credit) + '</td>'
+    + '<td>' + fmtTokens(x.total_tokens || 0) + '</td>'
+    + '</tr>').join('') || '<tr><td colspan="5" style="color:var(--dim)">没有积分扣减记录</td></tr>';
+}
 async function loadCreditHistory(btn){
   if(btn) btn.disabled = true;
   try{
     const r = await postJSON('/requests', {limit: 500});
-    const rows = (r.rows || []).filter(x => Number(x.credit || 0) > 0).slice(0, 50);
-    const tbody = document.querySelector('#creditHistoryTable tbody');
-    if(tbody){
-      tbody.innerHTML = rows.map(x => '<tr>'
-        + '<td>' + esc(x.iso || '') + '</td>'
-        + '<td>' + esc(x.model || '') + '</td>'
-        + '<td class="mono">' + esc(String(x.account || '').slice(0,8)) + '</td>'
-        + '<td>' + fmt(x.credit) + '</td>'
-        + '<td>' + fmtTokens(x.total_tokens || 0) + '</td>'
-        + '</tr>').join('') || '<tr><td colspan="5" style="color:var(--dim)">没有积分扣减记录</td></tr>';
-    }
+    CREDIT_HISTORY_ROWS = (r.rows || []).filter(x => Number(x.credit || 0) > 0).slice(0, 50);
+    renderCreditHistory();
     if(btn) toast('积分扣减历史已刷新', 'ok');
-  }catch(e){
-    toast('读取积分扣减历史失败: ' + e.message, 'bad');
-  }finally{
-    if(btn) btn.disabled = false;
-  }
+  }catch(e){ toast('读取积分扣减历史失败: ' + e.message, 'bad'); }
+  finally{ if(btn) btn.disabled = false; }
 }
 
 /* 第一列的口径随范围切换，标签必须跟着走，否则「本周」的数字会被当成「今日」读。 */

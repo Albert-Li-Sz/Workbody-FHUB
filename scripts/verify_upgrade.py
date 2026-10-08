@@ -53,6 +53,10 @@ def seed(directory):
         "realm":"cn", "accessToken":"synthetic-not-a-real-token", "enabled":False, "priority":7}))
     wb_settings.set_panel_password(str(accounts), PASSWORD)
     wb_settings.set_api_keys(str(accounts), [{"id":"fixture-key", "name":"Fixture", "key":KEY, "realm":"cn"}])
+    settings = wb_settings.load(str(accounts))
+    settings.update(daily_token_limit=900000, daily_credit_limit=321, model_daily_token_limit=456789)
+    settings["pool"] = {"free_switch_window_tokens": 64000}
+    wb_settings.save(str(accounts), settings)
     row = {"event_id":"fixture-usage", "at":time.time()-10, "realm":"cn", "account":"fixture-account",
            "key":"fixture-key", "model":"fixture-model", "outcome":"completed", "total_tokens":123,
            "prompt_tokens":100, "completion_tokens":23, "credit":0, "billing_mode":"free"}
@@ -64,6 +68,11 @@ def assert_data(directory, schema):
     settings = wb_settings.load(str(accounts))
     assert settings["api_keys"][0]["key"] == KEY
     assert wb_settings.verify_panel_password(str(accounts), PASSWORD)
+    assert wb_settings.daily_token_limit(str(accounts), "cn") == 900000
+    assert wb_settings.daily_credit_limit(str(accounts), "intl") == 321
+    assert wb_settings.model_daily_token_limit(str(accounts), "cn") == 456789
+    assert wb_settings.expiring_window_days(str(accounts)) == 0
+    assert wb_settings.pool_config(str(accounts))["free_switch_window_tokens"] == 64000
     account = json.loads((accounts / "fixture.json").read_text())
     assert account["priority"] == 7 and account["enabled"] is False
     connection = sqlite3.connect(accounts / "workbody.sqlite3")
@@ -95,12 +104,12 @@ def compose_case(old_version, new_image, old_image, root):
     model = {"name":project,"services":{"workbody-fhub":{"image":old_image,"pull_policy":"never",
         "network_mode":"none", "environment":{"HOST":"0.0.0.0","PORT":"8788","PANEL_PASSWORD":PASSWORD},
         "volumes":[str(directory/"accounts")+":/app/accounts",str(directory/"usage")+":/app/usage"]}}}
-    if old_version == "1.1.1":
+    if old_version in ("1.1.1", "1.1.2"):
         model["services"]["workbody-fhub"].pop("network_mode")
         model["networks"] = {"default":{"internal":True}}
         for name in (".tls", ".acme"):
             (directory/name).mkdir()
-        model["services"]["nginx"] = {"image":"ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.1.1",
+        model["services"]["nginx"] = {"image":"ghcr.io/albert-li-sz/workbody-fhub-nginx:v"+old_version,
             "pull_policy":"never", "environment":{"WB_TLS_MODE":"off","WB_NGINX_UPSTREAM":"workbody-fhub:8788"},
             "volumes":[str(directory/".tls")+":/etc/letsencrypt",str(directory/".acme")+":/var/lib/letsencrypt"]}
     compose = directory / "compose.fixture.json"
@@ -109,19 +118,20 @@ def compose_case(old_version, new_image, old_image, root):
     try:
         update.run(command+["up","-d","--pull","never"],directory)
         update.wait_application(command,"workbody-fhub",directory,old_version,60)
-        assert_data(directory,1)
+        old_schema = 2 if old_version == "1.1.2" else 1
+        assert_data(directory,old_schema)
         update.upgrade(arguments(directory,compose_file=[str(compose)]))
         assert_data(directory,2)
         runtime = update.compose_command(directory,[directory/update.RUNTIME_FILE])
-        if old_version == "1.1.1":
+        if old_version in ("1.1.1", "1.1.2"):
             assert update.wait_gateway(runtime,"nginx",directory,VERSION,30)["status"] == "disabled"
         backups = list((directory/".update-backups").iterdir())
         assert len(backups) == 1
         update.rollback(arguments(directory,rollback=str(backups[0])))
         update.wait_application(update.compose_command(directory,[backups[0]/"rollback-compose.json"]),
                                 "workbody-fhub",directory,old_version,60)
-        assert_data(directory,1)
-        print("Verified Compose %s -> %s -> rollback; priority/key/password/123 tokens preserved." % (old_version,VERSION))
+        assert_data(directory,old_schema)
+        print("Verified Compose %s -> %s -> rollback; priority/key/password/123 tokens/limits/session window preserved." % (old_version,VERSION))
     finally:
         update.run(["docker","compose","-p",project,"-f",str(compose),"down","--remove-orphans"],directory)
 
@@ -184,7 +194,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="workbody-migration-check-") as temporary:
             root=Path(temporary)
             native_case(root)
-            for version in ("1.1.0","1.1.1"):
+            for version in ("1.1.0","1.1.1","1.1.2"):
                 compose_case(version,args.image,"workbody-fhub:"+version,root)
     finally:
         update.download,update.run,update.REGISTRY=original_download,original_run,original_registry

@@ -167,7 +167,8 @@ print(json.dumps({'health': 200, 'anonymous_api': 401, 'admin_login': 401,
 def regressions(platform):
     suites = ["ddg_search", "web_security", "web_tool_flow", "panel_bootstrap", "removed_exit", "health_auth", "project_repairs",
               "generation_speed", "account_balance", "client_balance", "free_fairness", "socks_proxy",
-              "messages_web", "anthropic_http", "anthropic_messages", "gateway_hardening"]
+              "messages_web", "anthropic_http", "anthropic_messages", "gateway_hardening",
+              "api_key_save_merge", "upstream_integration", "remote_catalog"]
     with fixture_tree() as fixtures:
         suites = [suite for suite in suites if (fixtures / "tests" / ("_test_%s.py" % suite)).exists()]
         if not suites:

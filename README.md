@@ -2,7 +2,7 @@
 
 WorkBuddy 国内与国际多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages，提供账号调度、渠道绑定、积分余额查询和实时用量控制台。
 
-当前版本 **1.1.2** · Python **3.9+** · 应用仅依赖 Python 标准库
+当前版本 **1.1.3** · Python **3.9+** · 应用仅依赖 Python 标准库
 
 [版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
@@ -16,7 +16,7 @@ WorkBuddy 国内与国际多账号网关。将已有账号接入 OpenAI Chat Com
 - **实时控制台**：中性色侧栏布局，支持手机、深浅主题、简繁体；SSE 推送状态变化，账号分页与局部更新，断线重连和低频恢复刷新；Token 显示 `K/M/B`。
 - **协议兼容**：模型详情、渠道积分余额、按 Key 查询 Token；支持 DeepSeek、Kimi、千问及 OpenAI 旧版余额响应格式。
 - **Messages 联网搜索**：本地 DDG 执行与模型续轮，原生搜索结果及引用、DSH 文本兼容、搜索历史回放；支持次数限制与域名过滤，需开启面板本地网络工具。详见 [Messages 接入](docs/api.md#messages-搜索请求)。
-- 账号导入／导出、OAuth、代理槽、保留积分、每日限额、签到和任务调度；可选[本地网络工具](docs/research/web-search-support.md)。
+- 账号导入／导出、OAuth、批量凭证刷新、代理槽、分渠道保留积分与每日限额、可选付费临期调度、签到和任务调度；可选[本地网络工具](docs/research/web-search-support.md)。
 
 ## 公网部署：Nginx + 自动 HTTPS
 
@@ -64,7 +64,7 @@ Windows、macOS、Linux 启动脚本继续可用。面板密码和 API Key 分�
 在原安装目录执行，先保留旧 Compose 配置：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.2/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.3/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -109,7 +109,7 @@ curl https://<公网IP>/v1/models \
 
 应用无额外 pip 依赖；Nginx 镜像额外包含 Certbot。发布工作流同时构建两个镜像的 `linux/amd64`、`linux/arm64` 版本，验证后更新稳定标签，并在 [Release](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) 附带源码、升级脚本、SHA-256 和镜像摘要。
 
-应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.1.2`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.2`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 94 个套件：77 个 Python + 17 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。
+应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.1.3`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.3`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 98 个套件：80 个 Python + 18 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。测试默认最多 4 个套件并行、每套件使用独立临时目录；可传 `--jobs 1` 串行，`--logs <目录>` 保存完整输出。
 
 提示词重试、首字耗时、连接与统计优化见[性能与可靠性说明](docs/performance.md)。
 
@@ -117,6 +117,6 @@ curl https://<公网IP>/v1/models \
 
 ## 来源与许可证
 
-本项目派生自 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，基于上游 **1.6.13**。采用 [Apache-2.0](LICENSE)，保留上游 [MIT 原文](LICENSE.upstream)、[版本记录](CHANGELOG.upstream.md)、Vibe Coding 声明及贡献者致谢，详见[来源与致谢](docs/credits.md)。
+本项目派生自 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，最初基于上游 **1.6.13**，已选择合入截至 **1.6.17** 的适用更新，详见[上游同步说明](docs/upstream-sync-2026-10-09.md)。采用 [Apache-2.0](LICENSE)，保留上游 [MIT 原文](LICENSE.upstream)、[版本记录](CHANGELOG.upstream.md)、Vibe Coding 声明及贡献者致谢，详见[来源与致谢](docs/credits.md)。
 
 本项目为非官方自托管网关，使用已有合法授权账号，不提供账号或额度。

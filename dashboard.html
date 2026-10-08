@@ -252,6 +252,7 @@
     <button class="sec" id="btnScanDesktop"  data-action="scanDesktop" data-on="click">扫描桌面客户端账号</button>
     <button class="sec"  data-action="exportAccounts" data-on="click">导出账号</button>
     <button class="sec"  data-action="openImport" data-on="click">导入账号</button>
+    <button class="sec" id="btnRefreshAccounts" data-action="refreshAccounts" data-on="click">刷新全部凭证</button>
     <button class="sec"  data-action="fetchCredits" data-on="click">刷新积分</button>
     <button class="sec" id="btnQueryBalances" data-action="queryBalances" data-on="click">查询全部余额</button>
     <button class="sec"  data-action="autoAssignSlots" data-on="click" title="把尚未绑定出口的已启用账号依次分配到已启用的代理槽；已有绑定的账号不受影响">分配代理出口给未绑定账号</button>
@@ -470,7 +471,7 @@
         </div>
         <button class="sec mini"  data-action="loadCreditHistory" data-on="click">刷新</button>
       </div>
-      <div style="overflow-x:auto;max-height:260px">
+      <div class="credit-history-scroll">
         <table class="data-cards" id="creditHistoryTable">
           <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>积分</th><th>Token</th></tr></thead>
           <tbody></tbody>
@@ -640,85 +641,35 @@
     </section>
 
     <section id="settings-quota">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-        <div>
-          <h2 style="margin:0">保留积分 <em id="setReserveState"></em></h2>
-          <div style="font-size:12px;color:var(--dim);margin-top:4px">
-            账号余额低于该值时不再接单，避免余额被用尽后触发上游的短信提醒。填 0 表示关闭。
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-          <div>
-            <div style="font-size:12px;color:var(--dim);margin-bottom:4px">最低保留积分</div>
-            <input id="setReserveCredits" type="number" min="0" step="1" value="0"
-                   style="width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
-          </div>
-            <button  data-action="saveReserveCredits" data-on="click">保存</button>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-          <div>
-            <h2 style="margin:0">每日 Token 限额 <em id="setDailyTokenState"></em></h2>
-            <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              达到上限后自动切换账号，本地时间 0 点恢复。填 0 不限额；保留积分与每日限额任一触发都会暂停接单。
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-            <div>
-              <div style="font-size:12px;color:var(--dim);margin-bottom:4px">每账号每日上限（token）</div>
-              <input id="setDailyTokenLimit" type="number" min="0" step="1000000" value="0"
-                     style="width:170px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
-            </div>
-            <button  data-action="saveDailyTokenLimit" data-on="click">保存</button>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-          <div>
-            <h2 style="margin:0">每日积分限额 <em id="setDailyCreditState"></em></h2>
-            <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              达到上限后仅接免费模型，付费请求自动切换账号。本地时间 0 点恢复，填 0 关闭。
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-            <div>
-              <div style="font-size:12px;color:var(--dim);margin-bottom:4px">每账号每日上限（积分）</div>
-              <input id="setDailyCreditLimit" type="number" min="0" step="1" value="0"
-                     style="width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
-            </div>
-            <button data-action="saveDailyCreditLimit" data-on="click">保存</button>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-          <div>
-            <h2 style="margin:0">按模型每日 Token 限额 <em id="setModelDailyTokenState"></em></h2>
-            <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              单个模型达到上限后自动切换账号，其他模型继续可用。本地时间 0 点恢复，填 0 不限额。
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-            <div>
-              <div style="font-size:12px;color:var(--dim);margin-bottom:4px">每账号每模型每日上限（token）</div>
-              <input id="setModelDailyTokenLimit" type="number" min="0" step="1000000" value="0"
-                     style="width:190px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
-            </div>
-            <button data-action="saveModelDailyTokenLimit" data-on="click">保存</button>
-          </div>
-        </div>
-      </section>
+      <h2>分渠道限额与积分临期</h2>
+      <p class="hint">全局值作为默认值；国内／国际留空继承全局，填 0 关闭该渠道的限制。每日限额按服务器本地时间 0 点重置。</p>
+      <p class="hint">保留积分用于保护余额；每日积分达到上限后仍可调用免费模型。临期窗口默认 0（关闭），启用后仅新付费请求优先消耗临期积分，同一手动优先级内按到期紧迫程度分配。免费模型和已有会话沿用原调度规则。</p>
+      <div class="table-wrap limits-scroll">
+        <table class="data-cards limits-matrix"><thead><tr><th>设置</th><th>全局</th><th>国际</th><th>国内</th><th></th></tr></thead><tbody>
+          <tr><td>保留积分<em id="setReserveState"></em></td><td data-label="全局"><input id="setReserveCredits" aria-label="保留积分 全局" type="number" min="0" step="1" value="0"></td><td data-label="国际"><input id="setReserveCreditsIntl" aria-label="保留积分 Intl" type="number" min="0" step="1" placeholder="继承全局"></td><td data-label="国内"><input id="setReserveCreditsCn" aria-label="保留积分 Cn" type="number" min="0" step="1" placeholder="继承全局"></td><td><button data-action="saveReserveCredits" data-on="click">保存</button></td></tr>
+          <tr><td>每日 Token 限额<em id="setDailyTokenState"></em></td><td data-label="全局"><input id="setDailyTokenLimit" aria-label="每日 Token 限额 全局" type="number" min="0" step="1000000" value="0"></td><td data-label="国际"><input id="setDailyTokenLimitIntl" aria-label="每日 Token 限额 Intl" type="number" min="0" step="1000000" placeholder="继承全局"></td><td data-label="国内"><input id="setDailyTokenLimitCn" aria-label="每日 Token 限额 Cn" type="number" min="0" step="1000000" placeholder="继承全局"></td><td><button data-action="saveDailyTokenLimit" data-on="click">保存</button></td></tr>
+          <tr><td>每日积分限额<em id="setDailyCreditState"></em></td><td data-label="全局"><input id="setDailyCreditLimit" aria-label="每日积分限额 全局" type="number" min="0" step="1" value="0"></td><td data-label="国际"><input id="setDailyCreditLimitIntl" aria-label="每日积分限额 Intl" type="number" min="0" step="1" placeholder="继承全局"></td><td data-label="国内"><input id="setDailyCreditLimitCn" aria-label="每日积分限额 Cn" type="number" min="0" step="1" placeholder="继承全局"></td><td><button data-action="saveDailyCreditLimit" data-on="click">保存</button></td></tr>
+          <tr><td>按模型每日 Token 限额<em id="setModelDailyTokenState"></em></td><td data-label="全局"><input id="setModelDailyTokenLimit" aria-label="按模型每日 Token 限额 全局" type="number" min="0" step="1000000" value="0"></td><td data-label="国际"><input id="setModelDailyTokenLimitIntl" aria-label="按模型每日 Token 限额 Intl" type="number" min="0" step="1000000" placeholder="继承全局"></td><td data-label="国内"><input id="setModelDailyTokenLimitCn" aria-label="按模型每日 Token 限额 Cn" type="number" min="0" step="1000000" placeholder="继承全局"></td><td><button data-action="saveModelDailyTokenLimit" data-on="click">保存</button></td></tr>
+          <tr><td>积分临期窗口（天）<em id="setExpiringState"></em></td><td data-label="全局"><input id="setExpiringWindow" aria-label="积分临期窗口（天） 全局" type="number" min="0" max="3650" step="1" value="0"></td><td data-label="国际"><input id="setExpiringWindowIntl" aria-label="积分临期窗口（天） Intl" type="number" min="0" max="3650" step="1" placeholder="继承全局"></td><td data-label="国内"><input id="setExpiringWindowCn" aria-label="积分临期窗口（天） Cn" type="number" min="0" max="3650" step="1" placeholder="继承全局"></td><td><button data-action="saveExpiringWindow" data-on="click">保存</button></td></tr>
+        </tbody></table>
+      </div>
+      <div class="quota-refresh">
+        <label for="setCreditsRefreshHours">临期调度余额刷新间隔（小时）</label>
+        <input id="setCreditsRefreshHours" type="number" min="0" max="72" step="0.1" value="0.5">
+        <button data-action="saveCreditsRefreshHours" data-on="click">保存</button>
+        <span class="hint">默认 0.5；填 0 关闭后台刷新。仅为启用临期窗口的账号刷新，最多 2 个后台任务并发。</span>
+      </div>
+    </section>
 
       <section id="settings-pricing">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
-            <h2 style="margin:0">定价刷新 <em id="setPricingState"></em></h2>
+            <h2 style="margin:0">费用估算 <em id="setPricingState"></em></h2>
+            <div class="quota-refresh">
+              <label><input id="setPricingEnabled" type="checkbox" checked> 启用费用估算与自动取价</label>
+              <button data-action="savePricingEnabled" data-on="click">保存</button>
+              <span class="hint">关闭后继续记录 Token 和实际积分，估算费用显示为 —。</span>
+            </div>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               从 OpenRouter 更新参考价格，历史请求沿用当时价格。缺失价格补算后标记 <code>*</code>。默认每 5 分钟刷新，填 0 改为手动。<span id="setPricingMeta"></span>
             </div>

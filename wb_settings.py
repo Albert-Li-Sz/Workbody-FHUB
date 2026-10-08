@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -457,24 +458,44 @@ def api_keys(accounts_dir, include_deleted=False):
     return []
 
 
-def set_api_keys(accounts_dir, keys):
-    """Replace the whole key list. Returns the saved (live) list.
+def _retired_key_entry(old):
+    return {"id": old["id"], "name": old["name"], "key": "",
+            "realm": old.get("realm") or "", "models": old.get("models") or [],
+            "enabled": False, "created_at": old.get("created_at") or "",
+            "deleted_at": old.get("deleted_at") or time.strftime("%Y/%m/%d %H:%M")}
 
-    Removal is a soft delete. The caller is the panel, which can only submit
-    the rows it can see and cannot see deleted ones, so an id that vanishes
-    from the submission is marked deleted instead of dropped: the usage log
-    attributes spend by id, and losing the id would dump a key's whole history
-    into "(未知 key)". The secret is wiped at that same moment, so a deleted
-    key can never authenticate again.
+
+def set_api_keys(accounts_dir, keys, delete_ids=None):
+    """Save keys atomically; an explicit delete list selects upsert semantics.
+
+    Legacy callers omit delete_ids and retire rows absent from their snapshot.
+    Upserts preserve omitted rows and retire only explicitly named ids. Retired
+    ids stay read-only history, with their authentication secrets erased.
     """
+    if delete_ids is not None and (not isinstance(delete_ids, list) or
+            any(not isinstance(uid, str) or not uid.strip() for uid in delete_ids)):
+        raise ValueError("delete_ids must be an array of non-empty strings")
     with _lock:
         previous = api_keys(accounts_dir, include_deleted=True)
+        upsert = delete_ids is not None
+        drop = {uid.strip() for uid in (delete_ids or [])}
+        retired = {row["id"] for row in previous if row.get("deleted_at")}
+        if any(isinstance(raw, dict) and str(raw.get("id") or "").strip() in retired
+               for raw in keys or []):
+            raise ValueError("a retired API Key id cannot be reused")
+        live_secret_id = {old["key"]: old["id"] for old in previous
+                          if old["key"] and not old.get("deleted_at")}
         cleaned = []
         seen = set()
         seen_ids = set()
         for raw in keys or []:
+            raw_id = str(raw.get("id") or "").strip() if isinstance(raw, dict) else ""
             entry = _clean_key_entry(raw)
             if entry is None:
+                continue
+            if upsert and entry["key"] and raw_id not in live_secret_id.values():
+                entry["id"] = live_secret_id.get(entry["key"], entry["id"])
+            if entry["id"] in drop:
                 continue
             if entry["key"]:
                 if entry["key"] in seen:
@@ -487,16 +508,10 @@ def set_api_keys(accounts_dir, keys):
             if old["id"] in seen_ids:
                 continue
             seen_ids.add(old["id"])
-            cleaned.append({
-                "id": old["id"],
-                "name": old["name"],
-                "key": "",
-                "realm": old.get("realm") or "",
-                "models": old.get("models") or [],
-                "enabled": False,
-                "created_at": old.get("created_at") or "",
-                "deleted_at": old.get("deleted_at") or time.strftime("%Y/%m/%d %H:%M"),
-            })
+            if upsert and old["id"] not in drop and not (old["key"] and old["key"] in seen):
+                cleaned.append(old)
+            else:
+                cleaned.append(_retired_key_entry(old))
         data = load(accounts_dir)
         data["api_keys"] = cleaned
         # The single-key fields are now derived; drop them so there is one
@@ -551,17 +566,139 @@ def set_auth_disabled(accounts_dir, disabled):
         save(accounts_dir, data)
 
 
-def reserve_credits(accounts_dir):
+LIMIT_KEYS = ("reserve_credits", "daily_token_limit", "daily_credit_limit",
+              "model_daily_token_limit", "expiring_window_days")
+LIMIT_SCOPES = ("global", "intl", "cn")
+
+
+def _limit_number(value, fallback=0):
+    try:
+        if isinstance(value, bool):
+            return fallback
+        number = int(value)
+        if isinstance(value, float) and value != number:
+            return fallback
+        return max(0, number)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
+def _normalize_limits(raw, legacy=None):
+    raw = raw if isinstance(raw, dict) else {}
+    legacy = legacy or {}
+    out = {}
+    for key in LIMIT_KEYS:
+        entry = raw.get(key)
+        entry = entry if isinstance(entry, dict) else {}
+        out[key] = {"global": _limit_number(entry.get("global", legacy.get(key, 0)))}
+        for realm in ("intl", "cn"):
+            value = entry.get(realm)
+            out[key][realm] = None if value in (None, "") else _limit_number(value)
+    return out
+
+
+def limits_data(accounts_dir):
+    data = load(accounts_dir)
+    return _normalize_limits(data.get("limits"), data)
+
+
+def limits_snapshot(accounts_dir):
+    return limits_data(accounts_dir)
+
+
+def limit_values(accounts_dir, key):
+    return limits_data(accounts_dir)[key]
+
+
+def limit_value(accounts_dir, key, realm=None):
+    values = limit_values(accounts_dir, key)
+    return values.get(realm) if realm in ("intl", "cn") and values.get(realm) is not None else values["global"]
+
+
+def validate_limits_patch(patch):
+    if not isinstance(patch, dict):
+        raise ValueError("limits must be an object")
+    clean = {}
+    for key, scopes in patch.items():
+        if key not in LIMIT_KEYS or not isinstance(scopes, dict):
+            raise ValueError("unknown limit or invalid scopes: %s" % key)
+        clean[key] = {}
+        for scope, value in scopes.items():
+            if scope not in LIMIT_SCOPES:
+                raise ValueError("unknown limit scope: %s" % scope)
+            if scope != "global" and value in (None, ""):
+                clean[key][scope] = None
+                continue
+            try:
+                if isinstance(value, bool) or value is None:
+                    raise ValueError()
+                number = int(value)
+                if number < 0 or isinstance(value, float) and number != value:
+                    raise ValueError()
+                if key == "expiring_window_days" and number > 3650:
+                    raise ValueError()
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("%s.%s must be a non-negative whole number" % (key, scope))
+            clean[key][scope] = number
+    return clean
+
+
+def set_limits(accounts_dir, patch):
+    patch = validate_limits_patch(patch)
+    with _lock:
+        data = load(accounts_dir)
+        values = _normalize_limits(data.get("limits"), data)
+        for key, scopes in patch.items():
+            values[key].update(scopes)
+        data["limits"] = deep_merge(data.get("limits"), values)
+        # Keep global values readable by older maintenance tools.
+        for key, scopes in values.items():
+            data[key] = scopes["global"]
+        save(accounts_dir, data)
+        return values
+
+
+def set_limit(accounts_dir, key, scope, value):
+    return set_limits(accounts_dir, {key: {scope: value}})[key]
+
+
+def expiring_window_days(accounts_dir, realm=None):
+    """Paid-request expiry preference; zero leaves credit fairness active."""
+    return limit_value(accounts_dir, "expiring_window_days", realm)
+
+
+def set_expiring_window_days(accounts_dir, value):
+    return set_limit(accounts_dir, "expiring_window_days", "global", value)["global"]
+
+
+def credits_refresh_hours(accounts_dir):
+    try:
+        value = float(load(accounts_dir).get("credits_refresh_hours", 0.5))
+        return value if math.isfinite(value) and 0 <= value <= 72 else 0.5
+    except (TypeError, ValueError, OverflowError):
+        return 0.5
+
+
+def set_credits_refresh_hours(accounts_dir, value):
+    if isinstance(value, bool):
+        raise ValueError("credits_refresh_hours must be a number")
+    value = float(value)
+    if not math.isfinite(value) or not 0 <= value <= 72:
+        raise ValueError("credits_refresh_hours must be between 0 and 72")
+    with _lock:
+        data = load(accounts_dir)
+        data["credits_refresh_hours"] = value
+        save(accounts_dir, data)
+    return value
+
+
+def reserve_credits(accounts_dir, realm=None):
     """Global low-credit guard: an account at or below this balance stays idle.
 
     Zero disables the guard, which keeps installs that predate the setting
     behaving exactly as before.
     """
-    try:
-        value = int(load(accounts_dir).get("reserve_credits") or 0)
-    except (TypeError, ValueError):
-        return 0
-    return value if value > 0 else 0
+    return limit_value(accounts_dir, "reserve_credits", realm)
 
 
 def set_reserve_credits(accounts_dir, value):
@@ -571,37 +708,31 @@ def set_reserve_credits(accounts_dir, value):
     except (TypeError, ValueError):
         value = 0
     value = max(0, value)
-    with _lock:
-        data = load(accounts_dir)
-        data["reserve_credits"] = value
-        save(accounts_dir, data)
-    return value
+    return set_limit(accounts_dir, "reserve_credits", "global", value)["global"]
 
 
-def daily_token_limit(accounts_dir):
+def daily_token_limit(accounts_dir, realm=None):
     """Global daily guard: an account that already burned this many tokens
     today stays idle until local midnight.
 
     Zero disables the guard, which keeps installs that predate the setting
     behaving exactly as before.
     """
-    try:
-        value = int(load(accounts_dir).get("daily_token_limit") or 0)
-    except (TypeError, ValueError):
-        return 0
-    return value if value > 0 else 0
+    return limit_value(accounts_dir, "daily_token_limit", realm)
 
 
 def scheduling_limits(accounts_dir):
     """Read all request scheduling limits from one settings snapshot."""
     data = load(accounts_dir)
+    grouped = _normalize_limits(data.get("limits"), data)
     out = {}
     for field in ("daily_token_limit", "daily_credit_limit", "model_daily_token_limit"):
         try:
-            value = int(data.get(field) or 0)
+            value = grouped[field]["global"]
         except (TypeError, ValueError, OverflowError):
             value = 0
         out[field] = max(0, value)
+    out["by_realm"] = grouped
     return out
 
 
@@ -612,11 +743,7 @@ def set_daily_token_limit(accounts_dir, value):
     except (TypeError, ValueError):
         value = 0
     value = max(0, value)
-    with _lock:
-        data = load(accounts_dir)
-        data["daily_token_limit"] = value
-        save(accounts_dir, data)
-    return value
+    return set_limit(accounts_dir, "daily_token_limit", "global", value)["global"]
 
 
 def pool_config(accounts_dir):
@@ -929,34 +1056,15 @@ def set_prompt_config(accounts_dir, cfg):
     return clean
 
 
-def daily_credit_limit(accounts_dir):
-    """Daily credit guard: an account that already spent this many credits
-    today serves free models only until local midnight, so a client that
-    would keep burning credits on paid models rotates to another account
-    instead of spending the whole balance.
+def daily_credit_limit(accounts_dir, realm=None):
+    return limit_value(accounts_dir, "daily_credit_limit", realm)
 
-    Zero disables the guard, which keeps installs that predate the setting
-    behaving exactly as before.
-    """
-    try:
-        value = int(load(accounts_dir).get("daily_credit_limit") or 0)
-    except (TypeError, ValueError):
-        return 0
-    return value if value > 0 else 0
 
 
 def set_daily_credit_limit(accounts_dir, value):
-    """Persist the daily credit threshold. Returns the stored value."""
-    try:
-        value = int(value or 0)
-    except (TypeError, ValueError):
-        value = 0
-    value = max(0, value)
-    with _lock:
-        data = load(accounts_dir)
-        data["daily_credit_limit"] = value
-        save(accounts_dir, data)
-    return value
+    value = _limit_number(value)
+    return set_limit(accounts_dir, "daily_credit_limit", "global", value)["global"]
+
 
 
 def _clamp_refresh_minutes(value):
@@ -1035,33 +1143,37 @@ def set_pricing_refresh_minutes(accounts_dir, value):
     return value
 
 
-def model_daily_token_limit(accounts_dir):
-    """Per-model daily guard: an account that already burned this many
-    tokens today on ONE model stops being handed out for that model until
-    local midnight, while every other model keeps working.
+def model_daily_token_limit(accounts_dir, realm=None):
+    return limit_value(accounts_dir, "model_daily_token_limit", realm)
 
-    Zero disables the guard, which keeps installs that predate the setting
-    behaving exactly as before.
-    """
-    try:
-        value = int(load(accounts_dir).get("model_daily_token_limit") or 0)
-    except (TypeError, ValueError):
-        return 0
-    return value if value > 0 else 0
 
 
 def set_model_daily_token_limit(accounts_dir, value):
-    """Persist the per-model daily token threshold. Returns the stored value."""
-    try:
-        value = int(value or 0)
-    except (TypeError, ValueError):
-        value = 0
-    value = max(0, value)
+    value = _limit_number(value)
+    return set_limit(accounts_dir, "model_daily_token_limit", "global", value)["global"]
+
+def pricing_enabled(accounts_dir):
+    """Master switch for the OpenRouter price estimation, on unless turned off.
+
+    Off disables the feature end to end: no price fetch, no policy table, no
+    per-row cost and no cost columns. A settings.json that predates the key
+    reads back as on, which is the behaviour every install ships with - the
+    switch only exists to let an operator turn the whole thing off.
+    """
+    value = load(accounts_dir).get("pricing_enabled")
+    return True if value is None else value is True
+
+
+def set_pricing_enabled(accounts_dir, enabled):
+    """Persist the master switch. Returns the stored boolean."""
+    enabled = bool(enabled)
     with _lock:
         data = load(accounts_dir)
-        data["model_daily_token_limit"] = value
+        data["pricing_enabled"] = enabled
         save(accounts_dir, data)
-    return value
+    return enabled
+
+
 def pricing_variant_inherit(accounts_dir):
     """Whether a model name may inherit its price from a suffix-stripped base.
 

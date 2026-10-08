@@ -1,36 +1,104 @@
 # 上游版本记录
 
-原项目的历史更新记录，来源为 workbuddy2api-hub，原文保留。当前衍生项目的行为与版本见 README 和修复报告。
+来源：[workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，截至提交 `e4e8e495901fcf9f2d0893cd5fb42c05cc5b7976`（v1.6.17）。上游原文保留；本分支实际行为与选择合入记录见 [CHANGELOG](CHANGELOG.md)。
 
 ## 六、版本更新记录 (Changelog)
 
-### feat/panel-parity（开发分支，未发布）
+### v1.6.17
 
-把 PANEL（`linguo2625469/workbuddy2api-panel`）的账号池治理、任务农场、观测与模型治理能力，按 HUB 的架构重新实现（不照搬 Go 实现），全部开关化、默认向后兼容：
+重磅生态兼容与架构演进版本：正式支持 Claude Code、修复 API Key 误覆盖、引入临期积分优先分派机制，并实现测试基础设施多进程并行加速：
 
-- **账号池治理（M1）**：加权选号 + 成本分层 + 条件探索、软冷却指数退避、熔断、连败降权、单号在途租约、402 硬冷却至次日 04:00、session-dead ×3 才禁用、`credit_floor`、Upstash 粘性镜像（可选、默认关）。
-- **可靠性与会话（M2）**：SSE 首字节/流中空闲超时、`X-Device-Token` 文件兜底、工具调用配对与残参修复、每轮会话头族与 `gateway_hint`、`prompt.mode`（passthrough/custom/append）、Web 控制台昵称同步、国际版激活/地区完善/trial。
-- **任务农场（M3）**：任务中心扫描 + 并发执行队列、桌面事件链补全、连登管家（补签/礼包/兑换/抽奖）、每日 01:00 成长队列、mp 小程序任务。
-- **观测与安全（M4）**：请求归档与指标（TTFB p50/p95）、日志分频道环形缓冲、Token 时序与积分历史、安全响应头 + **nonce CSP（零内联事件处理器）**、cockpit tools 导入兼容。
-- **模型目录与治理（M5）**：context/output 四级查找（上游 → 知识表 → `model.json` 缓存 → models.dev 异步）、真实输出上限探测（`scripts/probe_max_tokens.py` + 看板「钳制 N×」标注）、缓存 token 别名归一。
-- **工程（M6）**：Release 附 `checksums.txt`、CI `tag == 源码版本` 断言、Docker `HEALTHCHECK` 与 PUID/PGID 指引。
+- **全面兼容 Claude Code 接入**（[PR #180](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/180)，感谢 [@LeoK77S](https://github.com/LeoK77S)，issue #171）：自动将 `messages` 内部的 `system` 角色提取并与顶层 system 合并，彻底解决 Claude Code 调用 `/v1/messages` 报 400 失败的问题；
+- **修复 API Key 连续添加时误覆盖老 Key**（[PR #178](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/178)，感谢 [@LeoK77S](https://github.com/LeoK77S)，issue #175）：前端与服务端采用 upsert 语义同步，彻底杜绝连续添加 Key 导致老 Key 与出口绑定被意外软删除的问题；
+- **智能调度：平滑加权优先分派临期积分账号**（[PR #174](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/174)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：自动识别 7 天内即将过期的账号积分包，采用平滑加权轮询优先消耗快过期的账号额度，杜绝积分浪费；
+- **大幅提升用量统计与时序端点性能**（[PR #185](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/185)，感谢 [@aodianjun](https://github.com/aodianjun)）：内存缓存消除重复 stat，解决万级日志时面板与时序图加载慢的痛点；
+- **修复上游 live 目录只声明默认思考时丢掉可选档位**（[PR #177](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/177)，感谢 [@LeoK77S](https://github.com/LeoK77S)，issue #170）；
+- **账号工具栏新增「一键刷新全部凭证」**（[PR #179](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/179)，感谢 [@LeoK77S](https://github.com/LeoK77S)，issue #167）；
+- **数据指标看板「积分扣减历史」表头吸顶与账号昵称显示**（[PR #186](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/186)，感谢 [@LeoK77S](https://github.com/LeoK77S)）；
+- **测试基础设施全面升级**（[PR #181](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/181) ~ [PR #184](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/184)，感谢 [@teddyli18000](https://github.com/teddyli18000)，issue #151）：统一抽取严格标准的 `tests/_dom_stub.js`，支持 `--jobs 4` 多进程安全并发跑测试，测试耗时从 2 分钟缩短至 27 秒；
+- **看板 UI 全面优化**：彻底清理侧栏网格空隙恢复原生全宽布局，顶部卡片精简并突出账号可用对比。
+
+
+### v1.6.16
+
+重大稳定性与观测治理版本：涵盖账号熔断降权、工具调用防拆分修复、时序图表、全页面导航及多项深度优化：
+
+- **上游工具调用配对修复**（[PR #153](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/153)，感谢 [@Cekxri](https://github.com/Cekxri)）：自动合并被部分客户端拆散的连续 assistant tool_calls 批次并丢弃截断参数，根治 DeepSeek 报 400 失败；
+- **账号级软限流指数退避、熔断与降权治理**（[PR #163](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/163)，感谢 [@Cekxri](https://github.com/Cekxri)）：账号连续失败时自动指数退避，连续硬错误熔断，有效保护账号不被频繁失败打挂；
+- **402 余额不足账号精准冷却至次日 04:00**（[PR #157](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/157)，感谢 [@Cekxri](https://github.com/Cekxri)）：余额用尽账号避免频繁重试，支持余额恢复后实时提前解冻；
+- **面板新增 Token 时序图与积分扣减历史**（[PR #161](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/161)，感谢 [@Cekxri](https://github.com/Cekxri)）：新增 `/usage/timeseries` 时序聚合接口与看板可视化走势图；
+- **侧栏区块导航推广至所有主页面**（[PR #169](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/169)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：通用化侧边栏组件，网关运维与数据指标页均支持左侧吸顶导航与滚动高亮；
+- **系统提示词模式注入与 403 重试**（[PR #160](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/160)，感谢 [@Cekxri](https://github.com/Cekxri)）：支持 passthrough/custom/append 三种系统提示词模式；
+- **缓存命中别名归一化**（[PR #164](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/164)，感谢 [@Cekxri](https://github.com/Cekxri)）：消除别名遮蔽，客户端始终读取统一的真实缓存命中数；
+- **错误信封新增 gateway_hint 归因解释**（[PR #154](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/154)，感谢 [@Cekxri](https://github.com/Cekxri)）；
+- **面板一键同步账号昵称**（[PR #158](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/158)，感谢 [@Cekxri](https://github.com/Cekxri)）；
+- **会话亲和历史长度上限与号池弹性并发**（[PR #152](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/152)，感谢 [@ddddd-ren](https://github.com/ddddd-ren)）；
+- **四级模型上下文/输出查找链与输出上限探针**（[PR #165](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/165)、[PR #166](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/166)，感谢 [@Cekxri](https://github.com/Cekxri)）；
+- **看板 UI 深度打磨**：最近请求表格表头与数据全列居中对齐、模型与推理强度拆分为独立列、KPI 卡片双币种优雅对齐。
+
+
+### 未发布
+
+两项与「大请求 + 号池规模」相关的可调限制，默认行为不变：
+
+- **会话亲和加长度上限（`WB_AFFINITY_MAX_MSGS`，默认 400）**：前缀亲和把整段对话钉在同一个账号上以吃满上游的账号级 prompt cache，但对话上下文是单调增长的，于是那个账号要反复接收越来越大的请求体。实测某生产实例（wk4，333 个请求）请求体与上游断连率的关系：
+
+  | 消息条数 | 请求数 | 断连率 |
+  |---|---|---|
+  | < 150 | 82 | 0.0% |
+  | 150–300 | 59 | 3.4% |
+  | 300–400 | 64 | 7.8% |
+  | 400–500 | 50 | 10.0% |
+
+  断连（`TimeoutError` / `RemoteDisconnected`）触发重试，把 8.8s 的请求拖到 11.6s，首字延迟随之翻倍。超过上限的对话不再绑定账号，重新参与轮询：代价是丢掉前缀缓存，收益是断连与重试消失。设 `0` 关闭该上限，恢复原有行为。阈值不宜调低——同一实例 94% 的请求靠亲和拿到 98.5% 的缓存命中率。
+
+- **聊天并发上限可按号池规模自动取值（`WB_MAX_CONCURRENT_CHAT=auto`）**：原先是固定 32，与号池里有几个账号无关，5 个账号和 200 个账号的部署共用同一个值。设为 `auto` 后取「就绪账号数」，且不低于 32。仅扩容、不缩容：已在飞行的请求持有旧信号量的许可，缩容会让归还次数超过上限并触发 `BoundedSemaphore` 的 `ValueError`。默认仍是固定值 32，行为不变。
+
+- 新增 `tests/_test_affinity_length_cap.py`（13 项）：钉住阈值边界（`msgs == cap` 仍绑定、`cap + 1` 释放）、`0` 关闭上限、长对话的键稳定性、不同对话不碰撞、`None` / 空列表安全，以及并发上限的按池取值、下限回落、只增不减、固定值下为空操作、脏输入忽略与扩容后的许可计数。
+
+- **修复 `tests/run_all.py` 在非 UTF-8 控制台下崩溃**（Windows CI 长期红灯的根因）：各套件本身以 `PYTHONIOENCODING=utf-8` 运行、输出也按 utf-8 从日志读回，但 `run_all.py` **自己**再打印这行摘要时用的是控制台编码。Windows runner 的 stdout 是 cp1252，于是第一条含中文的摘要就抛 `UnicodeEncodeError` —— 而这时所有套件其实**已经全部通过**，是汇总环节把整轮判成了失败。main 上连续多个版本（含 v1.6.15 自身）的 Windows job 都是这么挂的。现在启动时把本进程的 stdout/stderr 重设为 utf-8，并以 `errors="replace"` 兜底（生僻码位退化成 `?` 而不是终止整轮）。新增 `tests/_test_run_all_encoding.py`（3 项）：分别在 cp1252 与 utf-8 下跑一个含中文摘要的套件，断言退出码为 0、输出里没有 `UnicodeEncodeError`，并确认摘要确实来自被选中的那个套件。
+
+- **一键刷新凭证**：账号工具栏新增批量按钮，等价于对池中每个账号点一次「刷新凭证」——后端 `/accounts/refresh` 不带 `uid` 时本就刷新整池，但看板上一直没有入口，`refreshAccounts()` 是没人调用的死代码（issue #167）。按钮在飞行期间禁用并显示「刷新中...」，结束后按成功数回报（全部成功为绿色，有失败则降级为黄色，并附上首个错误与失败条数），随后重画账号卡片让新凭证立刻可见。新增 `tests/_test_refresh_all_credentials.js`（10 项）：只发一次不带 `uid` 的请求、成功 / 部分失败 / 网络异常三档回报与配色、缺失 `error` 时兜底、刷新后必重载列表、按钮禁用与复位、按钮与英文词条确实在页面上。
+
+### v1.6.15
+
+里程碑版本：正式支持原生 Anthropic Messages 协议、完善企业版积分查询，以及多项重要修复与移动端体验优化：
+
+- **原生 Anthropic Messages 协议支持 (`/v1/messages`)**（[PR #147](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/147)，感谢 [@Cekxri](https://github.com/Cekxri)）：原生提供 `POST /v1/messages`（流式 / 非流式）与 `POST /v1/messages/count_tokens`，鉴权支持 `x-api-key` 与 `Authorization: Bearer`，支持完整的 Anthropic 原生 SSE 事件序列与双向工具调用映射，现可无缝接入 Claude Code、Cursor 等全套 Anthropic 客户端生态；
+- **修复设置页加载异常**（[PR #141](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/141)，issue #138）：修复 `loadSettings()` 遗漏 `pricingOn` 变量引发 ReferenceError 导致 API Key 列表与底部设置项无法加载的问题；
+- **企业版账号积分显示与护栏修复**（[PR #149](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/149)，感谢 [@johnsken-jerry](https://github.com/johnsken-jerry)）：适配企业空间计费接口，彻底解决企业账号积分查回为 0/0 以及误触保留积分拦截的问题；
+- **上游 SSE 超时保护与流式容错**（[PR #148](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/148)，感谢 [@Cekxri](https://github.com/Cekxri)）：增加上游 header/idle 读超时配置，防止流式挂起与死锁；
+- **移动端中英文切换优化**（issue #150）：中英双胶囊按钮重构为紧凑单按钮一键切换（中 ⇄ EN），与主题图标按钮完全对齐，彻底解决小屏下顶部 UI 挤压变形；
+- **修复多模态孤立函数输出报错**（[PR #145](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/145)，感谢 [@yorushikasama](https://github.com/yorushikasama)）：修复 Codex 等客户端在 `/v1/responses` 传递带图片的结构化输出时的 AttributeError 崩溃；
+- **防止陈旧 429 报错跨重启复活**（[PR #144](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/144)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：重启时自动清理过期的 `cooldownUntil`，消除历史冷却误报；
+- **模型用量占比基准校准**（[PR #140](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/140)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：表格百分比分母改为全体模型总 Token，避免第一名失真显示 100%；
+- **价估算胶囊开关体验优化**（[PR #142](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/142)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：开关改为即点即存交互并补齐英文翻译词条；
+- **测试环境 DOM 桩补全**（[PR #139](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/139)）。
+
+
+### v1.6.14
+
+重磅功能与体验升级版本，涵盖限额护栏统一矩阵、看板双语切换、设置项侧栏直达、估算开关以及多处界面优化：
+
+- **限额护栏统一配置表与国际/国内版独立阈值**（[PR #130](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/130)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：将「保留积分」、「每日 Token 限额」、「每日积分限额」、「按模型每日 Token 限额」合并为统一的矩阵配置表；支持针对国际版与国内版分别指定不同的限额阈值（留空自动继承全局，升级自动兼容无损迁移旧配置）；
+- **看板新增 CN/EN 中英双语切换与完整翻译**（[PR #134](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/134)，感谢 [@many1337](https://github.com/many1337)）：看板右上角支持一键切换简体中文与 English，内置全量前端英文化翻译字典并持久化记忆；
+- **设置页动态左侧锚点导航栏**（[PR #129](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/129)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：依据页面区块动态渲染左侧吸顶/浮动侧边栏，支持滚动高亮与点击直达，大幅改善多设置项下的查找体验；
+- **账号错误悬停查看完整响应与当前禁用总览**（[PR #132](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/132)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：账号卡片支持悬停查看上游完整报错（429 恢复时刻一眼可见）；新增「当前禁用账号与模型」总览表，集中感知限流与停用状态；
+- **增加 OpenRouter 价估算总开关**（[PR #133](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/133)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：为估价模块补齐总开关（默认开启），关闭后彻底停用后台抓取与逐行折算开销，提升大日志量下的处理性能；
+- **清理设置页合并冲突残留标记**（[PR #131](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/131)，issue #137）。
 - **原生 Anthropic Messages 协议（2026-10-07）**：`/v1/messages` 与 `/v1/messages/count_tokens` 全原生实现（流式事件序列、`x-api-key` 鉴权、Anthropic 错误信封、内容块与工具双向映射），Claude Code / Anthropic SDK 可直连；服务端工具、thinking 回放与 `top_k` / `cache_control` 的取舍见「四、客户端配置与接入」。
 
-- **UI 審計修復（2026-10-06）**：新增六組進階設定表單（pool / schedule / redis / upstream / prompt / logging）；帳號表顯示在途、熔斷、降權、402 冷卻與 session-dead 狀態；請求歸檔補齊帳號/狀態/結果/路徑/請求 ID/時間篩選與 `gateway_hint` 欄位；503 busy 寫入歸檔；刪除不存在帳號改回 404；未知 realm 改回 400；`/requests*` 改為面板 session 認證；日誌頻道補齊 catalog/auth/settings；realm 檢視卡改為可鍵盤操作的 button。
-
-> 分支狀態：`feat/panel-parity`，基线 `6c2a663`；上游恢复更新后再决定 PR/发布节奏。
 
 ### v1.6.13
 
 - **修复看板右上角颜色主题菜单按钮无法打开**（[PR #127](https://github.com/ardeyouxipianyi/workbuddy2api-hub/pull/127)，感谢 [@LeoK77S](https://github.com/LeoK77S)）：修正 IIFE 作用域中 `toggleThemeMenu` 与 `selectTheme` 的全局导出时机，修复点击按钮报 `ReferenceError` 导致下拉菜单无法弹出的问题，现可正常手动选择「浅色 / 深色 / 跟随系统」；新增 `tests/_test_dashboard_theme.js` DOM 级可达性与交互回归测试；
 - **Docker 一键安装脚本补充国内网络加速与权限说明**（issue #126）：README 补充国内网络环境下通过 GitHub 代理加速拉取命令与 NAS 非 root 账户下的 `sudo bash` 说明。
 
-
 ### v1.6.12
 
 - **Docker 部署与更新生态全面升级**（PR #125）：
   - **一键部署与更新脚本 (`quick-deploy.sh`)**：终端仅需执行一行命令 `curl -fsSL https://raw.githubusercontent.com/ardeyouxipianyi/workbuddy2api-hub/main/quick-deploy.sh | bash`。首次运行自动检测环境并拉取启动；后续再次执行同一命令即可完成自动平滑升级，账号配置与历史用量绝不丢失；
-  - **NAS / 面板单文件 Compose 模板（免源码克隆）**：官方 `docker-compose.yml` 剔除 `build: .` 依赖，飞牛 fnOS、群晖、1Panel 等用户无需 `git clone`，直接复制粘贴 YAML 即可建站并支持面板一键更新；本分支统一使用云镜像 Compose 配置；
+  - **NAS / 面板单文件 Compose 模板（免源码克隆）**：官方 `docker-compose.yml` 剔除 `build: .` 依赖，飞牛 fnOS、群晖、1Panel 等用户无需 `git clone`，直接复制粘贴 YAML 即可建站并支持面板一键更新；开发者本地构建单独拆分为 `docker-compose.build.yml`；
   - **支持双镜像仓库推送（GHCR + Docker Hub）**：工作流新增对 Docker Hub（`ardeyouxipianyi/workbuddy2api-hub`）的自动同步推送，消除前缀缺省报错困扰，兼顾国内 Docker 镜像加速器拉取；
   - **Watchtower 全自动静默更新**：提供开箱即用的 Watchtower 配置与命令，支持后台无感自动升级。
 
@@ -180,7 +248,7 @@
 
 ### v1.5.6
 
-- **Docker 部署下的 Linux 桌面凭据挂载**（PR #55，感谢 [@LuFering](https://github.com/LuFering)）：上游曾提供只读挂载宿主机 `~/.local/share/CodeBuddyExtension/Data/Public/auth` 的示例，补上 Linux + Docker 场景下看板扫描不到桌面凭据的说明。本分支的 Docker 部署统一使用云镜像和 OAuth 添加账号。
+- **Docker 部署下的 Linux 桌面凭据挂载**（PR #55，感谢 [@LuFering](https://github.com/LuFering)）：新增 `docker-compose.override.yml.example`，以只读方式把宿主机 `~/.local/share/CodeBuddyExtension/Data/Public/auth` 挂进容器，补上 Linux + Docker 场景下看板扫描不到桌面凭据的说明；`.gitignore` 同时忽略本地 `docker-compose.override.yml`。
 - **保留积分开关**（issue #44）：看板「设置」新增最低保留积分，账号余额低于该值时不再接单，避免余额被用尽后触发上游的提醒短信。填 `0` 关闭（默认）；从未查询过余额的账号不受影响；账号只是停止接单，仍在池中并继续定时任务，充值后自动恢复。阈值保存在 `accounts/settings.json` 的 `reserve_credits`，改动即时生效、无需重启。
 
 ### v1.5.5
@@ -254,5 +322,3 @@
 - **GPT 系列流式 Token 与生成速度修复**：忽略中间帧全 0 的 usage 占位，并加入断流 Fallback 估算，修复 `gpt-5.6-luna` / `gpt-6-astra` 等模型输入输出为 0、生成速度缺失的问题。
 
 ---
-
-> 以下致谢、免责声明和 MIT 许可说明保留原项目原文；上游许可文本见 `LICENSE.upstream`，本衍生项目许可见 `LICENSE`。

@@ -1267,7 +1267,7 @@ def apply_daily_token_limit(refresh=False):
     """Push the daily token setting and today's counts into the pool."""
     if POOL is None:
         return 0
-    limit = wb_settings.daily_token_limit(ACCOUNTS_DIR)
+    limit = wb_settings.limit_values(ACCOUNTS_DIR, "daily_token_limit")
     usage = daily_tokens_by_account(ttl=0 if refresh else None)
     return POOL.apply_daily_token_limit(limit, usage)
 
@@ -1278,7 +1278,7 @@ def apply_daily_credit_limit(refresh=False):
     into the pool."""
     if POOL is None:
         return 0
-    limit = wb_settings.daily_credit_limit(ACCOUNTS_DIR)
+    limit = wb_settings.limit_values(ACCOUNTS_DIR, "daily_credit_limit")
     free_models = free_models_by_realm()
     stats = daily_usage_stats(ttl=0 if refresh else None)
     credits = stats["credits"] if stats is not None else None
@@ -1293,7 +1293,7 @@ def apply_model_daily_token_limit(refresh=False):
     """Push the per-model daily token setting and today's counts into the pool."""
     if POOL is None:
         return 0
-    limit = wb_settings.model_daily_token_limit(ACCOUNTS_DIR)
+    limit = wb_settings.limit_values(ACCOUNTS_DIR, "model_daily_token_limit")
     stats = daily_usage_stats(ttl=0 if refresh else None)
     per_model = stats["models"] if stats is not None else None
     return POOL.apply_model_daily_token_limit(limit, per_model)
@@ -1306,12 +1306,12 @@ def apply_scheduling_limits(refresh=False):
     limits = wb_settings.scheduling_limits(ACCOUNTS_DIR)
     stats = daily_usage_stats(ttl=0 if refresh else None)
     free_models = free_models_by_realm()
-    POOL.apply_daily_token_limit(limits["daily_token_limit"], stats["tokens"] if stats else None)
+    POOL.apply_daily_token_limit(limits["by_realm"]["daily_token_limit"], stats["tokens"] if stats else None)
     apply_free = getattr(POOL, "apply_free_token_usage", None)
     if apply_free:
         apply_free(stats["free_tokens"] if stats else None)
-    POOL.apply_daily_credit_limit(limits["daily_credit_limit"], stats["credits"] if stats else None, free_models)
-    POOL.apply_model_daily_token_limit(limits["model_daily_token_limit"], stats["models"] if stats else None)
+    POOL.apply_daily_credit_limit(limits["by_realm"]["daily_credit_limit"], stats["credits"] if stats else None, free_models)
+    POOL.apply_model_daily_token_limit(limits["by_realm"]["model_daily_token_limit"], stats["models"] if stats else None)
 
 
 _free_models_cache = {"at": 0.0, "data": None}
@@ -1399,6 +1399,8 @@ def _fold_cost(bucket, cost, model):
     if cost["known"]:
         bucket["cost_cny"] = (bucket.get("cost_cny") or 0.0) + cost["cny"]
     else:
+        if cost.get("disabled"):
+            return
         missing = bucket.setdefault("cost_missing", {})
         mid = model or "unknown"
         missing[mid] = missing.get(mid, 0) + 1
@@ -2529,11 +2531,15 @@ def runtime_settings_view():
         "auth_required": auth_required(),
         "api_keys": keys,
         "deleted_api_keys": deleted_keys,
+        "limits": wb_settings.limits_snapshot(ACCOUNTS_DIR),
+        "expiring_window_days": wb_settings.expiring_window_days(ACCOUNTS_DIR),
+        "credits_refresh_hours": wb_settings.credits_refresh_hours(ACCOUNTS_DIR),
         "reserve_credits": wb_settings.reserve_credits(ACCOUNTS_DIR),
         "daily_token_limit": wb_settings.daily_token_limit(ACCOUNTS_DIR),
         "daily_credit_limit": wb_settings.daily_credit_limit(ACCOUNTS_DIR),
         "model_daily_token_limit": wb_settings.model_daily_token_limit(ACCOUNTS_DIR),
         "pricing_refresh_minutes": wb_settings.pricing_refresh_minutes(ACCOUNTS_DIR),
+        "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
@@ -2766,6 +2772,17 @@ INTL_UI_ORDER = [
     "kimi-k2.6",
     "kimi-k2.8-preview",
 ]
+def merge_reasoning(base, live):
+    """Keep selectable levels when live metadata only restates a default."""
+    out = dict(base) if isinstance(base, dict) else {}
+    if isinstance(live, dict):
+        out.update(live)
+    if out.get("supportedEfforts") and out.get("effort"):
+        out.setdefault("defaultEffort", out["effort"])
+        out.pop("effort", None)
+    return out
+
+
 def merge_catalog(primary, realm=None, extras=False):
     r = realm or CURRENT_REALM
     merged = {}
@@ -2787,7 +2804,10 @@ def merge_catalog(primary, realm=None, extras=False):
             continue
         if meta:
             base = merged.get(mid) or {}
+            base_reasoning = base.get("reasoning")
             base.update(meta)
+            if isinstance(meta.get("reasoning"), dict):
+                base["reasoning"] = merge_reasoning(base_reasoning, meta["reasoning"])
             merged[mid] = base
         elif mid not in merged:
             merged[mid] = {}
@@ -2821,9 +2841,13 @@ def note_bundled_reasoning(realm, live, entries):
     snapshot. One line per change is enough to notice that.
     """
     live_meta = dict(live or [])
-    missing = sorted(mid for mid, meta in entries
-                     if (meta.get("reasoning") or {})
-                     and not ((live_meta.get(mid) or {}).get("reasoning")))
+    def from_snapshot(mid, meta):
+        reasoning = meta.get("reasoning") or {}
+        live_reasoning = (live_meta.get(mid) or {}).get("reasoning") or {}
+        return bool(reasoning) and (not live_reasoning or
+            bool(reasoning.get("supportedEfforts")) and not live_reasoning.get("supportedEfforts"))
+
+    missing = sorted(mid for mid, meta in entries if from_snapshot(mid, meta))
     if not missing:
         _catalog_fallback_log.pop(realm, None)
         return
@@ -2831,8 +2855,8 @@ def note_bundled_reasoning(realm, live, entries):
         return
     _catalog_fallback_log[realm] = frozenset(missing)
     shown = ", ".join(missing[:6]) + (" ..." if len(missing) > 6 else "")
-    log("catalog    : no reasoning block in the live catalogue for %d model(s); "
-        "using the bundled table: %s" % (len(missing), shown))
+    log("catalog    : bundled table fills in reasoning controls the live "
+        "catalogue omits for %d model(s): %s" % (len(missing), shown))
 def fetch_models(realm=None):
     r = realm or CURRENT_REALM
     with _lock:
@@ -4349,7 +4373,10 @@ def model_fixed_effort(model):
     picker offers no choice for it, so an effort the request carries anyway does
     not change what ran.
     """
-    effort = model_reasoning_meta(model).get("effort")
+    reasoning = model_reasoning_meta(model)
+    if reasoning.get("supportedEfforts"):
+        return None
+    effort = reasoning.get("effort")
     return effort.strip() if isinstance(effort, str) and effort.strip() else None
 
 
@@ -5031,20 +5058,20 @@ def open_upstream(payload, session_key=None, target_realm=None,
     if enabled and all(a.daily_limit_blocked() for a in enabled):
         reason = ("every usable account reached today's token limit (%s per "
                   "account); the pool resumes after local midnight"
-                  % wb_settings.daily_token_limit(ACCOUNTS_DIR))
+                  % wb_settings.daily_token_limit(ACCOUNTS_DIR, realm))
         raise RateLimited(None, reason,
                           wait=seconds_until_local_midnight(), message=reason)
     if enabled and model and all(a.credit_limit_blocked(model) for a in enabled):
         reason = ("every usable account reached today's credit limit (%s per "
                   "account); paid models resume after local midnight, free "
                   "models keep working"
-                  % wb_settings.daily_credit_limit(ACCOUNTS_DIR))
+                  % wb_settings.daily_credit_limit(ACCOUNTS_DIR, realm))
         raise RateLimited(None, reason,
                           wait=seconds_until_local_midnight(), message=reason)
     if enabled and model and all(a.model_token_limit_blocked(model) for a in enabled):
         reason = ("every usable account reached today's token limit for %s "
                   "(%s per account); the model resumes after local midnight"
-                  % (model, wb_settings.model_daily_token_limit(ACCOUNTS_DIR)))
+                  % (model, wb_settings.model_daily_token_limit(ACCOUNTS_DIR, realm)))
         raise RateLimited(None, reason,
                           wait=seconds_until_local_midnight(), message=reason)
     raise RuntimeError(no_usable_account_message(realm, enabled))
@@ -6498,15 +6525,19 @@ def messages_to_chat(payload, replay_scope=None):
         system = (system + "\n" + note) if system else note
     if system:
         messages.append({"role": "system", "content": system})
-    for item in messages_in:
+    for index, item in enumerate(messages_in):
         if not isinstance(item, dict):
             continue
         role = _anthropic_text(item.get("role")).strip() or "user"
+        content = item.get("content")
+        if role in ("system", "developer"):
+            text = _anthropic_system_text(content) or _anthropic_content_to_text(content)
+            if text:
+                messages.append({"role": "system", "content": text})
+            continue
         if role not in ("user", "assistant"):
             raise ValueError(
-                "messages[].role must be user or assistant; "
-                "pass a system prompt in the top-level system field")
-        content = item.get("content")
+                "messages[%d].role %r must be user, assistant, system or developer" % (index, role))
         if isinstance(content, str):
             messages.append({"role": role, "content": content})
         elif isinstance(content, list):
@@ -8101,6 +8132,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_accounts_credits()
         if path == "/accounts/balance":
             return self._get_accounts_balance()
+        if path == "/accounts/refresh/status":
+            if not self._authorized():
+                return
+            job = POOL.credential_refresh_status(query.get("id", [None])[0]) if POOL else None
+            if job is None:
+                return self._error(404, "no such refresh job")
+            return self._json(200, job)
         if path == "/accounts":
             return self._get_accounts(query)
         if path == "/accounts/export":
@@ -8491,6 +8529,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, PRICING.status())
         return self._json(200, {
             "interval_minutes": 0.0, "enabled": False, "running": False,
+            "master_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
             "policies": 0, "models": 0, "current": {}, "logs": [],
             "gaps": [], "gap_summary": {"total": 0, "or_missing": 0,
                                         "variant_unmatched": 0, "aliases": 0,
@@ -8744,20 +8783,36 @@ class Handler(BaseHTTPRequestHandler):
         once the plan is complete (audit #12).
         """
         plan = {}
-        if "api_keys" in payload:
-            raw = payload.get("api_keys")
+        if "api_keys" in payload or "deleted_api_key_ids" in payload:
+            raw = payload.get("api_keys", [])
             if not isinstance(raw, list):
                 return None, self._error(400, "api_keys must be a list", "invalid_request_error")
+            delete_ids = payload.get("deleted_api_key_ids")
+            if "deleted_api_key_ids" in payload:
+                if (not isinstance(delete_ids, list) or any(not isinstance(uid, str)
+                        or not uid.strip() or len(uid) > 256 for uid in delete_ids)):
+                    return None, self._error(400, "deleted_api_key_ids must be an array of non-empty strings",
+                                             "invalid_request_error")
+                plan["deleted_api_key_ids"] = [uid.strip() for uid in delete_ids]
             # The panel only ever shows a masked key, so a blank value means
             # "keep what is stored" for that row rather than "clear it".
             existing = {entry.get("id"): entry for entry in configured_keys()}
+            retired = {entry["id"] for entry in wb_settings.api_keys(ACCOUNTS_DIR, include_deleted=True)
+                       if entry.get("deleted_at")}
+            by_secret = {entry["key"]: entry for entry in existing.values() if entry.get("key")}
             cleaned = []
             for item in raw:
                 if not isinstance(item, dict):
                     return None, self._error(400, "each api key must be an object",
                                              "invalid_request_error")
                 entry_id = str(item.get("id") or "").strip()
+                if entry_id in retired:
+                    return None, self._error(400, "a retired API Key id cannot be reused", "invalid_request_error")
+                stored = existing.get(entry_id) or {}
                 value = str(item.get("key") or "").strip()
+                if delete_ids is not None and not stored and value in by_secret:
+                    stored = by_secret[value]
+                    entry_id = stored["id"]
                 if not value and entry_id and entry_id in existing:
                     value = existing[entry_id].get("key") or ""
                 # A new row keeps an empty id here; wb_settings mints a random
@@ -8770,12 +8825,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not value:
                     return None, self._error(400, "a key entry is empty - fill it in or remove the row",
                                              "invalid_request_error")
-                realm = str(item.get("realm") or "").strip().lower()
+                realm = str(item.get("realm", stored.get("realm")) or "").strip().lower()
+                enabled = item.get("enabled", stored.get("enabled", True)) is not False
                 if realm not in wb_settings.REALMS:
                     # Keep an existing retired binding disabled during a panel
                     # round-trip; enabling it requires an explicit new exit.
-                    old = existing.get(entry_id, {})
-                    if old.get("realm") != realm or item.get("enabled", True) is not False:
+                    if stored.get("realm") != realm or enabled:
                         return None, self._error(400, "realm must be intl, cn or empty",
                                                  "invalid_request_error")
                 # An older cached panel does not know this field at all, so a
@@ -8784,72 +8839,42 @@ class Handler(BaseHTTPRequestHandler):
                 if "models" in item:
                     models = item.get("models")
                 else:
-                    models = existing.get(entry_id, {}).get("models")
-                created_at = item.get("created_at") or (existing.get(entry_id, {}).get("created_at") if entry_id in existing else None) or time.strftime("%Y/%m/%d %H:%M")
+                    models = stored.get("models")
+                created_at = item.get("created_at") or stored.get("created_at") or time.strftime("%Y/%m/%d %H:%M")
                 cleaned.append({
                     "id": entry_id,
-                    "name": str(item.get("name") or "").strip(),
+                    "name": str(item.get("name", stored.get("name")) or "").strip(),
                     "key": value,
                     "realm": realm,
                     "models": models,
-                    "enabled": item.get("enabled", True) is not False,
+                    "enabled": enabled,
                     "created_at": created_at,
                 })
             plan["api_keys"] = cleaned
         if "auth_disabled" in payload:
             plan["auth_disabled"] = payload.get("auth_disabled")
-        if "reserve_credits" in payload:
+        if "limits" in payload or any(key in payload for key in wb_settings.LIMIT_KEYS):
             try:
-                reserve = int(payload.get("reserve_credits"))
-            except (TypeError, ValueError):
-                return None, self._error(400, "reserve_credits must be a whole number",
-                                         "invalid_request_error")
-            if reserve < 0:
-                return None, self._error(400, "reserve_credits cannot be negative",
-                                         "invalid_request_error")
-            plan["reserve_credits"] = reserve
-        if "daily_token_limit" in payload:
-            raw = payload.get("daily_token_limit")
-            if isinstance(raw, bool) or raw is None:
-                return None, self._error(400, "daily_token_limit must be a whole number",
-                                         "invalid_request_error")
+                patches = wb_settings.validate_limits_patch(payload.get("limits", {}))
+                for key in wb_settings.LIMIT_KEYS:
+                    if key in payload:
+                        flat = wb_settings.validate_limits_patch({key: {"global": payload[key]}})[key]["global"]
+                        if key in patches and "global" in patches[key] and patches[key]["global"] != flat:
+                            raise ValueError("conflicting global limit: " + key)
+                        patches.setdefault(key, {})["global"] = flat
+                        plan[key] = flat
+                plan["limits"] = patches
+            except ValueError as exc:
+                return None, self._error(400, str(exc), "invalid_request_error")
+        if "credits_refresh_hours" in payload:
             try:
-                limit = int(raw)
-            except (TypeError, ValueError):
-                return None, self._error(400, "daily_token_limit must be a whole number",
-                                         "invalid_request_error")
-            if limit < 0:
-                return None, self._error(400, "daily_token_limit cannot be negative",
-                                         "invalid_request_error")
-            plan["daily_token_limit"] = limit
-        if "daily_credit_limit" in payload:
-            raw = payload.get("daily_credit_limit")
-            if isinstance(raw, bool) or raw is None:
-                return None, self._error(400, "daily_credit_limit must be a whole number",
-                                         "invalid_request_error")
-            try:
-                limit = int(raw)
-            except (TypeError, ValueError):
-                return None, self._error(400, "daily_credit_limit must be a whole number",
-                                         "invalid_request_error")
-            if limit < 0:
-                return None, self._error(400, "daily_credit_limit cannot be negative",
-                                         "invalid_request_error")
-            plan["daily_credit_limit"] = limit
-        if "model_daily_token_limit" in payload:
-            raw = payload.get("model_daily_token_limit")
-            if isinstance(raw, bool) or raw is None:
-                return None, self._error(400, "model_daily_token_limit must be a whole number",
-                                         "invalid_request_error")
-            try:
-                limit = int(raw)
-            except (TypeError, ValueError):
-                return None, self._error(400, "model_daily_token_limit must be a whole number",
-                                         "invalid_request_error")
-            if limit < 0:
-                return None, self._error(400, "model_daily_token_limit cannot be negative",
-                                         "invalid_request_error")
-            plan["model_daily_token_limit"] = limit
+                raw = payload["credits_refresh_hours"]
+                value = float(raw)
+                if isinstance(raw, bool) or not math.isfinite(value) or not 0 <= value <= 72:
+                    raise ValueError()
+                plan["credits_refresh_hours"] = value
+            except (TypeError, ValueError, OverflowError):
+                return None, self._error(400, "credits_refresh_hours must be between 0 and 72", "invalid_request_error")
         if "pricing_refresh_minutes" in payload or "pricing_refresh_hours" in payload:
             field = ("pricing_refresh_minutes"
                      if "pricing_refresh_minutes" in payload else "pricing_refresh_hours")
@@ -8868,6 +8893,12 @@ class Handler(BaseHTTPRequestHandler):
                 return None, self._error(400, "pricing_refresh_minutes cannot be negative",
                                          "invalid_request_error")
             plan["pricing_refresh_minutes"] = minutes
+        if "pricing_enabled" in payload:
+            raw = payload.get("pricing_enabled")
+            if not isinstance(raw, bool):
+                return None, self._error(400, "pricing_enabled must be true or false",
+                                         "invalid_request_error")
+            plan["pricing_enabled"] = raw
         if "pricing_variant_inherit" in payload:
             raw = payload.get("pricing_variant_inherit")
             if not isinstance(raw, bool):
@@ -8972,32 +9003,39 @@ class Handler(BaseHTTPRequestHandler):
         reply = {}
         if "api_keys" in plan:
             cleaned = plan["api_keys"]
-            wb_settings.set_api_keys(ACCOUNTS_DIR, cleaned)
+            try:
+                wb_settings.set_api_keys(ACCOUNTS_DIR, cleaned, delete_ids=plan.get("deleted_api_key_ids"))
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
             reply["api_keys_saved"] = len(cleaned)
         if "auth_disabled" in plan:
             wb_settings.set_auth_disabled(ACCOUNTS_DIR, plan["auth_disabled"])
             reply["auth_disabled"] = bool(plan["auth_disabled"])
-        if "reserve_credits" in plan:
-            reserve = plan["reserve_credits"]
-            wb_settings.set_reserve_credits(ACCOUNTS_DIR, reserve)
+        if "limits" in plan:
+            saved_limits = wb_settings.set_limits(ACCOUNTS_DIR, plan["limits"])
             if POOL:
-                POOL.apply_reserve_credits(reserve)
-            reply["reserve_credits"] = reserve
-        if "daily_token_limit" in plan:
-            limit = plan["daily_token_limit"]
-            wb_settings.set_daily_token_limit(ACCOUNTS_DIR, limit)
-            apply_daily_token_limit(refresh=True)
-            reply["daily_token_limit"] = limit
-        if "daily_credit_limit" in plan:
-            limit = plan["daily_credit_limit"]
-            wb_settings.set_daily_credit_limit(ACCOUNTS_DIR, limit)
-            apply_daily_credit_limit(refresh=True)
-            reply["daily_credit_limit"] = limit
-        if "model_daily_token_limit" in plan:
-            limit = plan["model_daily_token_limit"]
-            wb_settings.set_model_daily_token_limit(ACCOUNTS_DIR, limit)
-            apply_model_daily_token_limit(refresh=True)
-            reply["model_daily_token_limit"] = limit
+                POOL.apply_reserve_credits(saved_limits["reserve_credits"])
+                POOL.apply_expiring_window(saved_limits["expiring_window_days"])
+            apply_scheduling_limits(refresh=True)
+            reply["limits"] = saved_limits
+            for key in wb_settings.LIMIT_KEYS:
+                if key in plan:
+                    reply[key] = plan[key]
+        if "credits_refresh_hours" in plan:
+            reply["credits_refresh_hours"] = wb_settings.set_credits_refresh_hours(ACCOUNTS_DIR, plan["credits_refresh_hours"])
+        if "pricing_enabled" in plan:
+            wb_settings.set_pricing_enabled(ACCOUNTS_DIR, plan["pricing_enabled"])
+            reply["pricing_enabled"] = plan["pricing_enabled"]
+            if PRICING:
+                PRICING.wake()
+        if "pricing_enabled" in plan or "pricing_variant_inherit" in plan:
+            # JSON fallback views use a TTL. SQL views include both switches
+            # in their pricing epoch and rebuild without waiting for new usage.
+            for cache, lock in ((_snap_cache, _snap_lock), (_analytics_cache, _analytics_lock)):
+                with lock:
+                    cache.clear()
+            with _byacct_lock:
+                _byacct_cache.update(at=0.0, data=None)
         if "pricing_refresh_minutes" in plan:
             minutes = plan["pricing_refresh_minutes"]
             stored = wb_settings.set_pricing_refresh_minutes(ACCOUNTS_DIR, minutes)
@@ -9797,6 +9835,12 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _route_accounts_refresh(self, payload):
+        if "async" in payload and not isinstance(payload["async"], bool):
+            return self._error(400, "async must be true or false")
+        if payload.get("async") and not payload.get("uid"):
+            if not POOL:
+                return self._error(503, "account pool is not ready")
+            return self._json(202, POOL.start_manual_refresh())
         uid = payload.get("uid")
         targets = [POOL.get(uid)] if uid else list(POOL.accounts)
         results = []

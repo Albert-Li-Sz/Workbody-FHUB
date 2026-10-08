@@ -1,6 +1,6 @@
 # 来源、致谢与使用说明
 
-Workbody-FHUB 派生自 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，基于上游 1.6.13。分支采用 [Apache-2.0](../LICENSE)，保留上游 [MIT 许可证原文](../LICENSE.upstream)、[版本记录](../CHANGELOG.upstream.md)及 [来源清单](../upstreams.json)。
+Workbody-FHUB 派生自 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，最初基于上游 1.6.13，选择合入截至 1.6.17 的适用更新（[同步记录](upstream-sync-2026-10-09.md)）。分支采用 [Apache-2.0](../LICENSE)，保留上游 [MIT 许可证原文](../LICENSE.upstream)、[版本记录](../CHANGELOG.upstream.md)及 [来源清单](../upstreams.json)。
 
 原项目声明（保留原文）：
 

@@ -155,3 +155,14 @@ footer{font-size:11px;text-align:left;margin-top:28px;border-top:1px solid var(-
 .advanced-setting-desc{font-size:12px;color:var(--dim);line-height:1.5;margin-top:3px}
 .advanced-setting-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin-top:20px}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;scroll-behavior:auto!important}}
+
+/* Regional limits keep every channel explicit; blank overrides inherit. */
+.limits-matrix{min-width:660px;width:100%}
+.limits-matrix td:first-child{min-width:180px}
+.limits-matrix input{width:100%;min-width:80px;max-width:170px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:8px;color:var(--fg);font:inherit}
+.limits-matrix em{display:block;font-size:11px;color:var(--dim);font-style:normal;margin-top:4px}
+.quota-refresh{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 8px}
+.quota-refresh>input{width:90px;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--fg)}
+.credit-history-scroll{overflow:auto;max-height:260px}
+#creditHistoryTable th{position:sticky;top:0;z-index:1;background:var(--panel)}
+@media(max-width:650px){.limits-scroll{overflow:visible}table.limits-matrix td:first-child{display:block;min-width:0}.limits-matrix input{width:170px}}

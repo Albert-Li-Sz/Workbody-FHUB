@@ -19,7 +19,7 @@ import time
 import urllib.request
 import uuid
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 REPOSITORY = "Albert-Li-Sz/Workbody-FHUB"
 REGISTRY = "ghcr.io/albert-li-sz"
 RUNTIME_FILE = "compose.runtime.json"
@@ -513,7 +513,7 @@ def upgrade(args):
         raise UpgradeError("安装目录不存在。")
     version = args.version.removeprefix("v") if sys.version_info >= (3, 9) else args.version.lstrip("v")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        raise UpgradeError("版本应为 1.1.2 或 v1.1.2 形式。")
+        raise UpgradeError("版本应为 1.1.3 或 v1.1.3 形式。")
     with tempfile.TemporaryDirectory(prefix="workbody-update-") as temporary:
         staging = Path(temporary)
         say("下载 v%s 的源码和校验文件。" % version)

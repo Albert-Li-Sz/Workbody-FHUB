@@ -283,9 +283,9 @@ try:
         ("missing model", {"messages": [{"role": "user", "content": "hi"}]}),
         ("empty messages", {"model": "deepseek-v4.1-flash", "messages": []}),
         ("messages not a list", {"model": "deepseek-v4.1-flash", "messages": "x"}),
-        ("system role in messages",
+        ("tool role in messages",
          {"model": "deepseek-v4.1-flash",
-          "messages": [{"role": "system", "content": "s"}]}),
+          "messages": [{"role": "tool", "content": "s"}]}),
     ):
         code, _h, body = request("POST", "/v1/messages", bad,
                                  headers={"x-api-key": "TESTKEY"})
@@ -333,6 +333,23 @@ try:
               for m in sent.get("messages") or []), sent.get("messages"))
 
     print()
+    MOCK["requests"] = []
+    code, _headers, _body = request("POST", "/v1/messages", {
+        "model": "deepseek-v4.1-flash", "max_tokens": 64,
+        "messages": [{"role": "user", "content": "first"},
+                     {"role": "assistant", "content": "previous answer"},
+                     {"role": "system", "content": [{"type": "text", "text": "mid-conversation policy"}]},
+                     {"role": "developer", "content": "developer reminder"},
+                     {"role": "user", "content": "continue"}]}, headers={"x-api-key": "TESTKEY"})
+    sent = MOCK["requests"][0]["body"] if MOCK["requests"] else {}
+    texts = [str(m.get("content") or "") for m in sent.get("messages") or []]
+    check("Messages inline system/developer round-trip returns 200", code == 200, code)
+    check("inline policy stays after assistant and before continuation",
+          "previous answer" in texts and "mid-conversation policy" in texts
+          and "developer reminder" in texts and "continue" in texts
+          and texts.index("previous answer") < texts.index("mid-conversation policy")
+          < texts.index("developer reminder") < texts.index("continue"), texts)
+
     print("[4] streaming emits the native event sequence")
     MOCK["stream"] = True
     MOCK["chunks"] = TEXT_CHUNKS

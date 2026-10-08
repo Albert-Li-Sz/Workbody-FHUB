@@ -1,6 +1,6 @@
 # API 与余额协议说明
 
-适用版本：**1.1.2**。
+适用版本：**1.1.3**。
 
 ## 地址与鉴权
 
@@ -219,3 +219,13 @@ data: {"topics":["accounts","usage"],"revision":12,"at":1791417600}
 事件连接包含心跳和重连提示，每实例最多 64 个订阅。会话过期返回 `session_expired`；客户端应重新登录。断线后重新读取当前状态，无需重放历史通知。前端使用支持自定义鉴权头的 fetch 流，支持自动重连与不可用时的 30 秒恢复刷新。
 
 生成取消时已确认的部分用量计入消费，`client_aborted` 单独计数，不纳入有效生成速度。未知用量不会使用调度预估替代。[调度说明](account-scheduling.md)
+
+
+## 管理设置补充（需面板认证）
+
+- `POST /settings/save` 支持 `limits`，键为 `reserve_credits`、`daily_token_limit`、`daily_credit_limit`、`model_daily_token_limit`、`expiring_window_days`。每项包含 `global`、`intl`、`cn`，渠道 `null` 表示继承；旧平面字段继续更新全局值。负数、小数及非法数值整次拒绝，不做部分写入。
+- `pricing_enabled` 为 JSON 布尔值，默认 `true`；关闭后暂停费用估算和取价，Token 与实际积分继续记录。`credits_refresh_hours` 为 `0–72` 的数字，默认 `0.5`。
+- 保存 `api_keys` 时带 `deleted_api_key_ids` 数组采用显式删除与新增／更新：遗漏的已有 Key 保留；空密钥保留对应原值；未提交的名称、渠道、模型范围和启用状态保留。只提交删除数组也可删除。旧调用方不带数组仍采用完整替换语义。已删除的 id 不能重新启用。
+- `POST /accounts/refresh` 发送 `{"async":true}` 返回 `202` 与 `id`、`total`、`completed`、`running`、`results`；`GET /accounts/refresh/status?id=...` 查询批次。只保留当前批次；重启后任务状态清除。省略 `async` 或指定 `uid` 保留同步调用兼容。
+
+Messages 支持 Claude Code 在会话中插入的 `system`／`developer` 消息，按原位置转换为上游 system 消息。部分实时推理元数据按字段合并；未声明 `supportedEfforts` 时保留内置可选档位，防止仅返回默认 effort 的模型被错误锁定。

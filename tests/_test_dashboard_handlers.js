@@ -87,10 +87,10 @@ const elements = {keyList: {innerHTML: ''}, deletedKeySection: {innerHTML: ''}};
 const rows = [{id: 'retired', name: 'Retired', realm: 'opencode', enabled: false,
                masked: 'synthetic-mask', key: '', models: ['deepseek*']}];
 const saves = [];
-const editor = new Function('document', 'API_KEY_ROWS', 'DELETED_KEY_ROWS', 'esc',
+const editor = new Function('document', 'API_KEY_ROWS', 'DELETED_KEY_ROWS', 'DELETED_KEY_IDS', 'esc',
   'postJSON', 'loadSettings', 'toast', keySource +
   '; return {renderKeyRows, openEditKey, saveSingleKey, toggleKeyRow};')(
-    {getElementById: id => elements[id] || null}, rows, [], String,
+    {getElementById: id => elements[id] || null}, rows, [], [], String,
     async (url, payload) => saves.push(JSON.parse(JSON.stringify(payload))),
     () => {}, () => {});
 

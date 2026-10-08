@@ -1,3 +1,26 @@
+function creditExpiryInfo(p, updatedAt){
+  const end = p.expire_time || p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime || '';
+  if(p.no_expiry || p.package_code === 'enterprise') return {end, days:null, noExpiry:true};
+  let stamp = Number(p.expire_at || 0) * 1000;
+  if(!Number.isFinite(stamp) || stamp <= 0){
+    stamp = Date.parse(String(end).replace(' ', 'T'));
+    if(!Number.isFinite(stamp)) stamp = Date.parse(String(end).replace(/-/g, '/').replace('T', ' '));
+  }
+  let days = Number.isFinite(stamp) ? (stamp - Date.now()) / 86400000 : null;
+  if(days === null && p.days_left != null && Number.isFinite(Number(p.days_left))){
+    const age = updatedAt && Number.isFinite(Number(updatedAt)) ? Math.max(0, (Date.now()/1000 - Number(updatedAt))/86400) : 0;
+    days = Number(p.days_left) - age;
+  }
+  const noExpiry = days !== null && days > 730;
+  return {end, days:noExpiry ? null : days, noExpiry};
+}
+function earliestCreditPackage(credits){
+  const packages = Array.isArray(credits.packages) && credits.packages.length ? credits.packages : [credits.earliest_expiring].filter(Boolean);
+  return packages.map(p => ({...p, ...creditExpiryInfo(p, credits.updated_at)}))
+    .filter(p => Number(p.remain || 0) > 0 && p.days !== null && p.days >= 0 && !p.noExpiry)
+    .sort((a,b) => a.days - b.days)[0] || null;
+}
+
 function accountRow(a){
   const realmBadge = a.realm === 'cn'
     ? '<span class="realm-badge-cn">国内版</span>'
@@ -37,12 +60,14 @@ function accountRow(a){
     ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.lastError) + '</div>' : '';
   const cred = a.credits;
   let expBadge = '';
-  if(cred && cred.earliest_expiring && cred.earliest_expiring.days_left !== undefined && cred.earliest_expiring.days_left !== null){
-    const d = Number(cred.earliest_expiring.days_left);
-    if(d <= 3 && d >= 0){
-      expBadge = '<span class="badge mini bad" style="font-size:10px;padding:1px 4px" title="最近套餐包将于 ' + esc(cred.earliest_expiring.cycle_end_time.slice(5,10)) + ' 到期 (剩' + d.toFixed(1) + '天)">临期</span>';
-    } else if(d <= 7 && d >= 0){
-      expBadge = '<span class="badge mini warn" style="font-size:10px;padding:1px 4px" title="最近套餐包将于 ' + esc(cred.earliest_expiring.cycle_end_time.slice(5,10)) + ' 到期 (剩' + Math.ceil(d) + '天)">7天内到期</span>';
+  const expiring = cred ? earliestCreditPackage(cred) : null;
+  if(expiring){
+    const d = expiring.days;
+    const date = esc(String(expiring.end || '').slice(5, 10));
+    if(d <= 3){
+      expBadge = '<span class="badge mini bad" style="font-size:10px;padding:1px 4px" title="最近套餐包将于 ' + date + ' 到期 (剩' + d.toFixed(1) + '天)">临期</span>';
+    } else if(d <= 7){
+      expBadge = '<span class="badge mini warn" style="font-size:10px;padding:1px 4px" title="最近套餐包将于 ' + date + ' 到期 (剩' + Math.ceil(d) + '天)">7天内到期</span>';
     }
   }
   const credText = cred
@@ -189,6 +214,7 @@ async function loadAccounts(){
   try{
     const [acct, byAcct] = await Promise.all([getJSON('/accounts?realm=all'), getJSON('/usage/by-account')]);
     window.ACCOUNTS = acct.accounts || [];
+    if(typeof renderCreditHistory === 'function') renderCreditHistory();
     if(acct.balance) renderAccountBalance(acct.balance);
     USAGE_BY_ACCOUNT = {};
     (byAcct.accounts || []).forEach(a => { USAGE_BY_ACCOUNT[a.account] = a; });
@@ -405,12 +431,34 @@ async function testAccount(uid, btn){
     if(btn){ btn.disabled = false; btn.textContent = '测试'; }
   }
 }
-async function refreshAccounts(){
-  try{ const r = await postJSON('/accounts/refresh', {});
-       const okc = (r.results||[]).filter(x=>x.ok).length;
-       toast('刷新完成: ' + okc + '/' + (r.results||[]).length);
-       await loadAccounts(); }
-  catch(e){ toast(e.message); }
+let CREDENTIAL_REFRESHING = false;
+async function refreshAccounts(btn){
+  if(CREDENTIAL_REFRESHING) return;
+  CREDENTIAL_REFRESHING = true;
+  btn = btn || document.getElementById('btnRefreshAccounts');
+  const original = btn ? btn.textContent : '';
+  if(btn) btn.disabled = true;
+  try{
+    let job = await postJSON('/accounts/refresh', {async: true});
+    while(job.running){
+      if(btn) btn.textContent = '凭证刷新 ' + job.completed + '/' + job.total;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      job = await getJSON('/accounts/refresh/status?id=' + encodeURIComponent(job.id));
+    }
+    const results = job.results || [];
+    const ok = results.filter(x => x.ok).length;
+    toast('凭证刷新完成: ' + ok + '/' + job.total + (ok < job.total ? '，失败详情见账号状态' : ''), ok === job.total ? 'ok' : 'warn');
+    const failures = results.filter(x => !x.ok);
+    if(failures.length){
+      const reasons = [...new Set(failures.map(x => x.error || '未知错误'))].slice(0, 3);
+      toast('刷新失败 ' + failures.length + ' 个: ' + reasons.map(x => String(x).slice(0, 100)).join('；'), 'bad');
+    }
+    await loadAccounts();
+  }catch(e){ toast('读取凭证刷新进度失败: ' + e.message + '；已提交的任务会在后台继续', 'bad'); }
+  finally{
+    CREDENTIAL_REFRESHING = false;
+    if(btn){ btn.disabled = false; btn.textContent = original; }
+  }
 }
 async function setAll(enable, btn){
   if(btn) btn.disabled = true;
@@ -677,7 +725,7 @@ async function openCreditsDetail(uid, forceRefresh = false){
 
   // 检查已缓存的数据是否包含有效期字段，若包含且无需强制刷新，先秒开渲染本地已缓存数据
   const cachedPkgs = (acct && acct.credits && Array.isArray(acct.credits.packages)) ? acct.credits.packages : [];
-  const hasExpiryData = cachedPkgs.length > 0 && cachedPkgs.some(p => p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime);
+  const hasExpiryData = cachedPkgs.length > 0 && cachedPkgs.some(p => p.no_expiry || p.expire_time || p.expire_at || p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime);
   if(!forceRefresh && hasExpiryData){
     CURRENT_CREDITS_DATA = acct.credits;
     renderCreditsDetail(acct.credits, acct);
@@ -780,32 +828,10 @@ function renderCreditsDetail(credits, acct){
   const elExpVal = document.getElementById("cmExpiryValue");
   const elExpSub = document.getElementById("cmExpirySub");
   if(elExpVal && elExpSub){
-    let ep = credits.earliest_expiring;
-    if(!ep && Array.isArray(credits.packages)){
-      const candidates = [];
-      credits.packages.forEach(p => {
-        const rem = Number(p.remain ?? p.CycleCapacityRemain) || 0;
-        const eStr = p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime || '';
-        if(rem > 0 && eStr && eStr !== '-'){
-          try {
-            const clean = eStr.replace(/-/g, '/').replace('T', ' ');
-            const ts = new Date(clean).getTime();
-            if(!isNaN(ts)){
-              const d = Math.round((ts - Date.now()) / 86400000 * 10) / 10;
-              candidates.push({ name: p.name || '套餐包', remain: rem, cycle_end_time: eStr, days_left: d });
-            }
-          } catch(e){}
-        }
-      });
-      if(candidates.length){
-        candidates.sort((a, b) => a.days_left - b.days_left);
-        ep = candidates[0];
-      }
-    }
-
-    if(ep && ep.days_left !== undefined && ep.days_left !== null){
-      const days = Number(ep.days_left);
-      const endStr = String(ep.cycle_end_time || '');
+    const ep = earliestCreditPackage(credits);
+    if(ep){
+      const days = ep.days;
+      const endStr = String(ep.end || '');
       if(days < 0){
         elExpVal.textContent = "已有包过期";
         elExpVal.style.color = "var(--bad)";
@@ -825,9 +851,12 @@ function renderCreditsDetail(credits, acct){
       }
       elExpSub.title = (ep.name || "") + " (" + endStr + ")";
     } else {
-      elExpVal.textContent = "长期有效";
-      elExpVal.style.color = "var(--accent2)";
-      elExpSub.textContent = "暂无临期生效套餐包";
+      const packages = Array.isArray(credits.packages) ? credits.packages : [];
+      const longLived = packages.some(p => Number(p.remain || 0) > 0 && creditExpiryInfo(p, credits.updated_at).noExpiry);
+      const expired = packages.some(p => { const days = creditExpiryInfo(p, credits.updated_at).days; return days !== null && days < 0; });
+      elExpVal.textContent = credits.is_enterprise ? "周期额度" : longLived ? "长期有效" : expired ? "无有效临期包" : "到期时间未知";
+      elExpVal.style.color = longLived ? "var(--accent2)" : "var(--dim)";
+      elExpSub.textContent = credits.is_enterprise ? "周期结束重置额度，不表示积分失效" : "暂无临期生效套餐包";
     }
   }
 
@@ -875,20 +904,11 @@ function renderCreditsPackagesTable(){
     const pSize = Number(p.size ?? p.total ?? p.CycleCapacitySize) || 0;
     const pUsed = Number(p.used ?? p.CycleCapacityUsed) || 0;
     const pRemain = Number(p.remain ?? p.CycleCapacityRemain) || 0;
-    const endTime = p.cycle_end_time || p.cycleEndTime || p.CycleEndTime || p.expired_time || p.ExpiredTime || '';
+    const expiry = creditExpiryInfo(p, credits.updated_at);
+    const endTime = expiry.end;
     const startTime = p.cycle_start_time || p.cycleStartTime || p.CycleStartTime || '';
-
-    let days = (p.days_left !== undefined && p.days_left !== null) ? Number(p.days_left) : null;
-    if(days === null && endTime && endTime !== '-'){
-      try {
-        const cleanStr = endTime.replace(/-/g, '/').replace('T', ' ');
-        const endTs = new Date(cleanStr).getTime();
-        if(!isNaN(endTs)){
-          days = Math.round((endTs - Date.now()) / 86400000 * 10) / 10;
-        }
-      } catch(e){}
-    }
-    const isExpired = p.is_expired !== undefined ? !!p.is_expired : (days !== null && days < 0);
+    const days = expiry.days;
+    const isExpired = !expiry.noExpiry && (days !== null ? days < 0 : !!p.is_expired);
     return {
       raw: p,
       name: p.name || '套餐包',
@@ -903,6 +923,7 @@ function renderCreditsPackagesTable(){
       remain: pRemain,
       cycle_start_time: startTime,
       cycle_end_time: endTime,
+      no_expiry: expiry.noExpiry,
       days_left: days,
       is_expired: isExpired
     };
@@ -972,7 +993,9 @@ function renderCreditsPackagesTable(){
 
     // 到期倒计时与周期格式化
     let expiryBadge = '';
-    if(p.is_expired || (days !== null && days < 0)){
+    if(p.no_expiry){
+      expiryBadge = '<span class="badge mini">' + (p.package_code === 'enterprise' ? '周期额度' : '长期有效') + '</span>';
+    } else if(p.is_expired || (days !== null && days < 0)){
       expiryBadge = '<span class="badge mini off">已过期</span>';
     } else if(days !== null){
       if(days <= 3){
