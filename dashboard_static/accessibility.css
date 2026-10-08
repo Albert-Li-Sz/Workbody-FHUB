@@ -1,0 +1,1 @@
+.skip-link{position:fixed;left:240px;top:-60px;z-index:700;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:6px}.skip-link:focus{top:10px}@media(max-width:960px){.skip-link{left:16px}}

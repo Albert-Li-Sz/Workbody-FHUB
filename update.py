@@ -19,7 +19,7 @@ import time
 import urllib.request
 import uuid
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 REPOSITORY = "Albert-Li-Sz/Workbody-FHUB"
 REGISTRY = "ghcr.io/albert-li-sz"
 RUNTIME_FILE = "compose.runtime.json"
@@ -259,6 +259,8 @@ def deployment_model(old, app, version, args, directory):
                                ("WB_ACME_EMAIL", args.acme_email)):
                 if value is not None:
                     env[key] = value
+    if nginx_services:
+        cfg.setdefault("environment", {}).setdefault("WB_TRUSTED_PROXIES", ",".join(nginx_services) + ",127.0.0.1/32,::1/128")
     return model, [app] + nginx_services
 
 
@@ -460,6 +462,34 @@ def wait_application(command, app, directory, version, timeout):
     raise UpgradeError("新应用未在指定时间内返回版本 %s，将回退。" % version)
 
 
+def wait_gateway(command, service, directory, version, timeout):
+    """Nginx readiness and certificate status are separate from app readiness."""
+    deadline = time.monotonic() + timeout
+    probe = '''import json,ssl,urllib.request
+base='http://127.0.0.1'
+assert urllib.request.urlopen(base+'/nginx-health',timeout=3).status == 200
+status=json.load(urllib.request.urlopen(base+'/tls/status',timeout=3))
+if status.get('status') in ('disabled','ready','staging'):
+    secure=status.get('status') != 'disabled'
+    target=('https://' if secure else 'http://')+'127.0.0.1/health'
+    # Local handshake/readiness only; public certificate identity is reported separately.
+    result=json.load(urllib.request.urlopen(target,context=ssl._create_unverified_context() if secure else None,timeout=3))
+    assert result.get('version') == EXPECTED_VERSION
+print(json.dumps(status))'''.replace("EXPECTED_VERSION", repr(version))
+    last_error = "Nginx 尚未启动"
+    while time.monotonic() < deadline:
+        container = container_for(command, service, directory)
+        if container and container["State"].get("Running"):
+            try:
+                run(["docker", "exec", container["Id"], "nginx", "-t"], timeout=10)
+                result = run(["docker", "exec", container["Id"], "python3", "-c", probe], timeout=15)
+                return json.loads(result)
+            except (UpgradeError, subprocess.TimeoutExpired, ValueError) as exc:
+                last_error = str(exc)
+        time.sleep(2)
+    raise UpgradeError("Nginx 配置或代理入口未在指定时间内就绪，将回退：" + last_error[:300])
+
+
 def source_only(directory, staging, files, backup):
     existing = archive_source(directory, files, backup)
     roots = [directory / name for name in ("accounts", "usage", ".tls", ".acme") if (directory / name).exists()]
@@ -483,7 +513,7 @@ def upgrade(args):
         raise UpgradeError("安装目录不存在。")
     version = args.version.removeprefix("v") if sys.version_info >= (3, 9) else args.version.lstrip("v")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        raise UpgradeError("版本应为 1.1.1 或 v1.1.1 形式。")
+        raise UpgradeError("版本应为 1.1.2 或 v1.1.2 形式。")
     with tempfile.TemporaryDirectory(prefix="workbody-update-") as temporary:
         staging = Path(temporary)
         say("下载 v%s 的源码和校验文件。" % version)
@@ -576,6 +606,8 @@ def upgrade(args):
             runtime_installed = True
             run(runtime_command + ["up", "-d", "--no-build", "--pull", "never"] + managed, directory)
             wait_application(runtime_command, app, directory, version, args.timeout)
+            gateway_status = {name: wait_gateway(runtime_command, name, directory, version, args.timeout)
+                              for name in managed_nginx(new_model)}
         except BaseException:
             say("升级未完成，正在恢复原安装。")
             try:
@@ -601,7 +633,12 @@ def upgrade(args):
         say("升级完成，应用 /health.version = " + version)
         say("以后管理此安装使用：docker compose -f " + RUNTIME_FILE)
         if managed_nginx(new_model):
-            say("证书签发在后台进行；查看 /tls/status 和 nginx 日志。")
+            for name, status in gateway_status.items():
+                say("Nginx %s 配置与服务已就绪；TLS 状态：%s。" % (name, status.get("status", "unknown")))
+                if status.get("expires_at"):
+                    say("证书到期时间（UTC）：" + str(status["expires_at"]))
+                if status.get("status") not in ("disabled", "ready"):
+                    say("HTTPS 尚未确认生产证书可用；查看 /tls/status 和 nginx 日志。应用升级与证书签发分别报告。")
         say("旧数据已由应用导入 SQLite；原 JSON/JSONL 与升级前备份保留。")
 
 

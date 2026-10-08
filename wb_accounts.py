@@ -21,6 +21,7 @@ import wb_http
 import wb_events
 import wb_fairness
 import wb_database
+import wb_background
 import wb_identity
 import wb_redisstore
 import wb_settings
@@ -463,6 +464,8 @@ class Account(object):
         # refresh token concurrently and the last writer wins, so a freshly
         # minted token can be overwritten by a stale snapshot.
         self._refresh_lock = threading.Lock()
+        self._refresh_failures = 0
+        self._refresh_retry_at = 0.0
         self._save_lock = threading.Lock()
         # The dashboard snapshots this state while request threads update it.
         # Keep it separate from _refresh_lock, which spans network requests.
@@ -862,12 +865,26 @@ class Account(object):
         """這個帳號目前身分該打的端點。"""
         return wb_identity.endpoint_for(self.realm, self.product)[0]
 
-    def refresh(self):
+    def refresh(self, force=True, ahead=300):
         # Serialise refreshes per account, then re-check inside the lock: the
         # upstream rotates the refresh token, so two concurrent refreshes can
         # make the second one send a token that the first already consumed.
+        previous_token = self.access_token
         with self._refresh_lock:
-            return self._refresh_locked()
+            if self.access_token != previous_token:
+                return True
+            exp = self.expires_at or jwt_exp(self.access_token)
+            if not force and (not exp or exp - time.time() > ahead):
+                return True
+            if not force and time.time() < self._refresh_retry_at:
+                return False
+            ok = self._refresh_locked()
+            if ok:
+                self._refresh_failures, self._refresh_retry_at = 0, 0.0
+            else:
+                self._refresh_failures += 1
+                self._refresh_retry_at = time.time() + min(600, 30 * 2 ** min(self._refresh_failures - 1, 5))
+            return ok
 
     def _refresh_locked(self):
         if not self.refresh_token:
@@ -1504,7 +1521,7 @@ class Account(object):
             self.in_flight += 1
             if reservation:
                 self._reservations[reservation["id"]] = dict(reservation)
-        wb_events.BROKER.publish("accounts", realm=self.realm)
+        self.publish_activity()
         return True
 
     def release(self, reservation_id=None):
@@ -1515,7 +1532,14 @@ class Account(object):
                 self._reservations.pop(reservation_id)
             if self.in_flight > 0:
                 self.in_flight -= 1
-        wb_events.BROKER.publish("accounts", realm=self.realm)
+        self.publish_activity()
+
+    def publish_activity(self):
+        with self._throttle_lock:
+            fields = {"inFlight": self.in_flight,
+                      "pendingFreeTokens": sum(r.get("tokens", 0) for r in self._reservations.values() if r.get("kind") == "free"),
+                      "pendingCredits": sum(r.get("credit", 0) for r in self._reservations.values() if r.get("kind") == "paid")}
+        wb_events.BROKER.publish(realm=self.realm, changes={"accounts": {self.uid: fields}})
 
     def pending_consumption(self, kind):
         field = "tokens" if kind == "free" else "credit"
@@ -1594,10 +1618,14 @@ class SessionAffinity(object):
     memory instead of breaking a request.
     """
 
-    def __init__(self, ttl=7200, max_entries=5000, mirror=None, mirror_ttl=604800):
+    def __init__(self, ttl=7200, max_entries=5000, mirror=None, mirror_ttl=604800, background=False):
         self.ttl = ttl
         self.max_entries = max_entries
         self.bindings = {}
+        self.background = background
+        self._stored_at = {}
+        self._generation = 0
+        self._dirty = {}
         self._lock = threading.Lock()
         self.mirror = mirror
         try:
@@ -1617,6 +1645,47 @@ class SessionAffinity(object):
     def _mirror_key(self, key):
         return wb_redisstore.PREFIX + str(key)
 
+    def _store(self, key, uid, renewal=False):
+        database, mirror = wb_database.DATABASE, self.mirror
+        now = time.monotonic()
+        with self._lock:
+            if renewal and now - self._stored_at.get(key, 0) < min(60, self.ttl / 3):
+                return
+            self._stored_at[key] = now
+            generation = self._generation
+            if not renewal:
+                self._dirty[key] = (generation, uid)
+            if len(self._stored_at) > self.max_entries:
+                self._stored_at = {k: v for k, v in self._stored_at.items() if k in self.bindings}
+        def persist():
+            try:
+                if database:
+                    if uid:
+                        database.affinity_set(key, uid, self.ttl)
+                    else:
+                        database.affinity_delete(key)
+                with self._lock:
+                    if self._dirty.get(key) == (generation, uid):
+                        self._dirty.pop(key, None)
+                if mirror:
+                    try:
+                        if uid:
+                            mirror.set(self._mirror_key(key), uid, self.mirror_ttl)
+                        else:
+                            mirror.delete(self._mirror_key(key))
+                    except Exception:
+                        pass
+            finally:
+                if database and self.background:
+                    database.close_thread()
+        if self.background:
+            storage_key = (database.path if database else id(self), key)
+            if not wb_background.AFFINITY_WRITES.submit(storage_key, persist):
+                with self._lock:
+                    self._stored_at.pop(key, None)
+        else:
+            persist()
+
     def _remember(self, key, uid):
         """Caller holds _lock; keep the hot cache bounded even at full TTL."""
         self.bindings.pop(key, None)
@@ -1631,6 +1700,9 @@ class SessionAffinity(object):
         if not key:
             return None
         with self._lock:
+            if key in self._dirty and self._dirty[key][1] is None:
+                return None
+            generation = self._generation
             entry = self.bindings.get(key)
             if entry:
                 uid, exp = entry
@@ -1644,16 +1716,29 @@ class SessionAffinity(object):
             mirror = self.mirror
         database = wb_database.DATABASE
         if uid:
-            if database:
-                database.affinity_set(key, uid, self.ttl)
+            self._store(key, uid, renewal=True)
             return uid
         uid = database.affinity_get(key) if database else None
         if uid:
             with self._lock:
+                if generation != self._generation:
+                    entry = self.bindings.get(key)
+                    return entry[0] if entry else None
                 self._remember(key, uid)
-            database.affinity_set(key, uid, self.ttl)
+            self._store(key, uid, renewal=True)
             return uid
         if mirror is None:
+            return None
+        if self.background:
+            # Redis is a backup mirror. A slow REST read must not hold the
+            # gateway's scheduling lock; SQLite rehydrates local restarts.
+            def rehydrate():
+                remote_uid = mirror.get(self._mirror_key(key))
+                if remote_uid:
+                    with self._lock:
+                        if generation == self._generation and key not in self.bindings and key not in self._dirty:
+                            self._remember(key, remote_uid)
+            wb_background.AFFINITY_WRITES.submit((id(self), "read", key), rehydrate)
             return None
         try:
             uid = mirror.get(self._mirror_key(key))
@@ -1662,6 +1747,7 @@ class SessionAffinity(object):
         if not uid:
             return None
         with self._lock:
+            self._generation += 1
             self._remember(key, uid)
         if database:
             database.affinity_set(key, uid, self.ttl)
@@ -1674,27 +1760,16 @@ class SessionAffinity(object):
             self._remember(key, uid)
             mirror = self.mirror
             mirror_ttl = self.mirror_ttl
-        if wb_database.DATABASE:
-            wb_database.DATABASE.affinity_set(key, uid, self.ttl)
-        if mirror is not None:
-            try:
-                mirror.set(self._mirror_key(key), uid, mirror_ttl)
-            except Exception:
-                pass
+        self._store(key, uid)
 
     def unbind(self, key):
         if not key:
             return
         with self._lock:
+            self._generation += 1
             self.bindings.pop(key, None)
             mirror = self.mirror
-        if wb_database.DATABASE:
-            wb_database.DATABASE.affinity_delete(key)
-        if mirror is not None:
-            try:
-                mirror.delete(self._mirror_key(key))
-            except Exception:
-                pass
+        self._store(key, None)
 
 class AccountPool(object):
     def __init__(self, directory, log=None):
@@ -1706,7 +1781,11 @@ class AccountPool(object):
         self._cursor = 0
         self._free_cursors = {}
         self.pool_cfg = wb_pool.normalize(None)
-        self.affinity = SessionAffinity()
+        self.affinity = SessionAffinity(background=True)
+        self._refresh_queue = wb_background.WorkQueue("credential-refresh", workers=2, max_pending=5000,
+                                                     on_error=lambda exc: self.log("credential refresh failed: %s" % exc))
+        self._refresh_stop = threading.Event()
+        self._refresh_thread = None
         # Panel-parity cost ledger: (uid, model) -> {tier, at, credit}.
         # tier 0 = measured free, 2 = measured paid, absent/stale = unknown.
         self.cost_ledger = {}
@@ -2207,6 +2286,39 @@ class AccountPool(object):
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
         return sum(1 for a in snapshot if a.enabled and a.access_token
                    and a.ready(model=model, allow_refresh=allow_refresh))
+
+    def start_credential_refresh(self):
+        if self._refresh_thread is not None:
+            return
+        def refresh_account(account):
+            try:
+                account.refresh(force=False)
+            finally:
+                if wb_database.DATABASE:
+                    wb_database.DATABASE.close_thread()
+        def loop():
+            try:
+                while not self._refresh_stop.is_set():
+                    with self._lock:
+                        accounts = list(self.accounts)
+                    now = time.time()
+                    for account in accounts:
+                        exp = account.expires_at or jwt_exp(account.access_token)
+                        if account.enabled and account.refresh_token and exp and exp - now <= 300:
+                            if now >= account._refresh_retry_at:
+                                self._refresh_queue.submit(account.uid, lambda a=account: refresh_account(a))
+                    self._refresh_stop.wait(15)
+            finally:
+                if wb_database.DATABASE:
+                    wb_database.DATABASE.close_thread()
+        self._refresh_thread = threading.Thread(target=loop, name="credential-monitor", daemon=True)
+        self._refresh_thread.start()
+
+    def stop_background(self):
+        self._refresh_stop.set()
+        if self._refresh_thread:
+            self._refresh_thread.join(timeout=1)
+        self._refresh_queue.close(timeout=2)
 
     def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None,
                          allow_refresh=True, preferred_uid=None):

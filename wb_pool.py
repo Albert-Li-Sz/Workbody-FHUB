@@ -69,7 +69,7 @@ _FLOAT_KEYS = (
 def _positive_int(value, default, minimum):
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return number if number >= minimum else default
 
@@ -77,9 +77,9 @@ def _positive_int(value, default, minimum):
 def _positive_float(value, default, minimum=0.0):
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
-    return number if number >= minimum else default
+    return number if math.isfinite(number) and minimum <= number <= 86400 * 365 else default
 
 
 def normalize(cfg):
@@ -133,8 +133,12 @@ def validate_patch(raw):
         elif key in _FLOAT_KEYS:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError("%s must be a number" % key)
-            if float(value) < 0:
-                raise ValueError("%s cannot be negative" % key)
+            try:
+                valid = math.isfinite(value) and 0 <= value <= 86400 * 365
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise ValueError("%s must be finite and between 0 and 31536000" % key)
         out[key] = value
     return out
 

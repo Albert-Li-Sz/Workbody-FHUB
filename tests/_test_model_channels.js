@@ -2,7 +2,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
+const html = require('./dashboard_source').htmlSource();
 const source = html.slice(html.indexOf('const MODEL_CHANNEL_LABELS'), html.indexOf('let CURRENT_GROWTH_UID'));
 const formatting = html.slice(html.indexOf('const fmt ='), html.indexOf('const esc ='));
 assert.ok(source.includes('async function selectModelsChannel'));

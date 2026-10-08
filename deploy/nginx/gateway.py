@@ -42,6 +42,14 @@ def publish_status(status, identifiers=None, error=None):
                "automatic_renewal": os.environ.get("WB_TLS_MODE", "auto") != "off"}
     if error:
         payload["error"] = error
+    certificate = LIVE / "fullchain.pem"
+    if certificate.exists():
+        try:
+            result = subprocess.run(["openssl", "x509", "-enddate", "-noout", "-in", str(certificate)],
+                                    capture_output=True, text=True, timeout=5, check=True)
+            payload["expires_at"] = result.stdout.strip().removeprefix("notAfter=")
+        except (OSError, subprocess.SubprocessError):
+            pass
     atomic_text(STATUS, json.dumps(payload))
 
 
@@ -118,6 +126,8 @@ def config_text(tls=False):
         gzip off;
     }
 """ % upstream
+    assets = proxy.replace("location / {", "location /assets/ {").replace("gzip off;", "gzip on; gzip_min_length 1024; gzip_vary on; gzip_types text/css application/javascript;")
+    proxy += assets
     mode = os.environ.get("WB_TLS_MODE", "auto").strip().lower()
     http_location = proxy if mode == "off" else (
         "    location / { return 308 https://$host$request_uri; }\n" if tls else

@@ -12,11 +12,11 @@ sanitize 指紋清洗照舊，兩層互不替代）。
   - append：在開頭連續 system/developer 區塊之後插入一條網關提示詞，
     客戶端既有訊息逐字保留。
 
-降級（passthrough / append）：內容審核攔截（403）多半是 system 來源的指紋
-誤殺。此時切到最小中性提示詞，直到次日 00:00 CST 重置，並把同一個請求用
-中性提示詞重試一次（panel degrade.go）。custom 模式不進降級路徑。
+可選重試（passthrough / append）：預設關閉。僅明確的 11140 內容攔截可讓
+該請求用中性提示詞重試一次；不影響其他請求。custom 模式不走重試路徑。
 """
 
+import json
 import threading
 import time
 
@@ -36,6 +36,34 @@ DEGRADED_PROMPT = ("You are a helpful assistant. Respond in the user's language,
                    "follow the user's instructions, and be direct and concise.")
 
 VALID_MODES = ("passthrough", "custom", "append")
+_retry_lock = threading.Lock()
+_retry_status = {"scope": "request", "count": 0, "last_at": None, "last_model": None}
+
+
+def is_content_rejection(detail):
+    """Only the provider's explicit content rejection code permits a retry."""
+    try:
+        value = json.loads(detail)
+    except (TypeError, ValueError):
+        return False
+    for _ in range(5):
+        if not isinstance(value, dict):
+            return False
+        if str(value.get("code") or value.get("error_code") or "") == "11140":
+            return True
+        value = value.get("error") or value.get("data")
+    return False
+
+
+def record_retry(model):
+    with _retry_lock:
+        _retry_status.update(count=_retry_status["count"] + 1,
+                             last_at=time.time(), last_model=model)
+
+
+def retry_status():
+    with _retry_lock:
+        return dict(_retry_status)
 
 
 def normalize_mode(value):
@@ -90,38 +118,3 @@ def apply_mode(messages, mode, text, degraded=False):
     if degraded:
         return rewrite(messages, DEGRADED_PROMPT)
     return messages
-
-
-def next_midnight_cst(now=None):
-    """now 之後最近的 Asia/Shanghai 00:00（epoch 秒）。
-
-    用固定 +08:00 計算，不依賴宿主機時區（容器/宿主時區不確定）。
-    00:00 整點 → 次日 00:00；23:59 → 幾秒後的次日 00:00。
-    """
-    now = time.time() if now is None else float(now)
-    offset = 8 * 3600
-    day = int((now + offset) // 86400)
-    return float((day + 1) * 86400 - offset)
-
-
-class DegradeGate(object):
-    """進程內存降級窗口：觸發後到次日 00:00 CST 為止（不續期）。"""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._until = 0.0
-
-    def active(self, now=None):
-        now = time.time() if now is None else float(now)
-        with self._lock:
-            return now < self._until
-
-    def trigger(self, now=None):
-        now = time.time() if now is None else float(now)
-        with self._lock:
-            if now >= self._until:
-                self._until = next_midnight_cst(now)
-
-    def reset(self):
-        with self._lock:
-            self._until = 0.0

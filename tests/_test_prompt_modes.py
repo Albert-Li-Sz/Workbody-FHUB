@@ -72,34 +72,12 @@ class PromptTextTests(unittest.TestCase):
         custom = wb_prompt.apply_mode(messages, "custom", "GW", degraded=True)
         self.assertEqual(custom[0]["content"], "GW")
 
-    def test_next_midnight_cst(self):
-        just_before = datetime.datetime(2026, 10, 5, 23, 59, 0, tzinfo=CST)
-        expected = datetime.datetime(2026, 10, 6, 0, 0, 0, tzinfo=CST)
-        self.assertEqual(wb_prompt.next_midnight_cst(just_before.timestamp()),
-                         expected.timestamp())
-        midnight = datetime.datetime(2026, 10, 5, 0, 0, 0, tzinfo=CST)
-        expected2 = datetime.datetime(2026, 10, 6, 0, 0, 0, tzinfo=CST)
-        self.assertEqual(wb_prompt.next_midnight_cst(midnight.timestamp()),
-                         expected2.timestamp())
-
-    def test_degrade_gate_trigger_does_not_renew(self):
-        gate = wb_prompt.DegradeGate()
-        self.assertFalse(gate.active(now=1000.0))
-        gate.trigger(now=1000.0)
-        self.assertTrue(gate.active(now=1000.0))
-        until = gate._until
-        gate.trigger(now=1100.0)
-        self.assertEqual(gate._until, until)
-        self.assertFalse(gate.active(now=until + 1))
-        gate.reset()
-        self.assertFalse(gate.active(now=1000.0))
-
 
 class PromptSettingsTests(unittest.TestCase):
     def test_defaults_are_passthrough(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(wb_settings.prompt_config(directory),
-                             {"mode": "passthrough", "file": ""})
+                             {"mode": "passthrough", "file": "", "retry_on_content_rejection": False})
 
     def test_roundtrip_and_validation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,7 +96,7 @@ class PromptSettingsTests(unittest.TestCase):
             with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
                 json.dump({"prompt": {"mode": "BOGUS", "file": 7}}, fh)
             self.assertEqual(wb_settings.prompt_config(directory),
-                             {"mode": "passthrough", "file": ""})
+                             {"mode": "passthrough", "file": "", "retry_on_content_rejection": False})
         with tempfile.TemporaryDirectory() as directory:
             with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
                 json.dump({"prompt": []}, fh)
@@ -127,16 +105,17 @@ class PromptSettingsTests(unittest.TestCase):
 
 class BuildBodyPromptTests(unittest.TestCase):
     def setUp(self):
-        wb_proxy.PROMPT_DEGRADE.reset()
+        pass
 
     def tearDown(self):
-        wb_proxy.PROMPT_DEGRADE.reset()
+        pass
 
     def build(self, directory, messages, **extra):
         payload = {"model": "deepseek-v4.1-flash", "messages": messages}
         payload.update(extra)
+        degraded = payload.pop("prompt_degraded", False)
         with mock.patch.object(wb_proxy, "ACCOUNTS_DIR", directory):
-            return wb_proxy.build_upstream_body(payload)
+            return wb_proxy.build_upstream_body(payload, prompt_degraded=degraded)
 
     def test_passthrough_keeps_the_client_system_prompt(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -181,34 +160,32 @@ class BuildBodyPromptTests(unittest.TestCase):
                 {"role": "user", "content": "hi"}])
         self.assertEqual(body["messages"][0]["content"], "CLIENT-SYS")
 
-    def test_degrade_window_replaces_passthrough_and_append(self):
+    def test_request_retry_replaces_passthrough_and_append(self):
         with tempfile.TemporaryDirectory() as directory:
-            wb_proxy.PROMPT_DEGRADE.trigger()
             body = self.build(directory, [
                 {"role": "system", "content": "CLIENT-SYS"},
-                {"role": "user", "content": "hi"}])
+                {"role": "user", "content": "hi"}], prompt_degraded=True)
             self.assertEqual(body["messages"][0]["content"], wb_prompt.DEGRADED_PROMPT)
             wb_settings.set_prompt_config(directory, {"mode": "append"})
             body2 = self.build(directory, [
                 {"role": "system", "content": "CLIENT-SYS"},
-                {"role": "user", "content": "hi"}])
+                {"role": "user", "content": "hi"}], prompt_degraded=True)
             self.assertEqual(body2["messages"][0]["content"], wb_prompt.DEGRADED_PROMPT)
             self.assertNotIn("CLIENT-SYS", json.dumps(body2["messages"]))
 
-    def test_degrade_window_leaves_custom_alone(self):
+    def test_request_retry_leaves_custom_alone(self):
         with tempfile.TemporaryDirectory() as directory:
             wb_settings.set_prompt_config(directory, {"mode": "custom"})
-            wb_proxy.PROMPT_DEGRADE.trigger()
             body = self.build(directory, [{"role": "user", "content": "hi"}])
         self.assertEqual(body["messages"][0]["content"], wb_prompt.DEFAULT_PROMPT)
 
 
 class DegradedRetryTests(unittest.TestCase):
     def setUp(self):
-        wb_proxy.PROMPT_DEGRADE.reset()
+        pass
 
     def tearDown(self):
-        wb_proxy.PROMPT_DEGRADE.reset()
+        pass
 
     def make_pool(self, account):
         class Pool(object):
@@ -240,8 +217,9 @@ class DegradedRetryTests(unittest.TestCase):
 
         return Pool()
 
-    def test_passthrough_403_retries_with_the_neutral_prompt(self):
+    def test_opt_in_content_rejection_retries_only_the_current_request(self):
         with tempfile.TemporaryDirectory() as directory:
+            wb_settings.set_prompt_config(directory, {"retry_on_content_rejection": True})
             account = wb_accounts.Account(
                 {"uid": "uid-b3", "accessToken": "t", "realm": "intl"},
                 os.path.join(directory, "uid-b3.json"))
@@ -256,7 +234,7 @@ class DegradedRetryTests(unittest.TestCase):
                 if len(bodies) == 1:
                     raise urllib.error.HTTPError(
                         "https://upstream.invalid", 403, "forbidden", {},
-                        io.BytesIO(b"content policy rejected"))
+                        io.BytesIO(b'{"error":{"code":11140,"message":"content rejected"}}'))
                 return Response()
 
             old_pool, old_urlopen = wb_proxy.POOL, wb_accounts.urlopen
@@ -270,7 +248,7 @@ class DegradedRetryTests(unittest.TestCase):
                                       {"role": "user", "content": "hi"}]},
                         session_key="conv-b3", target_realm="intl")
                     upstream.close()
-                    self.assertTrue(wb_proxy.PROMPT_DEGRADE.active())
+                    self.assertIn("CLIENT-SYS", json.dumps(wb_proxy.build_upstream_body({"model":"deepseek-v4.1-flash", "messages":[{"role":"system","content":"CLIENT-SYS"},{"role":"user","content":"next"}]})))
             finally:
                 wb_proxy.POOL = old_pool
                 wb_accounts.urlopen = old_urlopen
@@ -292,7 +270,7 @@ class DegradedRetryTests(unittest.TestCase):
                 calls.append(req)
                 raise urllib.error.HTTPError(
                     "https://upstream.invalid", 403, "forbidden", {},
-                    io.BytesIO(b"content policy rejected"))
+                    io.BytesIO(b'{"error":{"code":11140,"message":"content rejected"}}'))
 
             old_pool, old_urlopen = wb_proxy.POOL, wb_accounts.urlopen
             wb_proxy.POOL = self.make_pool(account)
@@ -308,7 +286,7 @@ class DegradedRetryTests(unittest.TestCase):
                 wb_proxy.POOL = old_pool
                 wb_accounts.urlopen = old_urlopen
             self.assertEqual(len(calls), 1)
-            self.assertFalse(wb_proxy.PROMPT_DEGRADE.active())
+
 
 
 if __name__ == "__main__":

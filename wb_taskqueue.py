@@ -15,11 +15,14 @@ import threading
 import time
 
 import wb_tasks
+import wb_background
+import queue
 
 
 class TaskQueue(object):
-    def __init__(self, pool, runner=None, concurrency=1, log=None):
+    def __init__(self, pool, runner=None, concurrency=1, log=None, scan_timeout=60):
         self.pool = pool
+        self.scan_timeout = max(0.01, min(60.0, float(scan_timeout)))
         self.runner = runner or wb_tasks.run_single_task
         self._default_concurrency = self.clamp_concurrency(concurrency)
         self._log = log or (lambda msg: None)
@@ -30,6 +33,7 @@ class TaskQueue(object):
         self._started_at = 0.0
         self._seq = 0
         self._account_locks = {}
+        self._scan_workers = wb_background.WorkQueue("task-scan", workers=4, max_pending=5000)
 
     @staticmethod
     def clamp_concurrency(value):
@@ -80,7 +84,14 @@ class TaskQueue(object):
         token = state["token"]
 
         def worker(account):
-            tasks = wb_tasks.fetch_growth_tasks(account)
+            try:
+                tasks = wb_tasks.fetch_growth_tasks(account)
+            except Exception as exc:
+                with results_lock:
+                    if state["token"] is token:
+                        results.append({"uid": account.uid, "nickname": account.nickname or account.uid[:8],
+                                        "growth": [], "growth_error": str(exc)[:300]})
+                return
             # C7: mp-only tasks (Sequential family) live behind the miniprogram
             # header; merge them by code so the queue sees the whole to-do list.
             try:
@@ -103,18 +114,18 @@ class TaskQueue(object):
                     return
                 results.append(item)
 
-        threads = []
+        accepted = True
         for account in accounts:
-            thread = threading.Thread(target=worker, args=(account,), daemon=True)
-            thread.start()
-            threads.append(thread)
-        for thread in threads:
-            thread.join(timeout=60)
-        timed_out = any(thread.is_alive() for thread in threads)
+            accepted = self._scan_workers.submit(account.uid, lambda a=account: worker(a)) and accepted
+        timed_out = not self._scan_workers.drain(timeout=self.scan_timeout) or not accepted
         with results_lock:
             if timed_out:
                 state["token"] = None
             snapshot = list(results)
+            seen_uids = {item["uid"] for item in snapshot}
+            if timed_out:
+                snapshot.extend({"uid": a.uid, "nickname": a.nickname or a.uid[:8], "growth": [],
+                                 "growth_error": "任务扫描超时或队列繁忙"} for a in accounts if a.uid not in seen_uids)
         order = {account.uid: index for index, account in enumerate(accounts)}
         snapshot.sort(key=lambda item: order.get(item["uid"], 0))
         return {"ok": True, "accounts": snapshot,
@@ -169,41 +180,50 @@ class TaskQueue(object):
         return {"ok": True, "started": True, "total": len(items), "seq": seq,
                 "concurrency": concurrency, "msg": "队列已启动"}
     def _run(self, items, concurrency):
-        semaphore = threading.Semaphore(concurrency)
+        jobs = queue.Queue()
         threads = []
         by_uid = {}
         for index, item in enumerate(items):
             by_uid.setdefault(item["uid"], []).append(index)
 
         def run_account(uid, indexes):
-            with semaphore:
-                account = self.pool.get(uid)
-                if account is None:
-                    for index in indexes:
-                        self._mark(index, "error", "账号不存在")
-                    return
-                lock = self.account_lock(uid)
-                if not lock.acquire(blocking=False):
-                    for index in indexes:
-                        self._mark(index, "skipped", "该账号有其它任务动作在执行，跳过")
+            account = self.pool.get(uid)
+            if account is None:
+                for index in indexes:
+                    self._mark(index, "error", "账号不存在")
+                return
+            lock = self.account_lock(uid)
+            if not lock.acquire(blocking=False):
+                for index in indexes:
+                    self._mark(index, "skipped", "该账号有其它任务动作在执行，跳过")
+                return
+            try:
+                for index in indexes:
+                    code = items[index]["code"]
+                    self._mark(index, "running", "")
+                    try:
+                        ok, message, _credit = self.runner(account, code)
+                    except Exception as exc:
+                        self._mark(index, "error", str(exc)[:300])
+                    else:
+                        self._mark(index, "done" if ok else "error", message or "")
+                    time.sleep(0.5)
+            finally:
+                lock.release()
+        for job in by_uid.items():
+            jobs.put(job)
+        def work():
+            while True:
+                try:
+                    uid, indexes = jobs.get_nowait()
+                except queue.Empty:
                     return
                 try:
-                    for index in indexes:
-                        code = items[index]["code"]
-                        self._mark(index, "running", "")
-                        try:
-                            ok, message, _credit = self.runner(account, code)
-                        except Exception as exc:
-                            self._mark(index, "error", str(exc)[:300])
-                        else:
-                            self._mark(index, "done" if ok else "error", message or "")
-                        time.sleep(0.5)
+                    run_account(uid, indexes)
                 finally:
-                    lock.release()
-
-        for uid, indexes in by_uid.items():
-            thread = threading.Thread(target=run_account, args=(uid, indexes),
-                                      daemon=True)
+                    jobs.task_done()
+        for _ in range(min(concurrency, len(by_uid))):
+            thread = threading.Thread(target=work, name="task-run", daemon=True)
             thread.start()
             threads.append(thread)
         for thread in threads:

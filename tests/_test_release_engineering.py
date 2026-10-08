@@ -39,11 +39,18 @@ class WorkflowTests(unittest.TestCase):
 
     def test_release_checksums_workflow_hashes_every_asset(self):
         text = read(".github", "workflows", "release-checksums.yml")
-        self.assertIn("types: [published]", text)
-        self.assertIn("gh release download", text)
-        self.assertIn("sha256sum *", text)
-        self.assertIn("gh release upload", text)
-        self.assertIn("checksums.txt", text)
+        self.assertNotIn("types: [published]", text)
+        self.assertIn("finalize_release.py", text)
+        helper = read("scripts", "finalize_release.py")
+        self.assertIn('"download"', helper)
+        self.assertIn("hashlib.sha256", helper)
+        self.assertIn('"upload"', helper)
+        self.assertIn("checksums.txt", helper)
+        self.assertIn("nginx-verification.json", helper)
+        publish = read(".github", "workflows", "docker-publish.yml")
+        self.assertLess(publish.index("verify_nginx_image.py"), publish.index("Promote verified stable"))
+        self.assertIn("group: release-assets-", text)
+        self.assertIn("group: release-assets-", publish)
 
 
 class DockerTests(unittest.TestCase):

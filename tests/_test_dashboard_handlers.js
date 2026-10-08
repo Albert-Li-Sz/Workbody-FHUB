@@ -12,7 +12,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
+const html = require('./dashboard_source').htmlSource();
 
 // 1. No inline event handlers may remain - the strict CSP depends on it.
 const inline = [...html.matchAll(

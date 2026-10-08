@@ -10,6 +10,9 @@ WB_ACME_STAGING=0
 WB_HTTP_POOL_MAX=128
 WB_HTTP_POOL_PER_ROUTE=8
 WB_HTTP_POOL_IDLE=60
+WB_HTTP_MAX_CONNECTIONS=128
+# Bundled Nginx overwrites X-Real-IP. Trust only that service and loopback.
+WB_TRUSTED_PROXIES=nginx,127.0.0.1/32,::1/128
 WB_SSE_HEARTBEAT_SECONDS=15
 # 0 preserves all SQLite history. JSONL archive retention stays in panel settings.
 WB_SQLITE_RETENTION_DAYS=0

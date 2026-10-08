@@ -592,6 +592,19 @@ def daily_token_limit(accounts_dir):
     return value if value > 0 else 0
 
 
+def scheduling_limits(accounts_dir):
+    """Read all request scheduling limits from one settings snapshot."""
+    data = load(accounts_dir)
+    out = {}
+    for field in ("daily_token_limit", "daily_credit_limit", "model_daily_token_limit"):
+        try:
+            value = int(data.get(field) or 0)
+        except (TypeError, ValueError, OverflowError):
+            value = 0
+        out[field] = max(0, value)
+    return out
+
+
 def set_daily_token_limit(accounts_dir, value):
     """Persist the daily token threshold. Returns the stored value."""
     try:
@@ -857,6 +870,7 @@ def set_upstream_config(accounts_dir, cfg):
 PROMPT_DEFAULTS = {
     "mode": "passthrough",
     "file": "",
+    "retry_on_content_rejection": False,
 }
 
 
@@ -871,6 +885,10 @@ def validate_prompt_patch(raw):
             if mode not in ("passthrough", "custom", "append"):
                 raise ValueError("prompt mode must be passthrough, custom or append")
             out["mode"] = mode
+        elif key == "retry_on_content_rejection":
+            if not isinstance(value, bool):
+                raise ValueError("retry_on_content_rejection must be true or false")
+            out[key] = value
         elif key == "file":
             if not isinstance(value, str):
                 raise ValueError("prompt file must be a string")
@@ -893,7 +911,9 @@ def prompt_config(accounts_dir):
     file_path = stored.get("file", PROMPT_DEFAULTS["file"])
     if not isinstance(file_path, str):
         file_path = PROMPT_DEFAULTS["file"]
-    return {"mode": mode, "file": file_path.strip()}
+    retry = stored.get("retry_on_content_rejection", False)
+    return {"mode": mode, "file": file_path.strip(),
+            "retry_on_content_rejection": retry if isinstance(retry, bool) else False}
 
 
 def set_prompt_config(accounts_dir, cfg):

@@ -2,7 +2,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
+const html = require('./dashboard_source').htmlSource();
 const accountPage = html.slice(html.indexOf('id="pageAccounts"'), html.indexOf('id="pageTasks"'));
 for (const id of ['accountRealmIntl', 'accountRealmCn', 'btnQueryBalances']) {
   assert.ok(accountPage.includes(`id="${id}"`), `${id} must be reachable on the account page`);

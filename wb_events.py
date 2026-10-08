@@ -1,4 +1,4 @@
-"""Coalesced, bounded dashboard invalidations. No account or key data is pushed."""
+"""Bounded panel invalidations and numeric activity deltas; never credentials."""
 import json
 import threading
 import time
@@ -9,21 +9,34 @@ class Subscription:
         self.broker, self.realm = broker, realm
         self.condition = threading.Condition()
         self.pending = set()
+        self.changes = {}
         self.revision = 0
         self.closed = False
 
-    def put(self, topics, revision):
+    def put(self, topics, revision, changes=None):
         with self.condition:
             self.pending.update(topics)
+            for kind, accounts in (changes or {}).items():
+                target = self.changes.setdefault(kind, {})
+                for uid, fields in accounts.items():
+                    item = target.setdefault(uid, {})
+                    for name, value in fields.items():
+                        item[name] = item.get(name, 0) + value if kind == "usage" else value
+                if len(target) > 512:
+                    self.pending.add("accounts")
+                    self.changes.pop(kind, None)
             self.revision = revision
             self.condition.notify()
 
     def next(self, timeout=15):
         with self.condition:
-            self.condition.wait_for(lambda: bool(self.pending) or self.closed, timeout)
-            if self.closed or not self.pending:
+            self.condition.wait_for(lambda: bool(self.pending or self.changes) or self.closed, timeout)
+            if self.closed or not (self.pending or self.changes):
                 return None
             event = {"topics": sorted(self.pending), "revision": self.revision, "at": time.time()}
+            if self.changes:
+                event["changes"] = self.changes
+                self.changes = {}
             self.pending.clear()
             return event
 
@@ -71,13 +84,13 @@ class Broker:
         with self.lock:
             self.clients.discard(client)
 
-    def publish(self, *topics, realm=None):
+    def publish(self, *topics, realm=None, changes=None):
         with self.lock:
             self.revision += 1
             for client in self.clients:
                 if realm and client.realm and client.realm != realm:
                     continue
-                client.put(topics, self.revision)
+                client.put(topics, self.revision, changes)
 
 
 BROKER = Broker()

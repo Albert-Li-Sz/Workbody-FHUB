@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 
 import wb_forward_proxy
+import wb_metrics
 
 
 class _TunnelIO(io.RawIOBase):
@@ -393,10 +394,16 @@ def urlopen(request, timeout=30, proxy="", _redirects=0):
         headers.setdefault("Host", target.netloc)
     connection = None
     try:
-        connection = POOL.acquire(key, factory, timeout)
-        connection.request(request.get_method(), path, body=request.data, headers=headers)
+        with wb_metrics.stage("connection_pool_wait_ms"):
+            connection = POOL.acquire(key, factory, timeout)
+        if connection.sock is None:
+            with wb_metrics.stage("connect_ms"):
+                connection.connect()
+        with wb_metrics.stage("upstream_send_ms"):
+            connection.request(request.get_method(), path, body=request.data, headers=headers)
         response_socket = connection.sock
-        response = PooledResponse(connection.getresponse(), connection, key, request.full_url, response_socket)
+        with wb_metrics.stage("upstream_headers_ms"):
+            response = PooledResponse(connection.getresponse(), connection, key, request.full_url, response_socket)
     except Exception as exc:
         if connection is not None:
             POOL.release(key, connection, False)

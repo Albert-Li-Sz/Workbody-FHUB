@@ -6,6 +6,7 @@ No upstream credentials or outbound network are used.
 import os
 import sys
 import tempfile
+import json
 import threading
 import time
 import unittest
@@ -107,23 +108,18 @@ class ScanTimeoutTests(unittest.TestCase):
             release.wait(timeout=5)
             return [task("chat_5")]
 
-        class NoWaitThread(threading.Thread):
-            def join(self, timeout=None):
-                # Simulate the 60s join window elapsing while the worker runs.
-                return None
-
         queue = wb_taskqueue.TaskQueue(FakePool(accounts),
-                                       runner=lambda a, c: (True, "ok", 0))
-        with mock.patch.object(wb_taskqueue.wb_tasks, "fetch_growth_tasks",
-                               side_effect=slow_fetch), \
-                mock.patch.object(wb_taskqueue.threading, "Thread", NoWaitThread):
+                                       runner=lambda a, c: (True, "ok", 0), scan_timeout=0.05)
+        with mock.patch.object(wb_taskqueue.wb_tasks, "fetch_growth_tasks", side_effect=slow_fetch):
             result = queue.scan()
         self.assertTrue(started.wait(timeout=2), "the worker never started")
         self.assertTrue(result["timed_out"])
-        self.assertEqual(result["accounts"], [])
+        self.assertEqual(len(result["accounts"]), 1)
+        self.assertIn("超时", result["accounts"][0]["growth_error"])
+        snapshot = json.loads(json.dumps(result["accounts"]))
         release.set()
         time.sleep(0.3)  # let the late worker try to write its result
-        self.assertEqual(result["accounts"], [],
+        self.assertEqual(result["accounts"], snapshot,
                          "a late worker mutated the returned scan")
 
 

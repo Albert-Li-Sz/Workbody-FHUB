@@ -3,7 +3,7 @@
 const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
-const source = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
+const source = require('../tests/dashboard_source').htmlSource();
 const post = source.slice(source.indexOf('async function postJSON('), source.indexOf('\nfunction toast(', source.indexOf('async function postJSON(')));
 const boot = source.slice(source.indexOf('async function bootPanel('), source.indexOf('\nlet PANEL_READY', source.indexOf('async function bootPanel(')));
 const result = {};

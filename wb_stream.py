@@ -2,6 +2,7 @@
 import os
 import threading
 import time
+import wb_metrics
 
 HEARTBEAT_SECONDS = max(1.0, float(os.environ.get("WB_SSE_HEARTBEAT_SECONDS", 15)))
 
@@ -36,6 +37,7 @@ class HeartbeatWriter:
             self.check()
             try:
                 result = self.writer.write(frame)
+                wb_metrics.observe_client_frame(frame)
                 self.last_write = time.monotonic()
                 return result
             except (OSError, ValueError) as exc:

@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """wb_reqlog.py — 請求歸檔的輪轉/查詢/指標（panel internal/reqlog 語義）。
 
-usage.jsonl 是既有的事實來源（每請求一行 JSON）。本模組補上：
+SQLite 是配置后的事实来源；usage.jsonl 是可重放的兼容导出。
 
-  - 輪轉：主檔超過 max_mb 時，把「保留窗口外」與「超出容量」的舊行搬到
-    usage-archive-YYYYmmdd.jsonl，主檔原子重寫為最近的保留窗口。這樣既有
-    聚合讀者（usage_snapshot 等）仍讀主檔即拿到保留窗口內的全部資料，不會
-    因輪轉少算；查詢端則把主檔 + 歸檔一起讀。
+  - 輪轉：主檔超過 max_mb 時整段重命名，再新建主檔；不解析或重寫大文件。
+    SQLite 統計不依賴導出進度；舊版 JSONL 讀者一起讀主檔和歸檔。
   - 保留：刪除超過 retention_days 的歸檔檔。
   - 查詢：since/until/model/account/status/outcome/error/path/request_id/
     limit 多維過濾。
@@ -21,6 +19,7 @@ import os
 import threading
 import time
 import wb_database
+import wb_metrics
 
 _last_check = {}
 CHECK_INTERVAL_SECONDS = 60
@@ -161,8 +160,15 @@ def compute_metrics(rows):
                if isinstance(row.get("elapsed_ms"), (int, float))]
     ttfb = [float(row["ttft_ms"]) for row in rows
             if isinstance(row.get("ttft_ms"), (int, float))]
+    timings = {}
+    for field in wb_metrics.TIMING_FIELDS:
+        values = [float(row[field]) for row in rows if isinstance(row.get(field), (int, float))
+                  and not isinstance(row[field], bool) and 0 <= row[field] < float("inf")]
+        timings[field] = {"avg": sum(values) / len(values) if values else None,
+                          "p50": _percentile(values, 50), "p95": _percentile(values, 95), "samples": len(values)}
     return {
         "requests": total,
+        "timings": timings,
         "errors": errors,
         "completion_rate": ((total - errors) / total) if total else None,
         "http_success_rate": (http_ok / total) if total else None,
@@ -193,81 +199,23 @@ def prune_archives(usage_dir, retention_days, now=None, log=None):
 
 
 def compact_main(path, max_mb, retention_days, now=None, log=None):
-    """Move rows outside the retention window / size budget into an archive."""
+    """Rotate an append-only segment without parsing or rewriting its rows."""
     now = time.time() if now is None else float(now)
-    # The read -> tmp -> os.replace chain and every append share LOCK, so an
-    # append from another thread waits here and then lands on the rotated file
-    # instead of being erased with the old one (audit BUG-3).
     with LOCK:
-        if not os.path.exists(path):
-            return False
-        max_bytes = max(1, int(max_mb)) * 1024 * 1024
         try:
-            if os.path.getsize(path) < max_bytes:
+            if os.path.getsize(path) < max(1, int(max_mb)) * 1024 * 1024:
                 return False
+            import uuid
+            name = ARCHIVE_PREFIX + time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + uuid.uuid4().hex[:8] + ".jsonl"
+            archive = os.path.join(os.path.dirname(path), name)
+            os.replace(path, archive)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
         except OSError:
             return False
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()
-            read_stamp = _file_stamp(path)
-        except OSError:
-            return False
-        cutoff = now - max(1, int(retention_days)) * 86400
-        keep, archived = [], []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                row = json.loads(stripped)
-                at = float(row.get("at") or 0)
-            except Exception:
-                keep.append(line)
-                continue
-            if at and at < cutoff:
-                archived.append(line)
-            else:
-                keep.append(line)
-        size = sum(len(line.encode("utf-8")) for line in keep)
-        cut = 0
-        while cut < len(keep) and size > max_bytes:
-            dropped = keep[cut]
-            cut += 1
-            size -= len(dropped.encode("utf-8"))
-            archived.append(dropped)
-        keep = keep[cut:]
-        if not archived:
-            return False
-        usage_dir = os.path.dirname(path)
-        stamp = time.strftime("%Y%m%d", time.localtime(now))
-        archive = os.path.join(usage_dir, ARCHIVE_PREFIX + stamp + ".jsonl")
-        tmp = path + ".rotate.tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.writelines(keep)
-        except OSError:
-            return False
-        # Cooperating writers are held off by LOCK; this check narrows the
-        # window for a writer that ignores the lock: if the file grew while
-        # the keep/archive split was being written, abandon the rotation
-        # instead of replacing its freshly appended row (audit BUG-3).
-        if _file_stamp(path) != read_stamp:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            return False
-        try:
-            with open(archive, "a", encoding="utf-8") as fh:
-                fh.writelines(archived)
-            os.replace(tmp, path)
-        except OSError:
-            return False
-        if log:
-            log("request archive: rotated %d row(s) into %s"
-                % (len(archived), os.path.basename(archive)))
-        return True
+    if log:
+        log("request archive: rotated segment into %s" % name)
+    return True
 
 def rotate_if_needed(path, max_mb, retention_days, now=None, log=None):
     """Throttled rotation check (at most once per CHECK_INTERVAL_SECONDS)."""
@@ -279,8 +227,7 @@ def rotate_if_needed(path, max_mb, retention_days, now=None, log=None):
     usage_dir = os.path.dirname(path) or "."
     database = wb_database.for_usage(path)
     if database:
-        with LOCK:
-            removed = database.prune_usage(now)
+        removed = database.prune_usage(now)
         if removed and log:
             log("SQLite usage: pruned %d record(s) outside configured retention" % removed)
     prune_archives(usage_dir, retention_days, now=now, log=log)

@@ -1,0 +1,14 @@
+{
+  "bootstrap": [
+    "bootstrap.js"
+  ],
+  "app": [
+    "core.js",
+    "accounts.js",
+    "gateway.js",
+    "settings.js",
+    "proxies.js",
+    "analytics.js",
+    "actions.js"
+  ]
+}

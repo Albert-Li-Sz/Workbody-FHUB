@@ -1,4 +1,4 @@
-# 从旧版升级到 1.1.1
+# 从旧版升级到 1.1.2
 
 升级工具为根目录的 `update.sh` 和 `update.py`。适用于单实例、本机 Docker Compose 安装；原生 Python 安装使用 `--source-only`。在**原安装目录**执行，不能先用新版 Compose 覆盖旧配置。
 
@@ -9,7 +9,7 @@
 旧安装没有更新脚本时，先下载固定版本：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.1/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.2/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -33,7 +33,7 @@ bash ./update.sh --compose-file docker-compose.yml \
 2. 解析旧编排、识别容器与实际挂载，拉取固定版本镜像并检查新配置。
 3. 固定旧容器的实际镜像 ID 和数据卷，包括原来的匿名卷；停止应用和本项目的 Nginx，备份全部可写 bind mount、named volume、将被覆盖的源码及旧编排。
 4. 安装源码，生成私有 `compose.runtime.json`，启动新版；首次启动导入旧账号、优先级、Key、设置和 JSONL 用量到 SQLite。
-5. 从容器内确认 `/health` 返回 `version: 1.1.1`。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
+5. 从容器内确认 `/health` 返回 `version: 1.1.2`；使用配套 Nginx 时同时检查 `nginx -t`、Nginx 健康入口和已启用的代理入口。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
 
 备份位于 `.update-backups/<时间-随机标识>/`，目录权限 `0700`、归档与配置权限 `0600`。旧 JSON／JSONL 不会因迁移被删除。SQLite 主文件、WAL 与 SHM 在停服后一起保存，避免只复制主文件漏掉已提交数据。
 
@@ -86,6 +86,8 @@ docker compose -f .update-backups/<备份目录>/rollback-compose.json ps
 
 若升级进程被强制终止，确认没有其他升级进程后再删除 `.update.lock`。备份中 `backup_complete: false` 说明停服数据归档尚未完成，不可直接当完整快照恢复。
 
+应用、Nginx 和 TLS 分别报告：证书仍在签发／重试或使用测试证书时，不会显示 HTTPS 生产证书已就绪；查看 `/tls/status` 的状态与到期时间。Nginx 配置、进程或已启用代理不可用时自动回退。1.1.2 增加 SQLite 小时汇总与持久化导出队列（schema 2）；回退旧程序必须恢复升级前的完整数据备份，不能直接让旧程序打开新版数据库。
+
 ## 原生 Python／Windows 安装
 
 先用原服务管理方式停止 Python 网关。将 Release 的 `update.py` 下载到原安装目录：
@@ -104,11 +106,11 @@ Windows 使用 `python update.py`；下载的附件可通过同一 Release 的 `
 正式镜像均支持 `linux/amd64` 与 `linux/arm64`：
 
 ```text
-ghcr.io/albert-li-sz/workbody-fhub:1.1.1
-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.1
+ghcr.io/albert-li-sz/workbody-fhub:1.1.2
+ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.2
 ```
 
-Release 同时附带源码归档、升级脚本、`checksums.txt` 与 `images.json`。后者记录应用／Nginx 摘要和提交，`latest` 在应用镜像验证通过后才更新。
+Release 同时附带源码归档、升级脚本、`checksums.txt` 与 `images.json`。后者记录应用／Nginx 摘要和提交，`latest` 在应用与 Nginx 两种架构镜像验证通过后才更新；校验文件最后生成，并附各镜像验证回执。
 
 维护者打包源码使用 `python3 scripts/package_release.py --ref <发布标签> --output-dir <输出目录>`。工具仅读取该 Git 提交，排除 `accounts`、`usage` 等运行时目录；这些目录即使只有跟踪的 `README.txt` 占位说明，也不能进入升级归档。发布工作流采用同一打包工具，并在上传全部附件后刷新校验文件。
 

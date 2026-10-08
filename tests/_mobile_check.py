@@ -244,6 +244,8 @@ def goto_tab(page, tab):
         "logs": "#btnNavLogs",
         "settings": "#btnNavSettings",
     }[tab]
+    if page.viewport_size["width"] <= 900 and not page.evaluate("document.body.classList.contains('sidebar-open')"):
+        page.click('#mobileMenuButton')
     page.click(btn)
     page.wait_for_timeout(900)
 
@@ -269,43 +271,20 @@ def run_checks(filter_name):
         page.screenshot(path=os.path.join(SHOTS, "phone-gateway.png"), full_page=True)
 
         if "nav" in filter_name or filter_name == "":
-            widths = page.evaluate(
-                "Array.from(document.querySelectorAll('.main-nav-btn')).map(b => Math.round(b.getBoundingClientRect().width))"
-            )
-            check(
-                "nav-tabs-present",
-                len(widths) == 7 and min(widths) > 0,
-                widths,
-            )
-            nav_w = page.evaluate(
-                "document.querySelector('.main-nav').getBoundingClientRect().width"
-            )
-            hdr_w = page.evaluate(
-                "document.querySelector('header').getBoundingClientRect().width"
-            )
-            check("header-nav-full", nav_w >= hdr_w - 29, (nav_w, hdr_w))
-            # The upstream GitHub link must share the title row and stay
-            # inside the header box instead of wrapping onto its own line.
-            gh = page.evaluate(
-                """
-                (() => {
-                  const a = document.querySelector('.gh-link');
-                  const h = document.querySelector('header');
-                  const t = document.querySelector('header h1');
-                  if(!a || !h || !t) return {ok: false, why: 'missing'};
-                  const ar = a.getBoundingClientRect();
-                  const hr = h.getBoundingClientRect();
-                  const tr = t.getBoundingClientRect();
-                  const sameRow = Math.abs(ar.top - tr.top) < 24;
-                  return {
-                    ok: ar.right <= hr.right + 1 && ar.left >= hr.left - 1 && sameRow,
-                    right: Math.round(ar.right), hdrRight: Math.round(hr.right),
-                    sameRow: sameRow,
-                  };
-                })()
-                """
-            )
-            check("gh-link-header-row", gh["ok"], gh)
+            page.click('#mobileMenuButton')
+            page.wait_for_timeout(250)
+            drawer = page.evaluate("""(() => {
+              const menu=document.getElementById('workspaceMenu'), r=menu.getBoundingClientRect();
+              const links=Array.from(menu.querySelectorAll('.main-nav-btn'));
+              const github=menu.querySelector('.gh-link').getBoundingClientRect();
+              return {count:links.length, visible:r.left>=0 && r.right<=390,
+                github:github.left>=r.left && github.right<=r.right,
+                expanded:document.getElementById('mobileMenuButton').getAttribute('aria-expanded')};
+            })()""")
+            check('mobile-navigation-drawer', drawer['count']==7 and drawer['visible'] and drawer['expanded']=='true', drawer)
+            check('github-link-in-sidebar', drawer['github'], drawer)
+            page.keyboard.press('Escape')
+            check('mobile-drawer-escape', page.locator('#mobileMenuButton').get_attribute('aria-expanded')=='false')
 
         if "models" in filter_name or filter_name == "":
             goto_tab(page, "models")
@@ -360,7 +339,7 @@ def run_checks(filter_name):
                   const tr = document.querySelector('#accounts tbody tr');
                   const tds = tr ? tr.querySelectorAll('td') : [];
                   if(tds.length < 8) return [];
-                  return [6,7,8].map(i => Math.round(tds[i-1].getBoundingClientRect().top));
+                  return [7,8,9].map(i => Math.round(tds[i-1].getBoundingClientRect().top));
                 })()
                 """
             )
@@ -370,7 +349,7 @@ def run_checks(filter_name):
                   const tr = document.querySelector('#accounts tbody tr');
                   const tds = tr ? tr.querySelectorAll('td') : [];
                   if(tds.length < 8) return [];
-                  return [6,7,8].map(i => Math.round(tds[i-1].getBoundingClientRect().width));
+                  return [7,8,9].map(i => Math.round(tds[i-1].getBoundingClientRect().width));
                 })()
                 """
             )
@@ -397,6 +376,35 @@ def run_checks(filter_name):
             page.screenshot(
                 path=os.path.join(SHOTS, "phone-accounts.png"), full_page=True
             )
+            page.evaluate("""(() => {
+              window.__originalAccounts=window.ACCOUNTS;
+              window.__originalUsage=USAGE_BY_ACCOUNT;
+              const sample=window.ACCOUNTS.find(a=>a.realm===window.VIEW_REALM);
+              window.ACCOUNTS=Array.from({length:60},(_,i)=>({...sample,uid:'page-'+i,nickname:'Synthetic '+i,enabled:true}));
+              USAGE_BY_ACCOUNT={};
+              window.ACCOUNTS.forEach(a=>USAGE_BY_ACCOUNT[a.uid]={requests:0,total_tokens:0,cached_tokens:0});
+              renderAccounts();
+            })()""")
+            check('account-pagination-first', page.locator('#accounts tbody tr').count()==50)
+            page.locator('#accounts [data-action="accountPage"]').nth(1).click()
+            check('account-pagination-second', page.locator('#accounts tbody tr').count()==10)
+            page.locator('#accounts [data-action="accountPage"]').nth(0).click()
+            page.evaluate("""(() => {
+              window.__unchangedRow=document.querySelector('#accounts tbody tr');
+              window.__changedRow=document.querySelectorAll('#accounts tbody tr')[1];
+              acceptPanelFrame('event: refresh\\ndata: '+JSON.stringify({topics:[],changes:{accounts:{'page-1':{inFlight:1}}}}));
+            })()""")
+            page.wait_for_timeout(900)
+            check('account-delta-reuses-other-rows', page.evaluate("window.__unchangedRow===document.querySelector('#accounts tbody tr') && window.__changedRow!==document.querySelectorAll('#accounts tbody tr')[1]"))
+            priority=page.locator('#accounts [data-action="editAccountPriority"]').first
+            priority.fill('23')
+            page.evaluate("acceptPanelFrame('event: refresh\\ndata: '+JSON.stringify({topics:[],changes:{accounts:{'page-1':{inFlight:2}}}}))")
+            page.wait_for_timeout(900)
+            check('account-delta-preserves-focused-draft', priority.input_value()=='23' and priority.evaluate('(el)=>document.activeElement===el'))
+            priority.blur()
+            page.wait_for_timeout(100)
+            check('account-draft-after-blur', page.locator('#accounts [data-action="editAccountPriority"]').first.input_value()=='23')
+            page.evaluate("window.ACCOUNTS=window.__originalAccounts; USAGE_BY_ACCOUNT=window.__originalUsage; ACCOUNT_PAGES.clear(); ACCOUNT_PRIORITY_DRAFTS.clear(); renderAccounts();")
 
         if "analytics" in filter_name or filter_name == "":
             goto_tab(page, "analytics")

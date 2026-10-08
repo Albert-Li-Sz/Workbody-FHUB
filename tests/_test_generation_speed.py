@@ -65,10 +65,10 @@ class GenerationSpeedTests(unittest.TestCase):
 
     def test_single_frame_is_unknown_but_reasoning_and_tool_arguments_are_timed(self):
         timing = P.wb_metrics.GenerationTiming(100)
-        with mock.patch.object(P.time, "time", return_value=101):
+        with mock.patch.object(P.time, "time", return_value=101), mock.patch.object(P.time, "monotonic", return_value=101):
             timing.observe({"choices": [{"delta": {"reasoning_content": "think"}}]})
         self.assertIsNone(timing.fields()["gen_ms"])
-        with mock.patch.object(P.time, "time", return_value=103):
+        with mock.patch.object(P.time, "time", return_value=103), mock.patch.object(P.time, "monotonic", return_value=103):
             timing.observe({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "{}"}}]}}]})
         self.assertEqual(timing.fields(), {"ttft_ms": 1000, "gen_ms": 2000})
 
@@ -113,6 +113,7 @@ class GenerationSpeedTests(unittest.TestCase):
                     if protocol == "responses":
                         args = (Upstream(), "test-model", set(), {}, None, account, 1000.0)
                     with mock.patch.object(P.time, "time", side_effect=lambda: clock[0]), \
+                            mock.patch.object(P.time, "monotonic", side_effect=lambda: clock[0]), \
                             mock.patch.object(P, "record_usage") as record:
                         method(*args)
                     self.assertEqual(record.call_count, 1)

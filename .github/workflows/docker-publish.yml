@@ -11,7 +11,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
+    concurrency:
+      group: release-assets-${{ github.event.release.tag_name }}
+      cancel-in-progress: false
     steps:
     - uses: actions/checkout@v4
       with:
@@ -118,7 +121,13 @@ jobs:
       env:
         IMAGE: ${{ steps.images.outputs.primary }}
         RELEASE_TAG: ${{ github.event.release.tag_name }}
-      run: python scripts/verify_image.py "$IMAGE:$RELEASE_TAG" --revision HEAD --pull --non-root
+      run: python scripts/verify_image.py "$IMAGE:$RELEASE_TAG" --revision HEAD --pull --non-root > app-verification.json
+    - name: Verify Nginx startup and SSE on both architectures
+      env:
+        APP_IMAGE: ${{ steps.images.outputs.primary }}
+        NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: python scripts/verify_nginx_image.py "$NGINX_IMAGE:$RELEASE_TAG" --app-image "$APP_IMAGE:$RELEASE_TAG" --revision HEAD --pull > nginx-verification.json
     - name: Promote verified stable images to latest
       if: ${{ !github.event.release.prerelease }}
       env:
@@ -150,10 +159,5 @@ jobs:
                               for name in ('APP', 'NGINX')}}
         pathlib.Path('images.json').write_text(json.dumps(receipt, indent=2) + '\n')
         PY
-        gh release upload "$RELEASE_TAG" images.json release-source/* --clobber
-        mkdir -p release-assets
-        gh release download "$RELEASE_TAG" --dir release-assets --clobber
-        cd release-assets
-        rm -f checksums.txt
-        sha256sum * > checksums.txt
-        gh release upload "$RELEASE_TAG" checksums.txt --clobber
+        gh release upload "$RELEASE_TAG" images.json app-verification.json nginx-verification.json release-source/* --clobber
+        python scripts/finalize_release.py "$RELEASE_TAG"

@@ -38,12 +38,14 @@ def expected_source():
     if REVISION:
         names = run(["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", REVISION]).splitlines()
         documentation = [name for name in names if name.startswith("docs/")]
+        dashboard_files = [name for name in names if name.startswith("dashboard_static/")]
     else:
         names = [item.name for item in ROOT.glob("wb_*.py")]
         documentation = [str(item.relative_to(ROOT)) for item in (ROOT / "docs").rglob("*") if item.is_file()]
+        dashboard_files = [str(item.relative_to(ROOT)) for item in (ROOT / "dashboard_static").glob("*") if item.is_file()]
     names = [name for name in names if "/" not in name and name.startswith("wb_") and name.endswith(".py")]
     names += ["dashboard.html", "README.md", "CHANGELOG.md", "CHANGELOG.upstream.md",
-              "LICENSE", "LICENSE.upstream", "upstreams.json"] + documentation
+              "LICENSE", "LICENSE.upstream", "upstreams.json"] + documentation + dashboard_files
     hashes = {name: hashlib.sha256(source_bytes(name)).hexdigest() for name in names}
     if "wb_version.py" in names:
         version = re.search(r'^VERSION\s*=\s*"([^"]+)"', source_bytes("wb_version.py").decode(), re.M).group(1)
@@ -165,7 +167,7 @@ print(json.dumps({'health': 200, 'anonymous_api': 401, 'admin_login': 401,
 def regressions(platform):
     suites = ["ddg_search", "web_security", "web_tool_flow", "panel_bootstrap", "removed_exit", "health_auth", "project_repairs",
               "generation_speed", "account_balance", "client_balance", "free_fairness", "socks_proxy",
-              "messages_web", "anthropic_http", "anthropic_messages"]
+              "messages_web", "anthropic_http", "anthropic_messages", "gateway_hardening"]
     with fixture_tree() as fixtures:
         suites = [suite for suite in suites if (fixtures / "tests" / ("_test_%s.py" % suite)).exists()]
         if not suites:

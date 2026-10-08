@@ -66,6 +66,13 @@ import wb_global
 import wb_taskqueue
 import wb_reqlog
 import wb_validation
+import wb_protocol
+import wb_usage_store
+import wb_usage_views
+import wb_background
+import wb_security
+import wb_server
+import wb_dashboard
 import wb_metrics
 import wb_balance
 import wb_forward_proxy
@@ -240,20 +247,7 @@ def cors_origin_allowed(path):
         return False
     return path in CLIENT_BILLING_PATHS or path in MESSAGES_ROUTES or path.startswith(CORS_PATH_PREFIXES)
 _lock = threading.Lock()
-_login_lock = threading.Lock()
 _chat_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CHAT)
-_login_attempts = {}  # ip -> list of timestamp
-def _prune_login_attempts(now=None, window=60):
-    """Drop stale per-IP entries so the dict cannot grow without bound.
-    Caller must hold _login_lock.
-    """
-    now = now or time.time()
-    for ip in list(_login_attempts.keys()):
-        recent = [t for t in _login_attempts[ip] if now - t < window]
-        if recent:
-            _login_attempts[ip] = recent
-        else:
-            del _login_attempts[ip]
 _models_cache = {"intl": {"at": 0.0, "data": None}, "cn": {"at": 0.0, "data": None}}
 # Usage accounting: every upstream response carries a usage block, and the
 # proxy also records one JSONL line per request. Defaults to a folder next to
@@ -580,6 +574,7 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         "elapsed_ms": elapsed_ms,
         "ttft_ms": ttft_ms,
         "gen_ms": gen_ms,
+        "usage_source": "missing" if usage_missing else "upstream",
     }
     if usage_missing:
         row["usage_missing"] = True
@@ -659,11 +654,12 @@ _REQ_CONTEXT = threading.local()
 _LOGGING_CFG_CACHE = {"at": 0.0, "cfg": None}
 
 
-def set_request_context(request_id="", client_ip="", user_agent="", path=""):
+def set_request_context(request_id="", client_ip="", user_agent="", path="", key_id=""):
     _REQ_CONTEXT.request_id = str(request_id or "")
     _REQ_CONTEXT.client_ip = str(client_ip or "")
     _REQ_CONTEXT.user_agent = str(user_agent or "")
     _REQ_CONTEXT.path = str(path or "")
+    _REQ_CONTEXT.key_id = str(key_id or "")
 
 
 def logging_config_cached():
@@ -683,6 +679,9 @@ def logging_config_cached():
 def _request_context_fields():
     """request_id/path always; IP/UA only when the operator opted in."""
     fields = {}
+    request_timing = getattr(wb_metrics.REQUEST, "timing", None)
+    if request_timing:
+        fields.update(request_timing.fields())
     request_id = getattr(_REQ_CONTEXT, "request_id", "")
     path = getattr(_REQ_CONTEXT, "path", "")
     if request_id:
@@ -705,18 +704,16 @@ def _request_context_fields():
 def _persist_usage(row, fail_label, upstream=None):
     """Commit confirmed consumption before removing its pending reservation."""
     database_written = False
+    database = wb_database.for_usage(USAGE_LOG)
     with _SCHEDULING_LOCK:
         try:
-            os.makedirs(USAGE_DIR, exist_ok=True)
-            # Appends and rotation share this lock. SQLite is authoritative;
-            # JSONL remains an export for existing tools and older versions.
-            with wb_reqlog.LOCK:
-                database = wb_database.for_usage(USAGE_LOG)
-                if database:
-                    database.append_usage(row)
-                    database_written = True
-                with open(USAGE_LOG, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if database:
+                database.append_usage(row)
+            else:
+                with wb_reqlog.LOCK:
+                    os.makedirs(USAGE_DIR, mode=0o700, exist_ok=True)
+                    with open(USAGE_LOG, "a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             database_written = True
         except Exception as exc:
             log("%s: %s" % (fail_label, exc))
@@ -725,6 +722,10 @@ def _persist_usage(row, fail_label, upstream=None):
                 _daily_usage["at"] = 0.0
             if upstream is not None:
                 upstream.release()
+    if database_written and database:
+        cfg = logging_config_cached()
+        wb_usage_store.schedule_export(database, USAGE_LOG, log=log,
+                                      max_mb=cfg["archive_max_mb"], retention_days=cfg["retention_days"])
     if not database_written:
         return
     for cache, lock in ((_snap_cache, _snap_lock), (_perf_cache, _perf_lock),
@@ -733,13 +734,21 @@ def _persist_usage(row, fail_label, upstream=None):
             cache.clear()
     with _byacct_lock:
         _byacct_cache.update(at=0.0, data=None)
-    wb_events.BROKER.publish("usage", "accounts", realm=row.get("realm"))
-    try:
-        cfg = logging_config_cached()
-        wb_reqlog.rotate_if_needed(USAGE_LOG, cfg["archive_max_mb"],
-                                   cfg["retention_days"], log=log)
-    except Exception as exc:
-        log("request archive rotation failed: %s" % exc, level="WARN")
+    changes = None
+    if row.get("account"):
+        outcome = row_outcome(row)
+        delta = {"requests": int(outcome == "completed"), "errors": int(outcome not in ("completed", "client_aborted")),
+                 "client_aborted": int(outcome == "client_aborted")}
+        if not row.get("usage_missing"):
+            delta.update({name: row.get(name, 0) or 0 for name in USAGE_FIELDS})
+        changes = {"usage": {row["account"]: delta}}
+    wb_events.BROKER.publish("usage", realm=row.get("realm"), changes=changes)
+    if not database:
+        try:
+            cfg = logging_config_cached()
+            wb_reqlog.rotate_if_needed(USAGE_LOG, cfg["archive_max_mb"], cfg["retention_days"], log=log)
+        except Exception as exc:
+            log("request archive rotation failed: %s" % exc, level="WARN")
 
 
 @contextlib.contextmanager
@@ -753,8 +762,18 @@ def usage_reader(since=None, until=None):
         finally:
             rows.close()
     else:
-        with open(USAGE_LOG, encoding="utf-8") as source:
-            yield source
+        def legacy_lines():
+            for path in wb_reqlog.log_files(os.path.dirname(USAGE_LOG), os.path.basename(USAGE_LOG)):
+                try:
+                    with open(path, encoding="utf-8") as source:
+                        yield from source
+                except FileNotFoundError:
+                    continue
+        rows = legacy_lines()
+        try:
+            yield rows
+        finally:
+            rows.close()
 
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
@@ -861,6 +880,7 @@ def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=
 def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
     """Latency percentiles + derived rates, computed from the JSONL log."""
     ttfts, gens, walls, rates, hits, tok_rates = [], [], [], [], [], []
+    stage_values = {field: [] for field in wb_metrics.TIMING_FIELDS}
     total = ok = err = aborted = 0
     # 按模型聚合性能指标
     m_buckets = {}
@@ -898,6 +918,10 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
         if until and at > until:
             continue
         total += 1
+        for field, values in stage_values.items():
+            value = r.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < float("inf"):
+                values.append(value)
         outcome = row_outcome(r)
         # Every row reaches the model bucket, whatever its outcome, so a model
         # that only ever saw cancellations still shows up with a zero success
@@ -999,6 +1023,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
         # being counted as failures.
         "success_rate_pct": round(ok * 100.0 / (ok + err), 1) if (ok + err) else None,
         "ttft_ms": block(ttfts),
+        "timings": {field: block(values) for field, values in stage_values.items()},
         "generation_ms": block(gens),
         "wall_ms": block(walls),
         "tokens_per_sec": speed_block(tok_rates),
@@ -1165,7 +1190,8 @@ def daily_usage_stats(ttl=None):
     ttl = _STATS_TTL if ttl is None else ttl
     day = time.strftime("%Y-%m-%d")
     now = time.time()
-    with _daily_usage_lock, wb_reqlog.LOCK:
+    database = wb_database.for_usage(USAGE_LOG)
+    with _daily_usage_lock, (contextlib.nullcontext() if database else wb_reqlog.LOCK):
         c = _daily_usage
         if c["day"] == day and (now - c["at"]) < ttl:
             return _daily_state_copy(c) if c["totals"] is not None else None
@@ -1273,6 +1299,21 @@ def apply_model_daily_token_limit(refresh=False):
     return POOL.apply_model_daily_token_limit(limit, per_model)
 
 
+@_serialized_scheduling
+def apply_scheduling_limits(refresh=False):
+    if POOL is None:
+        return
+    limits = wb_settings.scheduling_limits(ACCOUNTS_DIR)
+    stats = daily_usage_stats(ttl=0 if refresh else None)
+    free_models = free_models_by_realm()
+    POOL.apply_daily_token_limit(limits["daily_token_limit"], stats["tokens"] if stats else None)
+    apply_free = getattr(POOL, "apply_free_token_usage", None)
+    if apply_free:
+        apply_free(stats["free_tokens"] if stats else None)
+    POOL.apply_daily_credit_limit(limits["daily_credit_limit"], stats["credits"] if stats else None, free_models)
+    POOL.apply_model_daily_token_limit(limits["model_daily_token_limit"], stats["models"] if stats else None)
+
+
 _free_models_cache = {"at": 0.0, "data": None}
 _FREE_MODELS_TTL = 60.0
 
@@ -1363,6 +1404,47 @@ def _fold_cost(bucket, cost, model):
         missing[mid] = missing.get(mid, 0) + 1
 
 
+def _fold_snapshot_row(snap, row):
+    outcome = row_outcome(row)
+    # Each row is priced against the version that was in force
+    # when it happened, so a later price change cannot rewrite
+    # yesterday's totals.
+    cost = wb_pricing.cost_for_row(row)
+    # Consumption is independent of completion. Only confirmed
+    # usage is present on cancelled rows; absent usage adds zero.
+    for k in USAGE_FIELDS:
+        if k in row:
+            snap[k] += (row[k] or 0)
+    _fold_cost(snap, cost, row.get("model"))
+    if outcome == "client_aborted":
+        snap["client_aborted"] += 1
+    elif outcome != "completed":
+        snap["errors"] += 1
+    else:
+        snap["requests"] += 1
+        m = row.get("model") or "unknown"
+        rr = row_realm(row)
+        per = snap["by_model"].setdefault(m, {"requests": 0, "accounts": {}, "cost_cny": 0.0, **{k: 0 for k in USAGE_FIELDS}})
+        per_realm = snap["by_model_realm"].setdefault(m, {}).setdefault(
+            rr, {"requests": 0, "accounts": {}, "cost_cny": 0.0, **{k: 0 for k in USAGE_FIELDS}})
+        acct_id = row.get("account")
+        acct_key = acct_id or "(unattributed)"
+        per_acct = (snap["by_model_acct"].setdefault(m, {})
+                    .setdefault(rr, {})
+                    .setdefault(acct_key, {"requests": 0, "accounts": {},
+                                           "cost_cny": 0.0,
+                                           **{k: 0 for k in USAGE_FIELDS}}))
+        for bucket in (per, per_realm, per_acct):
+            bucket["requests"] += 1
+            for k in USAGE_FIELDS:
+                if k in row:
+                    bucket[k] += (row[k] or 0)
+            if cost["known"]:
+                bucket["cost_cny"] += cost["cny"]
+            if acct_id:
+                bucket["accounts"][acct_id] = bucket["accounts"].get(acct_id, 0) + 1
+
+
 def _usage_snapshot_uncached(realm=None, since=None, until=None):
     # None means every realm; usage_snapshot() has already mapped "all"
     # onto it, so the filter below is simply skipped.
@@ -1370,68 +1452,28 @@ def _usage_snapshot_uncached(realm=None, since=None, until=None):
     rep = POOL.representative(realm=r) if POOL else current_account()
     snap = _empty_stats()
     snap["started"] = _usage.get("started", time.time())
-    try:
-        with usage_reader(since, until) as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                if r and not row_matches_realm(row, r):
-                    continue
-                # The window is applied before the request is counted, so every
-                # total below - requests, tokens, per-model and per-account
-                # breakdowns - describes the same slice of the log.
-                at = row.get("at") or 0
-                if since and at < since:
-                    continue
-                if until and at > until:
-                    continue
-                outcome = row_outcome(row)
-                # Each row is priced against the version that was in force
-                # when it happened, so a later price change cannot rewrite
-                # yesterday's totals.
-                cost = wb_pricing.cost_for_row(row)
-                # Consumption is independent of completion. Only confirmed
-                # usage is present on cancelled rows; absent usage adds zero.
-                for k in USAGE_FIELDS:
-                    if k in row:
-                        snap[k] += (row[k] or 0)
-                _fold_cost(snap, cost, row.get("model"))
-                if outcome == "client_aborted":
-                    snap["client_aborted"] += 1
-                elif outcome != "completed":
-                    snap["errors"] += 1
-                else:
-                    snap["requests"] += 1
-                    m = row.get("model") or "unknown"
-                    rr = row_realm(row)
-                    per = snap["by_model"].setdefault(m, {"requests": 0, "accounts": {}, "cost_cny": 0.0, **{k: 0 for k in USAGE_FIELDS}})
-                    per_realm = snap["by_model_realm"].setdefault(m, {}).setdefault(
-                        rr, {"requests": 0, "accounts": {}, "cost_cny": 0.0, **{k: 0 for k in USAGE_FIELDS}})
-                    acct_id = row.get("account")
-                    acct_key = acct_id or "(unattributed)"
-                    per_acct = (snap["by_model_acct"].setdefault(m, {})
-                                .setdefault(rr, {})
-                                .setdefault(acct_key, {"requests": 0, "accounts": {},
-                                                       "cost_cny": 0.0,
-                                                       **{k: 0 for k in USAGE_FIELDS}}))
-                    for bucket in (per, per_realm, per_acct):
-                        bucket["requests"] += 1
-                        for k in USAGE_FIELDS:
-                            if k in row:
-                                bucket[k] += (row[k] or 0)
-                        if cost["known"]:
-                            bucket["cost_cny"] += cost["cny"]
-                        if acct_id:
-                            bucket["accounts"][acct_id] = bucket["accounts"].get(acct_id, 0) + 1
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        log(f"usage snapshot read failed: {exc}")
+    database = wb_database.for_usage(USAGE_LOG)
+    if database:
+        snap = wb_usage_views.SNAPSHOTS.get(database, r, since, until, _fold_snapshot_row, _empty_stats)
+        snap["started"] = _usage.get("started", time.time())
+    else:
+        try:
+            with usage_reader(since, until) as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if r and not row_matches_realm(row, r):
+                        continue
+                    at = row.get("at") or 0
+                    if (since is not None and at < since) or (until is not None and at > until):
+                        continue
+                    _fold_snapshot_row(snap, row)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log("usage snapshot read failed: %s" % exc)
     snap["since"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snap.get("started", time.time())))
     snap["log_file"] = USAGE_LOG
     snap["realm"] = r or "all"
@@ -1446,7 +1488,7 @@ def _usage_snapshot_uncached(realm=None, since=None, until=None):
         "credential_file": (os.path.basename(rep.path) if rep and rep.path else ""),
         "expires_at": (rep.expires_at if rep else 0),
         "accounts": (len(POOL.accounts) if POOL else 0),
-        "accounts_ready": (POOL.count_ready() if POOL else 0),
+        "accounts_ready": (POOL.count_ready(allow_refresh=False) if POOL else 0),
     }
     return snap
 def usage_timeseries(realm=None, range=None, since=None, until=None,
@@ -1656,16 +1698,8 @@ def recent_usage(limit=100, realm=None, page=1):
     chunk = 256 * 1024
     database = wb_database.for_usage(USAGE_LOG)
     if database:
-        records = database.usage_rows(realm=realm, descending=True)
-        try:
-            for item in records:
-                if realm and not row_matches_realm(item, realm):
-                    continue
-                matching.append(item)
-                if len(matching) >= target_count:
-                    break
-        finally:
-            records.close()
+        matching = list(database.usage_rows(realm=realm, descending=True, limit=limit,
+                                            offset=(page - 1) * limit))
     else:
         try:
             with open(USAGE_LOG, "rb") as fh:
@@ -1705,7 +1739,7 @@ def recent_usage(limit=100, realm=None, page=1):
             log("recent_usage read failed: %s" % exc)
     start_idx = (page - 1) * limit
     end_idx = start_idx + limit
-    page_rows = matching[start_idx:end_idx]
+    page_rows = matching if database else matching[start_idx:end_idx]
     # Equivalent-token cost per row at OpenRouter list prices, computed here
     # so every consumer of /usage/recent gets the same number. Each row is
     # priced against the version that was in force when it happened, and says
@@ -1975,6 +2009,23 @@ def usage_by_account(ttl=None):
 
 def _usage_by_account_uncached():
     """Aggregate the JSONL log per account id."""
+    database = wb_database.for_usage(USAGE_LOG)
+    if database:
+        groups = database.usage_totals(group_by=("account", "model"))
+        buckets = {}
+        for group in groups:
+            uid = group.get("account") or "(unattributed)"
+            bucket = buckets.setdefault(uid, {"account": uid, "models": {}, **{field: 0 for field in
+                ("requests", "errors", "client_aborted", "prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens", "total_tokens")}})
+            for field in bucket:
+                if field not in ("account", "models"):
+                    bucket[field] += group[field] or 0
+            if group["requests"]:
+                bucket["models"][group.get("model") or "?"] = group["requests"]
+        out = sorted(buckets.values(), key=lambda item: -item["total_tokens"])
+        for item in out:
+            item["models"] = sorted(item["models"].items(), key=lambda pair: -pair[1])[:5]
+        return out
     buckets = {}
     try:
         with usage_reader() as fh:
@@ -2068,7 +2119,7 @@ KEY_MODEL_TOP_N = 5
 
 
 def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None, until=None,
-                    realm=None, key_map=None):
+                    realm=None, key_map=None, rows=None, include_all=True):
     """Walk the usage JSONL once, folding every row into the maps.
 
     `all_summary` always covers the whole log (it is the stable reference the
@@ -2081,17 +2132,20 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
     served by many upstream accounts, and one account can serve many keys, so
     the two tables are views of the same spend, not a decomposition of it.
     """
-    if wb_database.for_usage(USAGE_LOG) or os.path.exists(USAGE_LOG):
+    if rows is not None or wb_database.for_usage(USAGE_LOG) or os.path.exists(USAGE_LOG):
         try:
-            with usage_reader() as fh:
+            with (contextlib.nullcontext(rows) if rows is not None else usage_reader()) as fh:
                 for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        r = json.loads(line)
-                    except Exception:
-                        continue
+                    if isinstance(line, dict):
+                        r = line
+                    else:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            r = json.loads(line)
+                        except Exception:
+                            continue
                     if realm and not row_matches_realm(r, realm):
                         continue
                     # Confirmed partial consumption contributes to totals;
@@ -2144,12 +2198,13 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                         # demand for it when the caller got nothing.
                         if outcome != "completed":
                             return
-                        tm = tgt_all.setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
-                        tm["requests"] += 1
-                        tm["tokens"] += (r.get("total_tokens") or 0)
-                        tm["reasoning"] += (r.get("reasoning_tokens") or 0)
-                        if cost["known"]:
-                            tm["cost_cny"] += cost["cny"]
+                        if include_all:
+                            tm = tgt_all.setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
+                            tm["requests"] += 1
+                            tm["tokens"] += (r.get("total_tokens") or 0)
+                            tm["reasoning"] += (r.get("reasoning_tokens") or 0)
+                            if cost["known"]:
+                                tm["cost_cny"] += cost["cny"]
                         if in_window:
                             tdm = tgt_window.setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
                             tdm["requests"] += 1
@@ -2157,7 +2212,8 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                             tdm["reasoning"] += (r.get("reasoning_tokens") or 0)
                             if cost["known"]:
                                 tdm["cost_cny"] += cost["cny"]
-                    feed(all_summary, is_err)
+                    if include_all:
+                        feed(all_summary, is_err)
                     if in_window:
                         feed(window_summary, is_err)
                     if acct_uid not in acct_map:
@@ -2171,13 +2227,15 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                             "window_models": {},
                             "all_models": {},
                         }
-                    feed(acct_map[acct_uid]["all_time"], is_err)
+                    if include_all:
+                        feed(acct_map[acct_uid]["all_time"], is_err)
                     if in_window:
                         feed(acct_map[acct_uid]["window"], is_err)
                     bump_models(acct_map[acct_uid]["all_models"], acct_map[acct_uid]["window_models"], is_err)
                     if m_id not in model_map:
                         model_map[m_id] = {"model": m_id, "window": _new_analytics_stat(), "all_time": _new_analytics_stat()}
-                    feed(model_map[m_id]["all_time"], is_err)
+                    if include_all:
+                        feed(model_map[m_id]["all_time"], is_err)
                     if in_window:
                         feed(model_map[m_id]["window"], is_err)
                     if key_map is not None:
@@ -2205,14 +2263,18 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                                 "last_at": 0,
                             }
                         k_realm = row_realm(r) or ""
-                        km["realms"][k_realm] = km["realms"].get(k_realm, 0) + 1
-                        if at and at > km["last_at"]:
-                            km["last_at"] = at
-                        feed(km["all_time"], is_err)
+                        if include_all:
+                            km["realms"][k_realm] = km["realms"].get(k_realm, 0) + 1
+                            if at and at > km["last_at"]:
+                                km["last_at"] = at
+                        if include_all:
+                            feed(km["all_time"], is_err)
                         if in_window:
                             feed(km["window"], is_err)
                         bump_models(km["all_models"], km["window_models"], is_err)
         except Exception as exc:
+            if rows is not None:
+                raise
             log("compute_usage_analytics failed: %s" % exc)
 
 
@@ -2386,13 +2448,15 @@ def _finalize_analytics_stat(stat_obj):
 
 def _compute_usage_analytics_uncached(realm=None, since=None, until=None):
     """Detailed analytics for Token, Cache, and Reasoning metrics page."""
-    all_summary = _new_analytics_stat()
-    window_summary = _new_analytics_stat()
-    acct_map = {}
-    model_map = {}
-    key_map = {}
-    _scan_usage_log(all_summary, window_summary, acct_map, model_map,
-                    since=since, until=until, realm=realm, key_map=key_map)
+    database = wb_database.for_usage(USAGE_LOG)
+    if database:
+        all_summary, window_summary, acct_map, model_map, key_map = wb_usage_views.VIEWS.get(
+            database, realm, since, until, _scan_usage_log, _new_analytics_stat)
+    else:
+        all_summary, window_summary = _new_analytics_stat(), _new_analytics_stat()
+        acct_map, model_map, key_map = {}, {}, {}
+        _scan_usage_log(all_summary, window_summary, acct_map, model_map,
+                        since=since, until=until, realm=realm, key_map=key_map)
     _enrich_accounts_from_pool(acct_map, realm=realm)
     _finalize_analytics_stat(all_summary)
     _finalize_analytics_stat(window_summary)
@@ -2479,6 +2543,7 @@ def runtime_settings_view():
         "redis": wb_settings.redis_config(ACCOUNTS_DIR),
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
+        "prompt_retry_status": wb_prompt.retry_status(),
         "logging": wb_settings.logging_config(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
@@ -2607,7 +2672,11 @@ def log(msg, level=None, tag=None):
     sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
     sys.stderr.flush()
     add_log_entry(msg, level=level, tag=tag)
-    wb_events.BROKER.publish("logs", "tasks", "scheduler")
+    topics = ["logs"]
+    label = str(tag or "").lower()
+    if label in ("task", "tasks", "scheduler") or str(msg).lower().startswith(("task queue", "scheduler", "checkin", "daily chat")):
+        topics.extend(("tasks", "scheduler"))
+    wb_events.BROKER.publish(*topics)
 
 def get_logs(limit=200, level="", tag="", search="", since_id=0):
     with _LOG_LOCK:
@@ -4109,12 +4178,6 @@ def key_model_message(entry, model):
             % (name, asked, allowed))
 
 
-# Process-memory degradation window: content-blocked passthrough/append
-# traffic switches to the minimal neutral prompt until the next 00:00 CST
-# (panel degrade.go). Restarts clear it, which is fine - the next rejection
-# re-triggers it.
-PROMPT_DEGRADE = wb_prompt.DegradeGate()
-
 
 def prompt_mode_config():
     """Prompt mode settings, fail-open to passthrough on any read error."""
@@ -4127,17 +4190,16 @@ def prompt_mode_config():
     return cfg
 
 
-def apply_prompt_mode(messages):
+def apply_prompt_mode(messages, degraded=False):
     """Apply the configured prompt mode to one request's messages.
 
     passthrough is the legacy behaviour (client system prompts ride through);
-    custom/append are opt-in. While the degrade window is active, passthrough
-    and append switch to the minimal neutral prompt; custom never degrades.
+    custom/append are opt-in. An explicit content-rejection retry can replace
+    this request's prompt only; unrelated requests always use the saved mode.
     An unreadable prompt file fails open to passthrough rather than blocking.
     """
     cfg = prompt_mode_config()
     mode = cfg.get("mode") or "passthrough"
-    degraded = PROMPT_DEGRADE.active()
     if mode in ("custom", "append"):
         try:
             text = wb_prompt.load_prompt(mode, cfg.get("file"))
@@ -4151,7 +4213,7 @@ def apply_prompt_mode(messages):
     return messages
 
 
-def build_upstream_body(payload):
+def build_upstream_body(payload, prompt_degraded=False):
     model = payload.get("model") or ""
     # Resolve the effective thinking state before the backfill below: while
     # thinking is on, the upstream requires reasoning_content on every
@@ -4170,7 +4232,7 @@ def build_upstream_body(payload):
     messages = normalize_roles(payload.get("messages") or [])
     # Prompt mode runs before sanitize/backfill so the gateway prompt is the
     # one the upstream sees, with the client's fingerprint-y system text gone.
-    messages = apply_prompt_mode(messages)
+    messages = apply_prompt_mode(messages, degraded=prompt_degraded)
     messages = sanitize_messages(messages)
     messages = backfill_reasoning_content(
         messages, model, thinking_enabled=thinking_enabled
@@ -4740,9 +4802,6 @@ def open_upstream(payload, session_key=None, target_realm=None,
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
     # like any other unusable one.
-    apply_daily_token_limit()
-    apply_daily_credit_limit()
-    apply_model_daily_token_limit()
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
     upstream_body = build_upstream_body(payload)
@@ -4760,7 +4819,12 @@ def open_upstream(payload, session_key=None, target_realm=None,
         session_meta = session_meta_for(payload, session_key=session_key,
                                         inbound_request_id=inbound_request_id,
                                         trace_id=trace_id)
-    total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
+    routing_key = wb_protocol.affinity_key(session_key, realm, getattr(_REQ_CONTEXT, "key_id", ""))
+    try:
+        total = max(1, POOL.count_ready(realm, model=model, allow_refresh=False)) if POOL else 1
+    except TypeError:
+        # Compatibility with external pool implementations lacking this option.
+        total = max(1, sum(a.enabled for a in POOL.accounts if a.realm == realm)) if hasattr(POOL, "accounts") else 1
     tried = set()
     last_error = None
     last_uid = None
@@ -4780,12 +4844,10 @@ def open_upstream(payload, session_key=None, target_realm=None,
     for _attempt in range(max_attempts):
         if deadline is not None and time.monotonic() >= deadline:
             raise wb_webflow.WebToolLimitError("web tool time limit exceeded")
-        with _SCHEDULING_LOCK:
-            apply_daily_token_limit()
-            apply_daily_credit_limit()
-            apply_model_daily_token_limit()
+        with wb_metrics.stage("account_selection_ms"), _SCHEDULING_LOCK:
+            apply_scheduling_limits()
             account, reservation_id = POOL.reserve_for_session(
-                upstream_body, realm=realm, session_key=session_key,
+                upstream_body, realm=realm, session_key=routing_key,
                 exclude=tried, model=model, estimate=reservation_estimate,
                 preferred_uid=preferred_uid) if POOL else (None, None)
         if account is None:
@@ -4796,7 +4858,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
             break
         if account.realm != realm:
             account.release(reservation_id)
-            if session_key and POOL: POOL.affinity.unbind(session_key)
+            if session_key and POOL: POOL.affinity.unbind(routing_key)
             continue
         tried.add(account.uid)
         last_uid = account.uid
@@ -4833,7 +4895,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     log("account %s soft-rate limited, cooling %.0fs (streak %d)"
                         % (account.uid[:8], wait, account.soft_streak))
                     if session_key and POOL:
-                        POOL.affinity.unbind(session_key)
+                        POOL.affinity.unbind(routing_key)
                     last_error = exc
                     last_429 = exc
                     last_429_detail = detail
@@ -4852,12 +4914,12 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     except Exception:
                         pass
                     if session_key and POOL:
-                        POOL.affinity.unbind(session_key)
+                        POOL.affinity.unbind(routing_key)
                     continue
                 log("account %s throttled on '%s' (429), retry in %ds"
                     % (account.uid[:8], model, int(wait)))
                 if session_key and POOL:
-                    POOL.affinity.unbind(session_key)
+                    POOL.affinity.unbind(routing_key)
                 last_error = exc
                 last_429 = exc
                 last_429_detail = detail
@@ -4867,21 +4929,21 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     detail = exc.read(400).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
-                # Panel degrade.go: a content rejection in passthrough/append
-                # mode is usually a system-prompt fingerprint false positive.
-                # Switch to the minimal neutral prompt until next 00:00 CST
-                # and retry this turn once; custom mode opted out.
-                if (not degraded_retried
-                        and prompt_mode_config().get("mode") in ("passthrough", "append")):
-                    PROMPT_DEGRADE.trigger()
+                # Prompt replacement is opt-in and applies only to this retry.
+                # Auth/WAF/permission 403s must never change client instructions.
+                cfg = prompt_mode_config()
+                if (not degraded_retried and cfg.get("retry_on_content_rejection", False)
+                        and cfg.get("mode") in ("passthrough", "append")
+                        and wb_prompt.is_content_rejection(detail)):
                     degraded_retried = True
-                    upstream_body = build_upstream_body(payload)
+                    wb_prompt.record_retry(model)
+                    upstream_body = build_upstream_body(payload, prompt_degraded=True)
                     tried.discard(account.uid)
-                    log("upstream 403 (content review) -> degraded prompt retry")
+                    log("upstream content rejection -> request-scoped prompt retry")
                     continue
                 log("upstream 403 for '%s' (content review), passing through" % model)
                 if session_key and POOL:
-                    POOL.affinity.unbind(session_key)
+                    POOL.affinity.unbind(routing_key)
                 last_error = exc
                 last_403_detail = detail
                 break
@@ -4894,7 +4956,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 log("account %s out of credits (402), cooling until next 04:00"
                     % account.uid[:8])
                 if session_key and POOL:
-                    POOL.affinity.unbind(session_key)
+                    POOL.affinity.unbind(routing_key)
                 last_error = exc
                 continue
             if exc.code == 401:
@@ -4915,7 +4977,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
                                        cooldown=60,
                                        single_account=(total <= 1))
                 if session_key and POOL:
-                    POOL.affinity.unbind(session_key)
+                    POOL.affinity.unbind(routing_key)
                 last_error = exc
                 continue
             if exc.code in (500, 502, 503, 504):
@@ -4924,13 +4986,13 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 log("upstream %s for '%s', retrying (fails=%d)"
                     % (exc.code, model, account.fails))
                 if session_key and POOL:
-                    POOL.affinity.unbind(session_key)
+                    POOL.affinity.unbind(routing_key)
                 last_error = exc
                 continue
             raise
         except Exception as exc:
             if session_key and POOL:
-                POOL.affinity.unbind(session_key)
+                POOL.affinity.unbind(routing_key)
             if is_transient(exc):
                 transient_hits += 1
                 account.note_unknown_failure("connection: %s" % type(exc).__name__)
@@ -5125,7 +5187,7 @@ def aggregate_stream(raw_iter, model, resp_id):
     started = time.time()
     first_chunk_at = None
     saw_done = False
-    for line in raw_iter:
+    for line in wb_protocol.checked_lines(raw_iter):
         data = strip_data_prefix(line.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
             if data == "[DONE]":
@@ -5230,19 +5292,6 @@ def aggregate_stream(raw_iter, model, resp_id):
         finish = "stop"
     if usage:
         normalize_usage_cache_aliases(usage)
-    if usage is None or (usage.get("total_tokens") or 0) == 0:
-        full_c = "".join(content)
-        full_r = "".join(reasoning)
-        if full_c or full_r:
-            comp = estimate_tokens(full_c) + estimate_tokens(full_r)
-            prompt_est = max(1, comp // 2)
-            usage = {
-                "prompt_tokens": prompt_est,
-                "completion_tokens": comp,
-                "total_tokens": prompt_est + comp,
-                "completion_tokens_details": {"reasoning_tokens": estimate_tokens(full_r)},
-                "prompt_tokens_details": {"cached_tokens": 0},
-            }
     out = {
         "id": resp_id or "chatcmpl-wb",
         "object": "chat.completion",
@@ -6797,7 +6846,7 @@ def stream_messages_events(raw_iter, model, holder=None):
             "content_block": {"type": "text", "text": ""},
         })
 
-    for line in raw_iter:
+    for line in wb_protocol.checked_lines(raw_iter, holder):
         if state["done"] or state["failed"]:
             break
         data = strip_data_prefix(line.decode("utf-8", "replace"))
@@ -7271,20 +7320,6 @@ def stream_responses_events(upstream, model, holder):
             outputs[msg_index] = msg_item("completed")
             yield ev("response.output_item.done", {"output_index": msg_index, "item": outputs[msg_index]})
         nonlocal usage
-        if usage is None or (usage.get("total_tokens") or 0) == 0:
-            out_txt = "".join(text_parts)
-            rs_txt = "".join(reason_parts)
-            if out_txt or rs_txt:
-                comp = estimate_tokens(out_txt) + estimate_tokens(rs_txt)
-                prompt_est = max(1, estimate_tokens(str(meta.get("input") or "")))
-                usage = {
-                    "prompt_tokens": prompt_est,
-                    "completion_tokens": comp,
-                    "total_tokens": prompt_est + comp,
-                    "completion_tokens_details": {"reasoning_tokens": estimate_tokens(rs_txt)},
-                    "prompt_tokens_details": {"cached_tokens": 0},
-                }
-                holder["usage"] = usage
         status = ("completed" if (finish != "length" and not dropped_truncated)
                   else "incomplete")
         final = resp_obj(status)
@@ -7307,14 +7342,14 @@ def stream_responses_events(upstream, model, holder):
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
         if not holder.get("suppress_completion"):
-            yield ev("response.completed", {"response": final})
+            yield ev("response.completed" if status == "completed" else "response.incomplete", {"response": final})
 
     # 只有第一輪開場。第二輪以後再送一次 response.created，客戶端會
     # 看到同一則回應被開了兩次。
     if not holder.get("suppress_lifecycle"):
         yield ev("response.created", {"response": resp_obj("in_progress")})
         yield ev("response.in_progress", {"response": resp_obj("in_progress")})
-    for raw in upstream:
+    for raw in wb_protocol.checked_lines(upstream, holder):
         data = strip_data_prefix(raw.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
             if data == "[DONE]":
@@ -7609,6 +7644,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.raw_requestline:
             self.close_connection = True
             return
+        wb_metrics.begin_request()
         if not self.parse_request():
             return
         mname = 'do_' + self.command
@@ -7877,6 +7913,10 @@ class Handler(BaseHTTPRequestHandler):
     def _key_realm(self):
         """Realm bound to the key this request used, or "" when unbound."""
         return (self.key_entry or {}).get("realm") or ""
+    def _client_ip(self):
+        peer = self.client_address[0] if getattr(self, "client_address", None) else "127.0.0.1"
+        return wb_security.TRUSTED_PROXIES.client_ip(peer, self.headers)
+
     def _key_id(self):
         """Settings id of the key that paid for this request, or None.
 
@@ -8030,6 +8070,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_client_balance(query, "qwen")
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
+        if path.startswith("/assets/"):
+            return self._dashboard_asset(path)
         if path in ("/", "/dashboard", "/ui"):
             return self._get_dashboard()
         if path == "/panel/status":
@@ -8252,17 +8294,28 @@ class Handler(BaseHTTPRequestHandler):
         if realm is None:
             return
         req_range, req_since, req_until = range_query(query)
-        analytics = compute_usage_analytics(realm=realm, range=req_range,
-                                            since=req_since, until=req_until)
-        entry = next((row for row in analytics["keys"] if row["key"] == self._key_id()), None)
-        stats = entry["window"] if entry else _new_analytics_stat()
+        lo, hi = range_window(req_range, req_since, req_until)
+        database = wb_database.for_usage(USAGE_LOG)
+        if database:
+            rows = database.usage_totals(realm=realm, api_key=self._key_id(), since=lo, until=hi)
+            stats = rows[0] if rows else _new_analytics_stat()
+        else:
+            stats = _new_analytics_stat()
+            with usage_reader(lo, hi) as records:
+                for line in records:
+                    row = json.loads(line)
+                    if row.get("key") == self._key_id() and row_matches_realm(row, realm):
+                        field = "requests" if row_outcome(row) == "completed" else "client_aborted" if row_outcome(row) == "client_aborted" else "errors"
+                        stats[field] += 1
+                        for key in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens", "total_tokens"):
+                            stats[key] += row.get(key) or 0
         # An allowlist keeps account identities, other keys and log paths out
         # of the public endpoint, including when the shared cache is reused.
         response = {name: stats[name] for name in ("requests", "errors", "client_aborted", "prompt_tokens",
                     "completion_tokens", "reasoning_tokens", "cached_tokens", "total_tokens")}
         response.update(ok=True, object="usage", unit="tokens", realm=realm,
                         channel={"cn": "workbuddy-cn", "intl": "workbuddy-intl"}[realm],
-                        window=analytics["window"])
+                        window={"since": lo, "until": hi})
         return self._json(200, response)
 
     def _route_accounts_balance(self):
@@ -8311,14 +8364,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Fold the usage log before building the view, so the 日限额 badge and
         # the parked count describe right now instead of the last request.
-        apply_daily_token_limit()
-        apply_daily_credit_limit()
-        apply_model_daily_token_limit()
+        apply_scheduling_limits()
         return self._json(200, {
             "accounts": account_views(realm=query.get('realm', [None])[0] or CURRENT_REALM),
             "balance": wb_balance.summarize(list(POOL.accounts) if POOL else []),
             "storage": ACCOUNTS_DIR,
-            "usable": POOL.count_ready() if POOL else 0,
+            "usable": POOL.count_ready(allow_refresh=False) if POOL else 0,
         })
 
     def _get_accounts_export(self, query):
@@ -8530,31 +8581,42 @@ class Handler(BaseHTTPRequestHandler):
             % script_src)
 
     def _dashboard(self):
-        try:
-            with open(DASHBOARD_HTML, "rb") as fh:
-                body = fh.read()
-            body = body.replace(b"__WORKBODY_VERSION__", VERSION.encode("ascii"))
-        except Exception as exc:
-            return self._error(500, f"dashboard.html unavailable: {exc}")
-        # M4 D3 stage 2: stamp the two inline <script> blocks with a fresh
-        # nonce. The count check is deliberate - a markup change that adds or
-        # removes a plain <script> tag must not silently ship a page whose
-        # scripts the CSP would block.
         nonce = secrets.token_urlsafe(16)
-        text = body.decode("utf-8", "replace")
-        inline_scripts = text.count("<script>")
-        if inline_scripts == 2:
-            body = text.replace(
-                "<script>", '<script nonce="%s">' % nonce).encode("utf-8")
-        else:
-            nonce = None
+        try:
+            body = wb_dashboard.ASSETS.html(DASHBOARD_HTML, VERSION, nonce)
+        except Exception as exc:
+            return self._error(500, "dashboard.html unavailable: %s" % exc)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self._send_security_headers(nonce, allow_inline_scripts=inline_scripts != 2)
+        self._send_security_headers(nonce)
         self.end_headers()
         self.wfile.write(body)
+
+    def _dashboard_asset(self, path):
+        asset = wb_dashboard.ASSETS.get(path, DASHBOARD_HTML, VERSION)
+        if asset is None:
+            return self._error(404, "asset not found")
+        raw, compressed, mime, digest = asset
+        compress = wb_dashboard.accepts_gzip(self.headers.get("Accept-Encoding"))
+        body = compressed if compress else raw
+        etag = '"%s%s"' % (digest, "-gzip" if compress else "")
+        not_modified = self.headers.get("If-None-Match") == etag
+        self.send_response(304 if not_modified else 200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("ETag", etag)
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if compress:
+            self.send_header("Content-Encoding", "gzip")
+        if not not_modified:
+            self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not not_modified:
+            self.wfile.write(body)
+
     def _read_chunked_body(self, max_bytes=MAX_PAYLOAD_BYTES):
         """Decode a Transfer-Encoding: chunked body into bytes.
 
@@ -9083,24 +9145,19 @@ class Handler(BaseHTTPRequestHandler):
         if payload is None:
             return
         if path == "/panel/login":
-            client_ip = self.client_address[0] if hasattr(self, "client_address") and self.client_address else "127.0.0.1"
-            now = time.time()
-            with _login_lock:
-                _prune_login_attempts(now)
-                attempts = [t for t in _login_attempts.get(client_ip, []) if now - t < 60]
-                _login_attempts[client_ip] = attempts
-                if len(attempts) >= 5:
-                    wait_sec = int(60 - (now - attempts[0]))
-                    return self._error(429, f"too many login attempts, please wait {max(1, wait_sec)}s", "rate_limit_error")
-            password = str(payload.get("password") or "")
-            if not wb_settings.verify_panel_password(ACCOUNTS_DIR, password):
-                with _login_lock:
-                    _login_attempts.setdefault(client_ip, []).append(now)
-                # Small backoff delay to mitigate automated brute force
-                time.sleep(0.5)
+            client_ip = self._client_ip()
+            ticket, wait_sec = wb_security.LOGIN_LIMITER.begin(client_ip)
+            if ticket is None:
+                return self._error(429, "too many login attempts, retry in %ss" % wait_sec,
+                                   "rate_limit_error")
+            valid = False
+            try:
+                password = str(payload.get("password") or "")
+                valid = wb_settings.verify_panel_password(ACCOUNTS_DIR, password)
+            finally:
+                wb_security.LOGIN_LIMITER.finish(client_ip, ticket, success=valid)
+            if not valid:
                 return self._error(401, "invalid panel password", "invalid_request_error")
-            with _login_lock:
-                _login_attempts.pop(client_ip, None)
             token = PANEL.create()
             return self._json(200, {
                 "ok": True,
@@ -9389,18 +9446,23 @@ class Handler(BaseHTTPRequestHandler):
         if not 1 <= limit <= 5000:
             return self._error(400, "limit must be a whole number between 1 and 5000",
                                "invalid_request_error")
-        rows = wb_reqlog.read_rows(USAGE_DIR)
-        filtered = wb_reqlog.filter_rows(rows, **self._request_filters(payload))
-        total = len(filtered)
-        return self._json(200, {"ok": True, "total": total,
-                                "rows": list(reversed(filtered))[:limit]})
+        database = wb_database.for_usage(USAGE_LOG)
+        filters = self._request_filters(payload)
+        if database:
+            rows = list(database.usage_rows(limit=limit, descending=True, **filters))
+            total = database.usage_count(**filters)
+        else:
+            filtered = wb_reqlog.filter_rows(wb_reqlog.read_rows(USAGE_DIR), **filters)
+            total, rows = len(filtered), list(reversed(filtered))[:limit]
+        return self._json(200, {"ok": True, "total": total, "rows": rows})
 
     def _route_requests_metrics(self, payload):
         """Completion/HTTP success rates and latency percentiles over the window."""
-        rows = wb_reqlog.read_rows(USAGE_DIR)
-        filtered = wb_reqlog.filter_rows(rows, **self._request_filters(payload))
-        return self._json(200, {"ok": True,
-                                "metrics": wb_reqlog.compute_metrics(filtered)})
+        database = wb_database.for_usage(USAGE_LOG)
+        filters = self._request_filters(payload)
+        metrics = (database.request_metrics(**filters) if database else
+                   wb_reqlog.compute_metrics(wb_reqlog.filter_rows(wb_reqlog.read_rows(USAGE_DIR), **filters)))
+        return self._json(200, {"ok": True, "metrics": metrics})
 
     def _route_tasks_queue_scan(self, payload):
         """Task center: read-only scan of every CN account's pending work."""
@@ -9935,7 +9997,8 @@ class Handler(BaseHTTPRequestHandler):
                 "invalid_request_error")
         session_key = extract_session_key(self.headers, payload)
         custom_names = custom_tool_names(payload.get("tools"))
-        chat_req = responses_to_chat(payload)
+        with wb_metrics.stage("normalize_ms"):
+            chat_req = responses_to_chat(payload)
         ns_map = chat_req.pop("_namespace_map", None)
         # Echo these back on the response object; see chat_to_response.
         request_meta = {
@@ -9945,7 +10008,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         model = payload.get("model") or "deepseek-v4.1-flash"
         want_stream = bool(payload.get("stream"))
-        t_start = time.time()
+        t_start = wb_metrics.request_started_at()
         flow = wb_webflow.WebToolFlow(chat_req) if web_tools_active(chat_req) else None
         fp = prompt_fingerprint(chat_req.get("messages"))
         log(
@@ -10141,7 +10204,7 @@ class Handler(BaseHTTPRequestHandler):
             message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream/web follow-up failed: %s" % exc
             record_error(model, 502, message, account=account.uid, upstream=upstream,
                          elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id(),
-                         usage=None if round_recorded else getattr(flow, "current_usage", None))
+                         usage=None if round_recorded else (getattr(exc, "usage", None) or getattr(flow, "current_usage", None)))
             return self._error(502, message)
         finally:
             upstream.close()
@@ -10163,7 +10226,8 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_messages(self, payload):
         """Serve an Anthropic Messages request through the chat pipeline."""
         try:
-            chat_req = messages_to_chat(payload, replay_scope=self._key_id())
+            with wb_metrics.stage("normalize_ms"):
+                chat_req = messages_to_chat(payload, replay_scope=self._key_id())
             web_format = wb_messages_web.response_format(self.headers)
             flow = (wb_messages_web.MessagesWebFlow(chat_req, web_format, self._key_id())
                     if "_messages_web_search" in chat_req else None)
@@ -10171,11 +10235,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._anthropic_error(400, str(exc), "invalid_request_error")
         model = chat_req.get("model") or "unknown"
         want_stream = bool(chat_req.get("stream"))
-        session_key = extract_session_key(self.headers, chat_req)
-        t_start = time.time()
+        session_key = extract_session_key(self.headers, payload)
+        t_start = wb_metrics.request_started_at()
         fp = prompt_fingerprint(chat_req.get("messages"))
         try:
-            client_ip = self.client_address[0] if self.client_address else ""
+            client_ip = self._client_ip()
         except Exception:
             client_ip = ""
         set_request_context(
@@ -10183,7 +10247,7 @@ class Handler(BaseHTTPRequestHandler):
                         or self.headers.get("X-Request-ID") or uuid.uuid4().hex),
             client_ip=client_ip,
             user_agent=self.headers.get("User-Agent") or "",
-            path=self.path.split("?")[0],
+            path=self.path.split("?")[0], key_id=self._key_id(),
         )
         log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d local_search=%s web_format=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
@@ -10321,7 +10385,7 @@ class Handler(BaseHTTPRequestHandler):
             wall = int((time.time() - t_start) * 1000)
             record_error(model, 502, "messages upstream/web error: %s" % exc,
                          elapsed_ms=wall, account=account.uid, upstream=upstream, key=self._key_id(),
-                         usage=None if round_recorded else getattr(flow, "current_usage", None),
+                         usage=None if round_recorded else (getattr(exc, "usage", None) or getattr(flow, "current_usage", None)),
                          stream=False, **timing.fields(), fp=fp)
             return self._anthropic_error(502, "upstream stream error: %s" % exc)
         finally:
@@ -10516,11 +10580,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._anthropic_error(400, str(exc), "invalid_request_error")
             return self._handle_messages_count_tokens(payload)
         # Include uploads in the slot budget for both conversation protocols.
-        if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
+        with wb_metrics.stage("queue_ms"):
+            acquired = _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS)
+        if not acquired:
             message = ("gateway is at its concurrent chat limit "
                        "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
             try:
-                client_ip = self.client_address[0] if self.client_address else ""
+                client_ip = self._client_ip()
             except Exception:
                 client_ip = ""
             set_request_context(
@@ -10528,7 +10594,7 @@ class Handler(BaseHTTPRequestHandler):
                             or self.headers.get("X-Request-ID") or uuid.uuid4().hex),
                 client_ip=client_ip,
                 user_agent=self.headers.get("User-Agent") or "",
-                path=path,
+                path=path, key_id=self._key_id(),
             )
             # The body is intentionally unread: its model/stream are unknown.
             record_error("unknown", 503, message, stream=False, key=self._key_id())
@@ -10536,7 +10602,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._anthropic_error(503, message, "overloaded_error")
             return self._error(503, message)
         try:
-            payload = self._payload_or_error()
+            with wb_metrics.stage("parse_ms"):
+                payload = self._payload_or_error()
             if payload is None:
                 return
             protocol = ("messages" if is_messages_route else
@@ -10557,7 +10624,7 @@ class Handler(BaseHTTPRequestHandler):
         # Per-request archive context: a request id is always recorded; the
         # client IP/UA ride along only when the operator opted in.
         try:
-            client_ip = self.client_address[0] if self.client_address else ""
+            client_ip = self._client_ip()
         except Exception:
             client_ip = ""
         set_request_context(
@@ -10565,7 +10632,7 @@ class Handler(BaseHTTPRequestHandler):
                         or self.headers.get("X-Request-ID") or uuid.uuid4().hex),
             client_ip=client_ip,
             user_agent=self.headers.get("User-Agent") or "",
-            path=path,
+            path=path, key_id=self._key_id(),
         )
         # 先擋背景請求：Codex 自己發的（記憶整理／環境建議／自動複核）
         # 不算「使用者實際使用」，一律本地拒絕，不碰上游。
@@ -10583,7 +10650,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_responses(payload)
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
-        forwarded = build_upstream_body(payload)
+        with wb_metrics.stage("normalize_ms"):
+            forwarded = build_upstream_body(payload)
         given = client_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
         log(
@@ -10600,7 +10668,7 @@ class Handler(BaseHTTPRequestHandler):
         fp = prompt_fingerprint(forwarded.get("messages"))
         want_stream = bool(payload.get("stream"))
         model = payload.get("model") or "hy4-preview"
-        t_start = time.time()
+        t_start = wb_metrics.request_started_at()
         try:
             req_realm = self._request_realm() or CURRENT_REALM
             blocked = self._cross_realm_error(payload.get("model"), req_realm)
@@ -10661,7 +10729,7 @@ class Handler(BaseHTTPRequestHandler):
                 timing = wb_metrics.GenerationTiming(t_start)
                 streamed_text = []
                 try:
-                    for line in timing.wrap(writer.iterate(upstream)):
+                    for line in wb_protocol.checked_lines(timing.wrap(writer.iterate(upstream))):
                         data = strip_data_prefix(line.decode("utf-8", "replace"))
                         if not data or data == "[DONE]" or data.startswith(":"):
                             continue
@@ -10700,9 +10768,12 @@ class Handler(BaseHTTPRequestHandler):
                     wall = int((time.time() - t_start) * 1000)
                     record_error(model, 502, "stream aborted: %s" % exc,
                                  elapsed_ms=wall, account=account.uid, upstream=upstream,
-                                usage=last_usage, stream=True, **timing.fields(),
+                                usage=getattr(exc, "usage", None) or last_usage, stream=True, **timing.fields(),
                                  fp=fp, outcome="upstream_aborted", key=self._key_id())
                     try:
+                        error_frame = json.dumps({"error": {"message": str(exc), "type": "server_error",
+                                                            "code": "upstream_stream_error"}})
+                        writer.write(("data: " + error_frame + "\n\n").encode("utf-8"))
                         writer.write(b"data: [DONE]\n\n")
                         writer.flush()
                     except Exception:
@@ -10721,17 +10792,6 @@ class Handler(BaseHTTPRequestHandler):
                                  outcome="client_aborted", key=self._key_id(), effort=effort)
                     return
                 wall = int((time.time() - t_start) * 1000)
-                if last_usage is None or (last_usage.get("total_tokens") or 0) == 0:
-                    full_s = "".join(streamed_text)
-                    if full_s:
-                        comp = estimate_tokens(full_s)
-                        last_usage = {
-                            "prompt_tokens": max(1, comp // 2),
-                            "completion_tokens": comp,
-                            "total_tokens": max(1, comp // 2) + comp,
-                            "completion_tokens_details": {"reasoning_tokens": 0},
-                            "prompt_tokens_details": {"cached_tokens": 0},
-                        }
                 record_usage(model, last_usage, stream=True,
                              elapsed_ms=wall, **timing.fields(),
                              fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
@@ -10743,7 +10803,8 @@ class Handler(BaseHTTPRequestHandler):
             result = aggregate_stream(timing.wrap(upstream), model, None)
         except Exception as exc:
             record_error(model, 502, str(exc), elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=account.uid, upstream=upstream, key=self._key_id())
+                         account=account.uid, upstream=upstream, key=self._key_id(),
+                         usage=getattr(exc, "usage", None), **timing.fields(), fp=fp)
             return self._error(502, f"upstream stream error: {exc}")
         wall = int((time.time() - t_start) * 1000)
         record_usage(model, result.get("usage"), stream=False,
@@ -10892,11 +10953,15 @@ def _bootstrap_runtime(args):
             log("panel      : generated and saved a random password; admin is disabled")
     POOL = wb_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()
+    database.resolve_usage_realms(row_realm)
     POOL.apply_proxy_slots()
+    POOL.start_credential_refresh()
+    cfg = logging_config_cached()
+    wb_usage_store.schedule_export(database, USAGE_LOG, log=log,
+                                  max_mb=cfg["archive_max_mb"], retention_days=cfg["retention_days"])
+    wb_usage_store.start_retry_monitor(database, USAGE_LOG, logging_config_cached, log)
     POOL.apply_reserve_credits()
-    apply_daily_token_limit()
-    apply_daily_credit_limit()
-    apply_model_daily_token_limit()
+    apply_scheduling_limits()
     load_persisted_realm()
     global SCHEDULER, TASK_QUEUE
     from wb_scheduler import Scheduler
@@ -10945,7 +11010,7 @@ def _report_first_run(args):
 
 def _log_startup_summary(args, api_key_generated):
     rep = current_account()
-    log("accounts   : %d total, %d usable" % (len(POOL.accounts), POOL.count_ready()))
+    log("accounts   : %d total, %d usable" % (len(POOL.accounts), POOL.count_ready(allow_refresh=False)))
     for account in POOL.accounts:
         log("  - %s  %s  %s  %s" % (account.uid[:8], account.nickname or "(no name)",
                                     account.domain, wb_accounts._human_delta(
@@ -11014,7 +11079,7 @@ def _log_startup_summary(args, api_key_generated):
 
 def _serve_forever(args):
     try:
-        server = ThreadingHTTPServer((args.host, args.port), Handler)
+        server = wb_server.BoundedHTTPServer((args.host, args.port), Handler)
     except OSError as exc:
         # Port stolen between the probe above and this bind, or held by
         # something that does not answer /health: report it in plain words
@@ -11051,6 +11116,11 @@ def _serve_forever(args):
     finally:
         try:
             server.server_close()
+            if POOL:
+                POOL.stop_background()
+            wb_background.AFFINITY_WRITES.drain(3)
+            wb_usage_store.stop_monitor()
+            wb_usage_store.EXPORTS.drain(3)
         except Exception:
             pass
 

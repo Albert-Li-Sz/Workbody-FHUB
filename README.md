@@ -2,7 +2,7 @@
 
 WorkBuddy 国内与国际多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages，提供账号调度、渠道绑定、积分余额查询和实时用量控制台。
 
-当前版本 **1.1.1** · Python **3.9+** · 应用仅依赖 Python 标准库
+当前版本 **1.1.2** · Python **3.9+** · 应用仅依赖 Python 标准库
 
 [版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
@@ -13,7 +13,7 @@ WorkBuddy 国内与国际多账号网关。将已有账号接入 OpenAI Chat Com
 - **稳定流式生成**：三种生成协议支持 SSE，默认 15 秒无内容时发送心跳；配套 Nginx 关闭缓冲、延长流式读写超时。
 - **自动 HTTPS**：Nginx 自动检测公网 IP，签发并续签 Let’s Encrypt IP 证书；也可配置域名，每六小时检查续签并重载证书。
 - **本地持久化**：SQLite WAL 保存账号、优先级、设置、Key、用量和会话绑定；自动导入旧 JSON／JSONL，保留兼容导出。
-- **实时控制台**：中性色侧栏布局，支持手机、深浅主题、简繁体；SSE 推送刷新通知，断线重连和低频恢复刷新；Token 显示 `K/M/B`。
+- **实时控制台**：中性色侧栏布局，支持手机、深浅主题、简繁体；SSE 推送状态变化，账号分页与局部更新，断线重连和低频恢复刷新；Token 显示 `K/M/B`。
 - **协议兼容**：模型详情、渠道积分余额、按 Key 查询 Token；支持 DeepSeek、Kimi、千问及 OpenAI 旧版余额响应格式。
 - **Messages 联网搜索**：本地 DDG 执行与模型续轮，原生搜索结果及引用、DSH 文本兼容、搜索历史回放；支持次数限制与域名过滤，需开启面板本地网络工具。详见 [Messages 接入](docs/api.md#messages-搜索请求)。
 - 账号导入／导出、OAuth、代理槽、保留积分、每日限额、签到和任务调度；可选[本地网络工具](docs/research/web-search-support.md)。
@@ -64,7 +64,7 @@ Windows、macOS、Linux 启动脚本继续可用。面板密码和 API Key 分�
 在原安装目录执行，先保留旧 Compose 配置：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.1/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.2/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -101,7 +101,7 @@ curl https://<公网IP>/v1/models \
 
 ## 存储与 Redis
 
-数据库默认是 `accounts/workbody.sqlite3`；首次启动自动迁移旧文件，持续挂载原目录即可。SQLite 默认保留全部历史，`WB_SQLITE_RETENTION_DAYS` 可设置独立保留天数。价格政策历史仍在 `usage` 目录，应与数据库一起备份。
+数据库默认是 `accounts/workbody.sqlite3`；首次启动自动迁移旧文件，持续挂载原目录即可。请求用量先提交 SQLite，再经持久化队列后台导出 JSONL；统计不等待导出完成。SQLite 默认保留全部历史，`WB_SQLITE_RETENTION_DAYS` 可设置独立保留天数。价格政策历史仍在 `usage` 目录，应与数据库一起备份。
 
 **单实例无需 Redis。** SQLite 保存数据，进程内锁完成原子选号与结算。现有可选 Upstash Redis 配置仅镜像会话绑定；多副本部署还需要共享在途租约、计量与事件发布，当前不能靠打开该选项实现分布式公平调度。[存储与备份](docs/integration-plan.md#sqlite-迁移与备份)
 
@@ -109,7 +109,9 @@ curl https://<公网IP>/v1/models \
 
 应用无额外 pip 依赖；Nginx 镜像额外包含 Certbot。发布工作流同时构建两个镜像的 `linux/amd64`、`linux/arm64` 版本，验证后更新稳定标签，并在 [Release](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) 附带源码、升级脚本、SHA-256 和镜像摘要。
 
-应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.1.1`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.1`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 92 个套件：76 个 Python + 16 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。
+应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.1.2`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.2`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 94 个套件：77 个 Python + 17 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。
+
+提示词重试、首字耗时、连接与统计优化见[性能与可靠性说明](docs/performance.md)。
 
 界面设计记录见 [docs/ui-design.md](docs/ui-design.md)，部署参数、升级与回滚见[部署说明](docs/integration-plan.md)。
 

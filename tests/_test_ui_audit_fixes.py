@@ -148,8 +148,8 @@ class RouteContractTests(unittest.TestCase):
 
 class DashboardCoverageTests(unittest.TestCase):
     def setUp(self):
-        with open(os.path.join(ROOT, "dashboard.html"), encoding="utf-8") as fh:
-            self.html = fh.read()
+        from wb_dashboard import source_html
+        self.html = source_html(os.path.join(ROOT, "dashboard.html"))
 
     def test_all_advanced_setting_keys_are_in_dashboard(self):
         keys = set(wb_pool.DEFAULTS)

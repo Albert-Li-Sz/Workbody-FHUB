@@ -1,6 +1,6 @@
 # 部署、HTTPS 与数据迁移
 
-适用版本：**1.1.1**。协议见 [API 说明](api.md)，账号规则见[调度说明](account-scheduling.md)，旧安装见[升级与回滚](upgrading.md)。
+适用版本：**1.1.2**。协议见 [API 说明](api.md)，账号规则见[调度说明](account-scheduling.md)，旧安装见[升级与回滚](upgrading.md)。
 
 ## 公网 Docker Compose
 
@@ -107,6 +107,8 @@ Python 3.9+，无额外 pip 依赖。Windows、macOS、Linux 启动脚本继续�
 | `WB_HTTP_POOL_MAX` | `128` | 全局上游连接数上限 |
 | `WB_HTTP_POOL_PER_ROUTE` | `8` | 每个目标／账号／代理路由的连接上限 |
 | `WB_HTTP_POOL_IDLE` | `60` | 空闲连接淘汰秒数 |
+| `WB_HTTP_MAX_CONNECTIONS` | `128` | HTTP 已接受连接上限（含面板与 SSE，8–4096） |
+| `WB_TRUSTED_PROXIES` | Nginx 与 loopback | 仅可信来源的 `X-Real-IP` 参与登录限流与可选客户端日志 |
 | `WB_SSE_HEARTBEAT_SECONDS` | `15` | 生成流无内容时的心跳间隔 |
 | `WB_SQLITE_RETENTION_DAYS` | `0` | SQL 用量保留天数；`0` 保留全部历史 |
 | `WB_SQLITE_PATH` | `accounts/workbody.sqlite3` | 直接运行时可改路径；Compose 改路径时需同时添加环境与持久化挂载 |
@@ -152,7 +154,7 @@ docker compose start
 
 启用自动 HTTPS 使用 `--https`；默认不会更改原反代。数据库首次启动自动迁移，账号优先级和 Key 渠道保留。升级后的配置固定在私有 `compose.runtime.json`，使用 `docker compose -f compose.runtime.json` 管理；不要直接切换到新版默认 YAML。
 
-确认 `/health` 的版本为 `1.1.1`；启用证书服务后另行确认 `/tls/status` 为 `ready`。发布或拉取镜像不会自动改变正在运行的旧进程。
+确认 `/health` 的版本为 `1.1.2`；启用证书服务后另行确认 `/tls/status` 为 `ready`。发布或拉取镜像不会自动改变正在运行的旧进程。
 
 ### 回滚
 

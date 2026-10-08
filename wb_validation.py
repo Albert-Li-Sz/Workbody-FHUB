@@ -59,6 +59,14 @@ def validate_request(payload, protocol="chat"):
         raise RequestValidationError("model must be a non-empty string")
     if payload.get("stream") is not None and not isinstance(payload["stream"], bool):
         raise RequestValidationError("stream must be a boolean")
+    metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise RequestValidationError("metadata must be an object")
+    for source in (payload, metadata or {}):
+        for field in ("conversation_id", "session_id", "conversation_request_id"):
+            value = source.get(field)
+            if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 1024):
+                raise RequestValidationError("%s must be a non-empty string of at most 1024 characters" % field)
     for field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
         value = payload.get(field)
         if value is not None and (type(value) is not int or value <= 0):

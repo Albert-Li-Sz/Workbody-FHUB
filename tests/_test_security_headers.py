@@ -96,7 +96,7 @@ class DashboardNonceTests(unittest.TestCase):
         handler = render("<html><script>var a=1;</script>"
                          "<script>var b=2;</script></html>")
         body = handler.written.decode("utf-8")
-        nonces = re.findall(r'<script nonce="([^"]+)">', body)
+        nonces = re.findall(r'<script nonce="([^"]+)"', body)
         self.assertEqual(len(nonces), 2)
         self.assertEqual(nonces[0], nonces[1])
         csp = handler.headers_dict().get("content-security-policy", "")
@@ -105,17 +105,18 @@ class DashboardNonceTests(unittest.TestCase):
         self.assertIn("'nonce-%s'" % nonces[0], script_src)
         self.assertNotIn("'unsafe-inline'", script_src)
 
-    def test_unexpected_markup_keeps_the_inline_fallback(self):
+    def test_single_script_also_uses_nonce_and_immutable_asset(self):
         handler = render("<html><script>var a=1;</script></html>")
         body = handler.written.decode("utf-8")
-        self.assertNotIn("nonce=", body)
+        self.assertIn('nonce=', body)
+        self.assertIn('src="/assets/', body)
         csp = handler.headers_dict().get("content-security-policy", "")
         script_src = [part for part in csp.split(";") if "script-src" in part][0]
-        self.assertIn("'unsafe-inline'", script_src)
+        self.assertNotIn("'unsafe-inline'", script_src)
 
     def test_real_dashboard_matches_the_nonce_contract(self):
-        with open(os.path.join(ROOT, "dashboard.html"), encoding="utf-8") as fh:
-            markup = fh.read()
+        from wb_dashboard import source_html
+        markup = source_html(os.path.join(ROOT, "dashboard.html"))
         self.assertEqual(markup.count("<script>"), 2)
         self.assertEqual(len(INLINE_HANDLER.findall(markup)), 0)
 
