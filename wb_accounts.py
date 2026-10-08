@@ -330,6 +330,19 @@ def resolve_device_token(accounts_dir):
     return token
 
 
+DEFAULT_PRIORITY = 100
+MAX_PRIORITY = 2147483647
+
+
+def normalize_priority(value):
+    """Scheduling priorities are nonnegative integers; lower goes first."""
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        value = int(value.strip())
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_PRIORITY:
+        raise ValueError("priority must be an integer between 0 and %d" % MAX_PRIORITY)
+    return value
+
+
 class Account(object):
     def __init__(self, data, path=None):
         data = data or {}
@@ -370,6 +383,11 @@ class Account(object):
         # Runtime-resolved value; recomputed by AccountPool.apply_proxy_slots().
         self.proxy = self.proxy_legacy
         self.enabled = data.get("enabled", True)
+        self._priority_explicit = "priority" in data
+        try:
+            self.priority = normalize_priority(data.get("priority", DEFAULT_PRIORITY))
+        except ValueError:
+            self.priority = DEFAULT_PRIORITY
         self.last_error = str(data.get("lastError") or "")
         self.cooldown_until = float(data.get("cooldownUntil") or 0)
         # Per-model throttling. Upstream rate limits (code 6004 "usage exceeds
@@ -460,6 +478,7 @@ class Account(object):
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy_legacy,
             "enabled": self.enabled,
+            "priority": self.priority,
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
             "credits": self.credits,
@@ -495,6 +514,7 @@ class Account(object):
             "product": self.product,
             "enterpriseId": self.enterprise_id,
             "enabled": bool(self.enabled),
+            "priority": self.priority,
             "source": self.source,
             "proxySlot": self.proxy_slot,
             "proxy": wb_forward_proxy.redact_url(self.proxy),
@@ -1677,6 +1697,8 @@ class AccountPool(object):
         with self._lock:
             existing = self.get(account.uid)
             if existing is not None:
+                if not account._priority_explicit:
+                    account.priority = existing.priority
                 account.added_at = existing.added_at
                 account.path = existing.path
                 if not account.credits and existing.credits:
@@ -1791,6 +1813,21 @@ class AccountPool(object):
         account.save(self.dir)
         self.apply_proxy_slots()
         return account.public()
+
+    def set_priority(self, uid, priority):
+        priority = normalize_priority(priority)
+        with self._lock:
+            account = self.get(uid)
+            if account is None:
+                return None
+            previous = account.priority
+            account.priority = priority
+            try:
+                account.save(self.dir)
+            except Exception:
+                account.priority = previous
+                raise
+            return account.public()
 
     def set_proxy(self, uid, proxy):
         account = self.get(uid)
@@ -2110,8 +2147,17 @@ class AccountPool(object):
             bound_uid = self.affinity.get(session_key)
             if bound_uid and bound_uid not in exclude:
                 account = self.get(bound_uid)
-                if account and account.realm == realm and account.ready(model=model):
-                    return account
+                if account and (not realm or account.realm == realm) and account.ready(model=model):
+                    with self._lock:
+                        preferred = [a for a in self.accounts
+                                     if (not realm or a.realm == realm) and a.uid not in exclude
+                                     and getattr(a, "priority", DEFAULT_PRIORITY)
+                                     < getattr(account, "priority", DEFAULT_PRIORITY)]
+                        cfg = dict(self.pool_cfg)
+                    if cfg.get("weighted_pick", True):
+                        preferred = self._apply_credit_floor(preferred, model, cfg, now)
+                    if not any(a.ready(model=model) for a in preferred):
+                        return account
                 self.affinity.unbind(session_key)
         account = self.pick(realm=realm, exclude=exclude, model=model)
         if account and session_key and not fair_free:
@@ -2147,6 +2193,9 @@ class AccountPool(object):
         legacy cursor round-robin for anyone who wants the old order.
         Free catalogue models use a separate realm/model cursor by default;
         the cost ledger must not starve accounts that have not been tried yet.
+        Priority tiers are tried from low to high. Unavailable or protected
+        accounts do not prevent falling back to the next tier; within a tier
+        the existing free, weighted and cursor rules still apply.
         """
         exclude = exclude or set()
         now = time.time()
@@ -2157,43 +2206,49 @@ class AccountPool(object):
             cfg = dict(self.pool_cfg)
         if not snapshot:
             return None
-        if cfg.get("weighted_pick", True):
-            candidates = [a for a in snapshot if a.ready(model=model)]
-            if not candidates:
-                return None
-            catalogue_free = [a for a in candidates
-                              if a.model_is_free(model) and self._model_free_for(a, model, now)]
-            if cfg.get("free_fair_pick", True) and catalogue_free:
-                account = self._pick_fair_free(catalogue_free, realm, model)
-                account.last_used_at = now
-                return account
-            candidates = self._apply_cost_layer(candidates, model, cfg, now)
-            candidates = self._apply_credit_floor(candidates, model, cfg, now)
-            if not candidates:
-                return None
-            free_candidates = [a for a in candidates if self._model_free_for(a, model, now)]
-            if cfg.get("free_fair_pick", True) and free_candidates:
-                account = self._pick_fair_free(free_candidates, realm, model)
+        tiers = {}
+        for candidate in snapshot:
+            tiers.setdefault(getattr(candidate, "priority", DEFAULT_PRIORITY), []).append(candidate)
+        account = None
+        for priority in sorted(tiers):
+            tier = tiers[priority]
+            if cfg.get("weighted_pick", True):
+                candidates = [a for a in tier if a.ready(model=model)]
+                if not candidates:
+                    continue
+                catalogue_free = [a for a in candidates
+                                  if a.model_is_free(model) and self._model_free_for(a, model, now)]
+                if cfg.get("free_fair_pick", True) and catalogue_free:
+                    account = self._pick_fair_free(catalogue_free, realm, model)
+                else:
+                    candidates = self._apply_cost_layer(candidates, model, cfg, now)
+                    candidates = self._apply_credit_floor(candidates, model, cfg, now)
+                    if not candidates:
+                        continue
+                    free_candidates = [a for a in candidates if self._model_free_for(a, model, now)]
+                    if cfg.get("free_fair_pick", True) and free_candidates:
+                        account = self._pick_fair_free(free_candidates, realm, model)
+                    else:
+                        account = wb_pool.choose(candidates, cfg, now=now)
             else:
-                account = wb_pool.choose(candidates, cfg, now=now)
-        else:
-            if cfg.get("free_fair_pick", True):
-                free_candidates = [a for a in snapshot
-                                   if self._model_free_for(a, model, now) and a.ready(model=model)]
-                if free_candidates:
-                    account = self._pick_fair_free(free_candidates, realm, model)
-                    account.last_used_at = now
-                    return account
-            total = len(snapshot)
-            account = None
-            for offset in range(total):
-                index = (start + offset) % total
-                cand = snapshot[index]
-                if cand.ready(model=model):
-                    account = cand
-                    with self._lock:
-                        self._cursor = (index + 1) % total
-                    break
+                if cfg.get("free_fair_pick", True):
+                    free_candidates = [a for a in tier
+                                       if self._model_free_for(a, model, now) and a.ready(model=model)]
+                    if free_candidates:
+                        account = self._pick_fair_free(free_candidates, realm, model)
+                if account is None:
+                    total = len(snapshot)
+                    tier_uids = {a.uid for a in tier}
+                    for offset in range(total):
+                        index = (start + offset) % total
+                        cand = snapshot[index]
+                        if cand.uid in tier_uids and cand.ready(model=model):
+                            account = cand
+                            with self._lock:
+                                self._cursor = (index + 1) % total
+                            break
+            if account is not None:
+                break
         if account is not None:
             account.last_used_at = now
         return account
@@ -2661,7 +2716,7 @@ def normalise_import_row(row, realm=None):
     if not uid:
         raise ValueError("cannot determine uid (no uid field and no sub claim)")
 
-    return {
+    imported = {
         "uid": uid,
         "nickname": str(pick("nickname") or ""),
         "domain": domain_for_realm(detected, pick("domain")),
@@ -2683,3 +2738,7 @@ def normalise_import_row(row, realm=None):
         "lastError": "",
         "cooldownUntil": 0.0,
     }
+    priority = pick("priority")
+    if priority is not None:
+        imported["priority"] = normalize_priority(priority)
+    return imported

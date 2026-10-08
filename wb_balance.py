@@ -160,7 +160,24 @@ class ChannelBalances:
 
 
 def billing_response(summary, kind):
-    """Legacy OpenAI billing shapes; amounts remain WorkBuddy credit units."""
+    """Client billing shapes; amounts remain WorkBuddy credit units."""
+    if kind in ("deepseek", "billing_balance"):
+        if not summary["complete"] or summary["total_remain"] is None:
+            return None
+        response = dict(summary)
+        if kind == "billing_balance":
+            response["balance"] = summary["total_remain"]
+        else:
+            amount = format(_amount(summary["total_remain"]), ".2f")
+            # USD is a protocol label so clients do not apply a CNY exchange
+            # rate to points. The outer currency still declares credits.
+            # WorkBuddy has no prepaid cash wallet; report the credit grant
+            # as one balance, without claiming a topped-up cash amount.
+            response.update(is_available=summary["total_remain"] > 0,
+                            balance_infos=[{"currency": "USD", "total_balance": amount,
+                                            "granted_balance": amount,
+                                            "topped_up_balance": "0.00"}])
+        return response
     if not summary["complete"] or summary["total_used"] is None or summary["total_granted"] is None:
         return None
     response = dict(summary)

@@ -1,7 +1,7 @@
 # Workbody-FHUB — WorkBuddy 国内与国际多账号网关
 
 <p align="center">
-  <a href="https://github.com/Albert-Li-Sz/Workbody-FHUB/releases"><img src="https://img.shields.io/badge/Workbody_FHUB-v1.0.3-2496ED?style=flat-square" alt="Workbody-FHUB 1.0.3"></a>
+  <a href="https://github.com/Albert-Li-Sz/Workbody-FHUB/releases"><img src="https://img.shields.io/badge/Workbody_FHUB-v1.0.4-2496ED?style=flat-square" alt="Workbody-FHUB 1.0.4"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Vibe_Coding-100%25-ff69b4?style=flat-square" alt="Vibe Coding">
 </p>
 
-Workbody-FHUB 是 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 的衍生项目，当前版本 **1.0.3**，基于上游 **1.6.13**。本衍生项目沿用目标仓库的 [Apache-2.0 许可证](LICENSE)；原项目的 Vibe Coding 声明、致谢、贡献者、免责声明和 [MIT 许可证原文](LICENSE.upstream)均保留。本分支负责自己的安全修复、网络搜索和镜像构建。
+Workbody-FHUB 是 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 的衍生项目，当前版本 **1.0.4**，基于上游 **1.6.13**。本衍生项目沿用目标仓库的 [Apache-2.0 许可证](LICENSE)；原项目的 Vibe Coding 声明、致谢、贡献者、免责声明和 [MIT 许可证原文](LICENSE.upstream)均保留。本分支负责自己的安全修复、网络搜索和镜像构建。
 
 把腾讯 **[www.workbuddy.ai](https://www.workbuddy.ai)**（国际版）与 **[codebuddy.cn](https://www.codebuddy.cn)**（国内版）的原生服务封装成标准 OpenAI 兼容接口（Chat Completions 与 Responses API），并补齐多账号调度与运维能力：
 
@@ -98,7 +98,7 @@ Unix 系统上的账号目录权限为 `0700`，凭证和 Key 设置文件权限
 
 ### 5. Workbody-FHUB Docker 镜像
 
-云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.3`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
+云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.4`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
 
 ```bash
 docker compose pull
@@ -124,21 +124,21 @@ docker compose up -d
 
 ```bash
 # 独立构建及保存，便于向其他服务器导入
-docker build -t workbody-fhub:1.0.3 .
-docker save workbody-fhub:1.0.3 | gzip > workbody-fhub-1.0.3.tar.gz
-# 目标主机：docker load < workbody-fhub-1.0.3.tar.gz
+docker build -t workbody-fhub:1.0.4 .
+docker save workbody-fhub:1.0.4 | gzip > workbody-fhub-1.0.4.tar.gz
+# 目标主机：docker load < workbody-fhub-1.0.4.tar.gz
 ```
 
 构建双架构镜像并验证两种架构的启动、鉴权和关键回归：
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t workbody-fhub:1.0.3 --load .
-python3 scripts/verify_image.py workbody-fhub:1.0.3 --non-root
+docker buildx build --platform linux/amd64,linux/arm64 -t workbody-fhub:1.0.4 --load .
+python3 scripts/verify_image.py workbody-fhub:1.0.4 --non-root
 ```
 
 验证脚本使用隔离的临时数据卷与 `--network none`，结束后清理测试容器。审计发现、修复证据和剩余验证边界见[修复报告](docs/project-repair-2026-10-07.md)。
 
-发布流程先校验统一版本与测试，再构建并推送两种架构的固定版本镜像；成品通过启动、鉴权、关键回归及普通 UID 验证后，再更新 `latest`。配置 Docker Hub 凭据时也发布同名镜像。验证已有云镜像可增加 `--revision v1.0.3 --pull`，按指定 release 比对源码。镜像包含 release 源码及两份许可证。
+发布流程先校验统一版本与测试，再构建并推送两种架构的固定版本镜像；成品通过启动、鉴权、关键回归及普通 UID 验证后，再更新 `latest`。配置 Docker Hub 凭据时也发布同名镜像。验证已有云镜像可增加 `--revision v1.0.4 --pull`，按指定 release 比对源码。镜像包含 release 源码及两份许可证。
 
 ### 6. 测试
 
@@ -322,6 +322,35 @@ curl http://127.0.0.1:8788/v1/balance \
 
 兼容经典中转站客户端的 `GET /dashboard/billing/credit_grants`、`/dashboard/billing/subscription`、`/dashboard/billing/usage`，三个路径也均支持 `/v1` 前缀，使用相同的 Key、渠道范围及刷新参数。账单格式参考 [One API](https://github.com/songquanpeng/one-api/blob/main/controller/billing.go)。`credit_grants.total_available` 返回剩余积分；`subscription.hard_limit_usd` 返回剩余积分加当前权益包已用积分，`usage.total_usage` 返回当前权益包已用积分乘 100，客户端按 `hard_limit_usd - total_usage / 100` 得到剩余积分。所有金额字段的单位均为积分，`*_usd` 仅保留兼容字段名，未折算美元；用量是当前权益包快照，日期参数不用于历史区间统计。余额或已用积分不完整时，兼容接口返回 HTTP 503，具体状态可通过 `/v1/balance` 查询。
 
+#### DeepSeek 与 billing 接口
+
+`GET /user/balance` 与 `/v1/user/balance` 使用 [DeepSeek 余额格式](https://api-docs.deepseek.com/api/get-user-balance/)，返回 Key 对应渠道全部账号的剩余积分（包含停用账号），不返回账号身份或凭据。例如剩余积分为 1234.5 时，兼容字段如下；响应还带有上述汇总与完整程度字段：
+
+```json
+{
+  "currency": "credits",
+  "is_available": true,
+  "balance_infos": [{
+    "currency": "USD",
+    "total_balance": "1234.50",
+    "granted_balance": "1234.50",
+    "topped_up_balance": "0.00"
+  }]
+}
+```
+
+金额字段均为两位小数的字符串，单位仍为积分；内层 `USD` 是协议兼容标签，避免客户端把积分按 CNY 汇率换算，不代表美元现金。积分总额放在 `granted_balance`，不拆分现金充值余额；`is_available` 表示剩余积分大于 0。余额未知或刷新失败时返回 503，已用积分未知不影响此接口。刷新参数与 `/v1/balance` 相同。
+
+`GET /api/billing/balance` 返回同一渠道的汇总，另提供数值型 `balance` 字段，单位为积分；不完整时返回 503。`GET /api/billing/usage` 返回当前 API Key 在对应渠道的 `prompt_tokens`、`completion_tokens`、`reasoning_tokens`、`cached_tokens`、`total_tokens`、`requests` 和 `errors`，不返回其他 Key 或账号明细。默认统计现存日志的全部历史；支持 `?range=today`、`week`、`month`、`all` 和 `custom&since=<epoch秒>&until=<epoch秒>`，响应 `window` 表明实际区间，缓存沿用指标页的短期缓存。Token 口径沿用指标页，不把思考 Token 再加到已包含它的输出 Token 上。两个 billing 路径也支持 `/v1` 前缀。
+
+上述接口即使关闭模型请求的 Key 校验，也始终要求有效 API Key。未绑定出口的 Key 跟随面板当前渠道，`X-Realm`、`realm` 和 `channel` 参数不能扩大余额或用量查询范围。
+
+#### 账号优先级与 Token 显示
+
+账号页的「优先级」列可直接输入 0 至 2147483647 的整数，修改后自动保存；默认 100。数字越小越早调用，当前优先级内没有可用账号时再尝试下一优先级。区域、停用、冷却、额度与模型限制继续生效；同一优先级内维持免费模型的区域独立公平轮询、收费模型的加权／轮询与会话绑定。较小数字的账号恢复可用后，后续请求优先使用它，已有会话也会重新绑定。配置随账号保存、重启和导入导出保留。管理 API 可通过 `POST /accounts/set` 传入 `{"uid":"账号UID","priority":10}` 修改。
+
+看板的 Token 数量自动使用 K／M／B（1000／100万／10亿），最多保留两位小数；统计、API 与导出保持原始数值。积分、费用和请求次数仍使用各自的原有显示格式。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | / | Web 用量与任务监控看板 |
@@ -330,7 +359,11 @@ curl http://127.0.0.1:8788/v1/balance \
 | POST | /v1/messages | 原生 Anthropic Messages 协议接口（流式 / 非流式，`x-api-key` 或 `Authorization` 鉴权） |
 | POST | /v1/messages/count_tokens | Anthropic 计数接口（CJK 感知估算值，非官方分词器） |
 | GET | /v1/models | 官方对齐模型列表（含能力与规格宣告） |
+| GET | /v1/models/{id} | 当前渠道的单个模型详情；支持 URL 编码的模型 ID，不存在时返回 404 |
 | GET | /v1/balance | API Key 对应渠道的积分总和与完整程度（API Key 鉴权） |
+| GET | /user/balance | DeepSeek 余额格式，也支持 /v1/user/balance（API Key 鉴权） |
+| GET | /api/billing/balance | Key 对应渠道的余额，balance 为剩余积分（API Key 鉴权） |
+| GET | /api/billing/usage | 当前 Key 对应渠道的 Token 消耗及区间（API Key 鉴权） |
 | GET | /v1/dashboard/billing/credit_grants | 经典中转站余额格式，`total_available` 为剩余积分 |
 | GET | /v1/dashboard/billing/subscription | 经典中转站额度格式（积分单位） |
 | GET | /v1/dashboard/billing/usage | 经典中转站用量格式（当前权益包已用积分 × 100） |
@@ -348,6 +381,13 @@ curl http://127.0.0.1:8788/v1/balance \
 ---
 
 ## 六、Workbody-FHUB 更新记录
+
+### 1.0.4
+
+- 新增 DeepSeek `user/balance` 余额格式、`api/billing/balance` 余额查询与 `api/billing/usage` Token 消耗查询；支持裸路径与 `/v1` 前缀，按有效 Key 限定查询范围。
+- 新增 `GET /v1/models/{id}`，返回与模型列表一致的单个模型详情，未知 ID 返回 404。
+- 增加持久化账号调度优先级，数字越小越早调用；不可用时依次回退，同优先级保留原调度规则，账号页可直接修改。
+- Token 数量统一自动显示为 K／M／B，覆盖用量、账号、模型、请求和趋势图；原始 API 与导出数值保持不变。
 
 ### 1.0.3
 

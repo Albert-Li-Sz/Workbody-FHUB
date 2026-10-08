@@ -186,17 +186,22 @@ CORS_PATH_PREFIXES = ("/v1", "/chat", "/completions", "/models", "/responses")
 # /v1/usage reports account-level spend and is gated by the panel session.
 MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
                             "/tasks", "/scheduler", "/panel", "/logs")
-CLIENT_BALANCE_ROUTES = {"/balance": "balance", "/v1/balance": "balance"}
+CLIENT_BALANCE_ROUTES = {"/balance": "balance", "/v1/balance": "balance",
+                         "/user/balance": "deepseek", "/v1/user/balance": "deepseek",
+                         "/api/billing/balance": "billing_balance",
+                         "/v1/api/billing/balance": "billing_balance"}
 for _billing_prefix in ("/dashboard/billing/", "/v1/dashboard/billing/"):
     for _billing_kind in ("credit_grants", "subscription", "usage"):
         CLIENT_BALANCE_ROUTES[_billing_prefix + _billing_kind] = _billing_kind
+CLIENT_USAGE_ROUTES = frozenset(("/api/billing/usage", "/v1/api/billing/usage"))
+CLIENT_BILLING_PATHS = frozenset(CLIENT_BALANCE_ROUTES) | CLIENT_USAGE_ROUTES
 CLIENT_BALANCES = wb_balance.ChannelBalances()
 def cors_origin_allowed(path):
     """True when the OpenAI-style API path should advertise CORS."""
     path = (path or "").split("?")[0]
     if path.startswith(MANAGEMENT_PATH_PREFIXES):
         return False
-    return path in CLIENT_BALANCE_ROUTES or path.startswith(CORS_PATH_PREFIXES)
+    return path in CLIENT_BILLING_PATHS or path.startswith(CORS_PATH_PREFIXES)
 _lock = threading.Lock()
 _login_lock = threading.Lock()
 _chat_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CHAT)
@@ -7273,7 +7278,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
-        if (getattr(self, "path", "") or "").split("?")[0] in CLIENT_BALANCE_ROUTES:
+        if (getattr(self, "path", "") or "").split("?")[0] in CLIENT_BILLING_PATHS:
             self.send_header("Cache-Control", "no-store")
         if self.close_connection:
             self.send_header("Connection", "close")
@@ -7608,8 +7613,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_realm()
         if path in CLIENT_BALANCE_ROUTES:
             return self._get_client_balance(query, CLIENT_BALANCE_ROUTES[path])
+        if path in CLIENT_USAGE_ROUTES:
+            return self._get_client_usage(query)
         if path in ("/v1/models", "/models"):
             return self._get_v1_models()
+        for prefix in ("/v1/models/", "/models/"):
+            if path.startswith(prefix):
+                return self._get_v1_models(urllib.parse.unquote(path[len(prefix):]))
         if path in ("/usage", "/v1/usage"):
             return self._get_v1_usage(query)
         if path == "/usage/recent":
@@ -7699,7 +7709,7 @@ class Handler(BaseHTTPRequestHandler):
     def _get_realm(self):
         return self._json(200, {"current": CURRENT_REALM, "options": ["intl", "cn"]})
 
-    def _get_v1_models(self):
+    def _get_v1_models(self, model_id=None):
         if not self._authorized():
             return
         query = parse_qs(urlparse(self.path).query)
@@ -7724,6 +7734,11 @@ class Handler(BaseHTTPRequestHandler):
         if selected:
             for item in data:
                 item["channel"] = selected
+        if model_id is not None:
+            for item in data:
+                if item["id"] == model_id:
+                    return self._json(200, item)
+            return self._error(404, "model not found", "invalid_request_error")
         return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM,
                                 "channel": selected, "source": "workbuddy"})
 
@@ -7762,18 +7777,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         return self._json(200, wb_balance.summarize(list(POOL.accounts) if POOL else []))
 
-    def _get_client_balance(self, query, kind):
+    def _client_billing_realm(self):
         # Always identify the supplied API key, including when a panel session
         # is also present or authentication for model calls has been disabled.
         self.key_entry = identify_key(self._supplied_key())
         if not self.key_entry:
-            return self._error(401, "a valid API key is required for balance queries",
-                               "invalid_request_error")
+            self._error(401, "a valid API key is required for billing queries",
+                        "invalid_request_error")
+            return None
         # Balance scope comes only from the key binding and the global switch.
         # A caller cannot use X-Realm, ?realm= or ?channel= to query another pool.
         realm = self._key_realm() or CURRENT_REALM
         if realm not in ("cn", "intl"):
-            return self._error(503, "the current channel is not configured correctly")
+            self._error(503, "the current channel is not configured correctly")
+            return None
+        return realm
+
+    def _get_client_balance(self, query, kind):
+        realm = self._client_billing_realm()
+        if realm is None:
+            return
         value = (query.get("refresh") or [""])[0].lower()
         if value not in ("", "1", "true", "yes", "0", "false", "no"):
             return self._error(400, "refresh must be 1 or 0", "invalid_request_error")
@@ -7785,6 +7808,24 @@ class Handler(BaseHTTPRequestHandler):
         if response is None:
             return self._error(503, "channel balance is incomplete; query /v1/balance "
                                "for unknown and failed account counts", "balance_unavailable")
+        return self._json(200, response)
+
+    def _get_client_usage(self, query):
+        realm = self._client_billing_realm()
+        if realm is None:
+            return
+        req_range, req_since, req_until = range_query(query)
+        analytics = compute_usage_analytics(realm=realm, range=req_range,
+                                            since=req_since, until=req_until)
+        entry = next((row for row in analytics["keys"] if row["key"] == self._key_id()), None)
+        stats = entry["window"] if entry else _new_analytics_stat()
+        # An allowlist keeps account identities, other keys and log paths out
+        # of the public endpoint, including when the shared cache is reused.
+        response = {name: stats[name] for name in ("requests", "errors", "prompt_tokens",
+                    "completion_tokens", "reasoning_tokens", "cached_tokens", "total_tokens")}
+        response.update(ok=True, object="usage", unit="tokens", realm=realm,
+                        channel={"cn": "workbuddy-cn", "intl": "workbuddy-intl"}[realm],
+                        window=analytics["window"])
         return self._json(200, response)
 
     def _route_accounts_balance(self):
@@ -9338,9 +9379,20 @@ class Handler(BaseHTTPRequestHandler):
         uid = payload.get("uid")
         if not uid:
             return self._error(400, "uid required")
+        priority = None
+        if "priority" in payload:
+            try:
+                priority = wb_accounts.normalize_priority(payload["priority"])
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
         # Each field is applied on its own so a caller can change one thing
         # without restating the others; at least one must be present.
         updated = None
+        if priority is not None:
+            updated = POOL.set_priority(uid, priority)
+            if updated is None:
+                return self._error(404, "no such account")
+            log("account %s priority set to %d" % (uid[:8], priority))
         if "proxySlot" in payload:
             updated = POOL.set_proxy_slot(uid, payload.get("proxySlot"))
             if updated is None:
@@ -9361,7 +9413,7 @@ class Handler(BaseHTTPRequestHandler):
                 % (uid[:8], "enabled" if payload.get("enabled") else "disabled"))
         if updated is None:
             return self._error(
-                400, "nothing to update: pass 'enabled', 'proxy' or 'proxySlot'"
+                400, "nothing to update: pass 'enabled', 'proxy', 'proxySlot' or 'priority'"
             )
         return self._json(200, {"account": updated})
 

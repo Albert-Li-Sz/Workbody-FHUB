@@ -2151,11 +2151,7 @@ function renderAvailableModels(){
     }
     const capHtml = caps.length ? caps.join(' ') : '<span style="color:var(--dim)">—</span>';
 
-    const fmtK = v => {
-      if(!v) return '-';
-      const k = Math.round(v / 1000);
-      return k >= 1000 ? (k / 1000) + 'M' : k + 'K';
-    };
+    const fmtK = v => v ? fmtTokens(v) : '-';
 
     // 3. 上下文窗口
     let ctx = '-';
@@ -2611,6 +2607,21 @@ async function doDailyChatWeb(btn){
 }
 
 const fmt = n => (n ?? 0).toLocaleString('en-US');
+function fmtTokens(n){
+  const value = Number(n ?? 0);
+  if(!Number.isFinite(value)) return '—';
+  if(Math.abs(value) < 1000) return fmt(value);
+  const scales = [1000, 1000000, 1000000000];
+  const units = ['K', 'M', 'B'];
+  let index = Math.abs(value) >= scales[2] ? 2 : Math.abs(value) >= scales[1] ? 1 : 0;
+  let scaled = value / scales[index];
+  // Rounding 999.999K should display 1M, rather than 1,000K.
+  if(index < 2 && Math.abs(Number(scaled.toFixed(2))) >= 1000){
+    index += 1;
+    scaled = value / scales[index];
+  }
+  return scaled.toLocaleString('en-US', {maximumFractionDigits: 2}) + units[index];
+}
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ms = v => v == null ? '—' : (v >= 1000 ? (v/1000).toFixed(2) + ' s' : Math.round(v) + ' ms');
 const pct = v => v == null ? '—' : v.toFixed(1) + '%';
@@ -2829,11 +2840,11 @@ function costToggleHtml(){
 // 输入 / 输出 / 思考 三个数字，各自一色，斜杠分隔。思考为 0 也写出来，
 // 列的形状因此固定，不会因某个模型不推理就缩短。
 const tripleTokens = (inp, out, think) =>
-  '<span style="color:var(--accent)">' + fmt(inp || 0) + '</span>' +
+  '<span style="color:var(--accent)">' + fmtTokens(inp || 0) + '</span>' +
   ' <span style="color:var(--dim-light)">/</span> ' +
-  '<span style="color:var(--accent2)">' + fmt(out || 0) + '</span>' +
+  '<span style="color:var(--accent2)">' + fmtTokens(out || 0) + '</span>' +
   ' <span style="color:var(--dim-light)">/</span> ' +
-  '<span style="color:var(--think)">' + fmt(think || 0) + '</span>';
+  '<span style="color:var(--think)">' + fmtTokens(think || 0) + '</span>';
 
 function perfRow(label, b, unit, fmtFn, color){
   if(!b) return '<tr><td>' + label + '</td><td colspan="5" style="color:var(--dim)">暂无数据</td></tr>';
@@ -2979,7 +2990,7 @@ function modelLimitPills(a){
   if(!hit.length) return '';
   return '<div class="cool-list">' + hit.map(([mid, v]) =>
     '<span class="cool-pill" title="该模型今日已达限额，仅此模型受限（本地 0 点恢复）">'
-      + esc(mid) + ' · ' + fmt(v) + ' tok 达限</span>'
+      + esc(mid) + ' · ' + fmtTokens(v) + ' tok 达限</span>'
   ).join('') + '</div>';
 }
 
@@ -3001,7 +3012,7 @@ function accountRow(a){
               : a.breakerFor > 0 ? '<span class="badge bad">熔断 ' + a.breakerFor + 's</span>'
               : a.degradeFor > 0 ? '<span class="badge warn">降权 ' + a.degradeFor + 's</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
-              : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmt(a.dailyTokensToday || 0) + ' / ' + fmt(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
+              : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmtTokens(a.dailyTokensToday || 0) + ' / ' + fmtTokens(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
               : a.creditLimitReached ? '<span class="badge warn" title="今日已消费 ' + Number(a.dailyCreditsToday || 0).toFixed(2) + ' / ' + (a.dailyCreditLimit || 0) + ' 积分，仅免费模型可用（本地 0 点恢复）">积分限额</span>'
               : a.inCooldown ? '<span class="badge warn">冷却 ' + (a.cooldownFor||0) + 's</span>'
               : a.expiresIn === 'expired' ? '<span class="badge bad">已过期</span>'
@@ -3043,10 +3054,14 @@ function accountRow(a){
     + err + pills + limitPills + '</td>'
     + '<td style="text-align:center" data-label="状态">' + state + flight + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
+    + '<td style="text-align:center" data-label="优先级">'
+    + '<input type="number" min="0" max="2147483647" step="1" value="' + (a.priority ?? 100)
+    + '" aria-label="账号调度优先级" title="数字越小越早调用；修改后自动保存" style="width:76px"'
+    + ' data-action="setAccountPriority" data-on="change" data-uid="' + uidAttr + '"></td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
     + '<td style="text-align:right" data-label="请求">' + fmt(usage.requests) + '</td>'
-    + '<td style="text-align:right" data-label="总 token">' + fmt(usage.total_tokens) + '</td>'
-    + '<td style="text-align:right" data-label="缓存">' + fmt(usage.cached_tokens) + '</td>'
+    + '<td style="text-align:right" data-label="总 token">' + fmtTokens(usage.total_tokens) + '</td>'
+    + '<td style="text-align:right" data-label="缓存">' + fmtTokens(usage.cached_tokens) + '</td>'
     + '<td class="acct-actions" style="text-align:center;white-space:nowrap;vertical-align:middle">'
     + '<div class="acct-actions-col">'
     +   '<div class="acct-actions-row">'
@@ -3072,12 +3087,16 @@ function accountRow(a){
 
 function renderAccounts(){
   const box = document.getElementById('accounts');
+  const active = document.activeElement;
+  if(active && typeof box.contains === 'function' && box.contains(active)
+      && active.dataset && active.dataset.action === 'setAccountPriority') return;
   const currentView = (window.VIEW_REALM || "intl");
   let list = (window.ACCOUNTS || []).filter(a => (a.realm || 'intl') === currentView);
-  // Enabled accounts first; disabled ones sink to the bottom. Within each
-  // group keep the server order stable so the table does not jump around.
+  // Enabled accounts first, then scheduling priority; ties retain server order.
   list = list.map((a, i) => [a, i])
-    .sort((x, y) => (x[0].enabled === y[0].enabled) ? (x[1] - y[1]) : (x[0].enabled ? -1 : 1))
+    .sort((x, y) => (x[0].enabled === y[0].enabled)
+      ? ((x[0].priority ?? 100) - (y[0].priority ?? 100) || x[1] - y[1])
+      : (x[0].enabled ? -1 : 1))
     .map(pair => pair[0]);
   const usable = list.filter(a => a.enabled).length;
   const viewName = currentView === 'cn' ? '国内版' : '国际版';
@@ -3101,6 +3120,7 @@ function renderAccounts(){
     + '<th style="text-align:left">账号</th>'
     + '<th style="text-align:center;width:84px">状态</th>'
     + '<th style="text-align:center;width:150px">出口</th>'
+    + '<th style="text-align:center;width:94px">优先级</th>'
     + '<th style="text-align:left;width:120px">积分</th>'
     + '<th style="text-align:right;width:70px">请求</th>'
     + '<th style="text-align:right;width:88px">总 token</th>'
@@ -3108,7 +3128,7 @@ function renderAccounts(){
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
     + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额渠道。</span></div>'
-    + '<div class="legend"><span>免费模型在当前区域内公平轮询；收费模型沿用选号与会话粘性设置。上游拒绝时自动切换可用账号。</span></div>';
+    + '<div class="legend"><span>优先级默认 100，数字越小越早调用，修改后自动保存；当前优先级没有可用账号时切到下一优先级。同一优先级内，免费模型按区域公平轮询，收费模型沿用选号与会话粘性设置。</span></div>';
 }
 
 async function loadAccounts(){
@@ -3190,6 +3210,27 @@ async function toggleAccount(uid, enable, btn){
     toast('操作失败: ' + e.message, 'bad');
   }finally{
     if(btn) btn.disabled = false;
+  }
+}
+async function setAccountPriority(uid, el){
+  const account = (window.ACCOUNTS || []).find(a => a.uid === uid);
+  const previous = account ? (account.priority ?? 100) : 100;
+  const value = Number(el.value);
+  if(!el.value.trim() || !Number.isInteger(value) || value < 0 || value > 2147483647){
+    el.value = previous;
+    toast('优先级须为 0 至 2147483647 的整数', 'warn');
+    return;
+  }
+  el.disabled = true;
+  try{
+    await postJSON('/accounts/set', {uid: uid, priority: value});
+    toast('账号优先级已保存', 'ok');
+    await loadAccounts();
+  }catch(e){
+    el.value = previous;
+    toast('优先级保存失败: ' + e.message, 'bad');
+  }finally{
+    el.disabled = false;
   }
 }
 async function setAccountProduct(uid, prod, btn){
@@ -4207,7 +4248,7 @@ async function refreshInner(gen){
   document.getElementById('cards').innerHTML =
     card('可用账号池', activeAccts + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">/ ' + totalAccts + ' 正常</span>', poolSub, 'accent') +
     card('积分余额', hasCreds ? (fmt(totRemain) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">积分</span>') : '正常可用', subCredit, 'accent2') +
-    card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '本出口累计消耗 ' + fmt(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
+    card('网关调用量', fmt(t.requests) + ' <span style="font-size:13px;font-weight:400;color:var(--dim)">次</span>', '本出口累计消耗 ' + fmtTokens(t.total_tokens) + ' Token · ' + Number(t.credit || 0).toFixed(2) + ' 积分', '') +
     card('OpenRouter 价估算', fmtCost(t.cost_cny), '按 OpenRouter 模型价折算的等价 token 花费' + costToggleHtml(), 'warn') +
     card('请求成功率', succStr, errSub, perf.errors ? 'warn' : 'accent2');
 
@@ -4276,11 +4317,11 @@ async function refreshInner(gen){
         + '<td data-label="耗时">' + (r.elapsed_ms!=null ? fmt(r.elapsed_ms)+' ms' : '—') + '</td>'
         + '<td data-label="首字">' + (r.ttft_ms!=null ? fmt(r.ttft_ms)+' ms' : '—') + '</td>'
         + '<td data-label="速度">' + (r.tokens_per_sec ? r.tokens_per_sec.toFixed(1) : '—') + '</td>'
-        + '<td data-label="输入">' + fmt(r.prompt_tokens) + '</td>'
-        + '<td data-label="输出">' + fmt(r.completion_tokens) + '</td>'
-        + '<td style="color:var(--think)" data-label="思考">' + fmt(r.reasoning_tokens) + '</td>'
+        + '<td data-label="输入">' + fmtTokens(r.prompt_tokens) + '</td>'
+        + '<td data-label="输出">' + fmtTokens(r.completion_tokens) + '</td>'
+        + '<td style="color:var(--think)" data-label="思考">' + fmtTokens(r.reasoning_tokens) + '</td>'
         + '<td data-label="缓存">' + (r.cache_hit_pct!=null ? r.cache_hit_pct+'%' : '—') + '</td>'
-        + '<td data-label="总 token"><b>' + fmt(r.total_tokens) + '</b></td>'
+        + '<td data-label="总 token"><b>' + fmtTokens(r.total_tokens) + '</b></td>'
         + '<td data-label="积分" style="color:var(--accent2)">' + (r.credit != null ? Number(r.credit).toFixed(2) : '—') + '</td>'
         + '<td data-label="OpenRouter 价估算" class="cost-cell" style="color:var(--warn)" data-cost-key="' + esc(costKey) + '">'
         +   fmtCost(r.cost_cny)
@@ -4718,7 +4759,7 @@ async function loadSettings(showToast){
       if(dailyTokInput) dailyTokInput.value = String(dailyTokValue);
       const dailyTokState = document.getElementById('setDailyTokenState');
       if(dailyTokState){
-        dailyTokState.textContent = dailyTokValue > 0 ? ('(每账号每天 ' + fmt(dailyTokValue) + ' token)') : '(不限)';
+        dailyTokState.textContent = dailyTokValue > 0 ? ('(每账号每天 ' + fmtTokens(dailyTokValue) + ' token)') : '(不限)';
         dailyTokState.style.color = dailyTokValue > 0 ? 'var(--accent2)' : 'var(--dim)';
       }
       const dailyCredValue = Number(data.daily_credit_limit || 0);
@@ -4734,7 +4775,7 @@ async function loadSettings(showToast){
       if(modelTokInput) modelTokInput.value = String(modelTokValue);
       const modelTokState = document.getElementById('setModelDailyTokenState');
       if(modelTokState){
-        modelTokState.textContent = modelTokValue > 0 ? ('(每账号每模型每天 ' + fmt(modelTokValue) + ' token)') : '(不限)';
+        modelTokState.textContent = modelTokValue > 0 ? ('(每账号每模型每天 ' + fmtTokens(modelTokValue) + ' token)') : '(不限)';
         modelTokState.style.color = modelTokValue > 0 ? 'var(--accent2)' : 'var(--dim)';
       }
       const pricingMinutes = Number(data.pricing_refresh_minutes || 0);
@@ -4859,7 +4900,7 @@ async function saveDailyTokenLimit(btn){
   if(btn) btn.disabled = true;
   try {
     await postJSON('/settings/save', {daily_token_limit: value});
-    toast(value > 0 ? ('已启用：账号当日超过 ' + fmt(value) + ' token 后暂停接单') : '已设为不限（0 = 不限额）', 'ok');
+    toast(value > 0 ? ('已启用：账号当日超过 ' + fmtTokens(value) + ' token 后暂停接单') : '已设为不限（0 = 不限额）', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -4907,7 +4948,7 @@ async function saveModelDailyTokenLimit(btn){
   if(btn) btn.disabled = true;
   try {
     await postJSON('/settings/save', {model_daily_token_limit: value});
-    toast(value > 0 ? ('已启用：账号单模型当日超过 ' + fmt(value) + ' token 后该模型切走') : '已设为不限（0 = 不限额）', 'ok');
+    toast(value > 0 ? ('已启用：账号单模型当日超过 ' + fmtTokens(value) + ' token 后该模型切走') : '已设为不限（0 = 不限额）', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -6331,11 +6372,11 @@ function renderPerfMatrix(usage, perf){
       + '<td style="text-align:left" data-label="模型"><b>' + (filtering ? '筛选结果合计 (Filtered)' : '全部模型合计 (Total)') + '</b></td>'
       + '<td style="text-align:center" data-label="区域"><span style="color:var(--dim)">—</span></td>'
       + '<td style="text-align:left" data-label="账号"><span style="color:var(--dim)">' + (filtering ? '已筛选' : '全部账号') + '</span></td>'
-      + '<td data-label="请求数">' + fmt(sumReq) + '</td>'
+      + '<td data-label="请求数">' + fmtTokens(sumReq) + '</td>'
       + '<td data-label="失败">' + (sumErr
           ? ('<span style="color:var(--bad)">' + fmt(sumErr) + '</span>')
           : '<span style="color:var(--dim)">0</span>') + '</td>'
-      + '<td data-label="总 Token"><b style="color:var(--accent)">' + fmt(sumTok) + '</b></td>'
+      + '<td data-label="总 Token"><b style="color:var(--accent)">' + fmtTokens(sumTok) + '</b></td>'
       + '<td class="triple" data-label="输入 / 输出 / 思考">' + tripleTokens(sumP, sumC, sumR) + '</td>'
       + '<td data-label="首字延迟">' + totTtft + '</td>'
       + '<td data-label="生成速度"><b style="color:var(--accent2)">' + totTps + '</b></td>'
@@ -6417,7 +6458,7 @@ function renderPerfMatrix(usage, perf){
         + '<td style="text-align:left" data-label="账号">' + acctCell + '</td>'
         + '<td data-label="请求数">' + fmt(m.requests) + '</td>'
         + '<td data-label="失败">' + errCell + '</td>'
-        + '<td data-label="总 Token"><b>' + fmt(m.total_tokens) + '</b></td>'
+        + '<td data-label="总 Token"><b>' + fmtTokens(m.total_tokens) + '</b></td>'
         + '<td class="triple" data-label="输入 / 输出 / 思考">' + tripleTokens(m.prompt_tokens, m.completion_tokens, m.reasoning_tokens) + '</td>'
         + '<td data-label="首字延迟">' + m_ttft + '</td>'
         + '<td data-label="生成速度">' + m_tps + '</td>'
@@ -6474,7 +6515,7 @@ function renderUsageSeries(data){
   const summary = document.getElementById('usageSeriesSummary');
   const totalTokens = series.reduce((sum, b) => sum + (b.total_tokens || 0), 0);
   const totalCredit = series.reduce((sum, b) => sum + (b.credit || 0), 0);
-  if(summary) summary.textContent = '总 Token ' + fmt(totalTokens) + ' · 扣减积分 ' + fmt(totalCredit)
+  if(summary) summary.textContent = '总 Token ' + fmtTokens(totalTokens) + ' · 扣减积分 ' + fmt(totalCredit)
     + ' · 桶 ' + (data ? data.bucket_seconds : '-') + 's';
   const ctx = canvas.getContext('2d');
   const ratio = window.devicePixelRatio || 1;
@@ -6519,7 +6560,7 @@ function renderUsageSeries(data){
   ctx.stroke();
   ctx.fillStyle = '#64748b';
   ctx.font = '10px monospace';
-  ctx.fillText(fmt(maxTokens), 4, pad.t + 8);
+  ctx.fillText(fmtTokens(maxTokens), 4, pad.t + 8);
   ctx.fillText('0', 4, pad.t + plotH);
   const tsLabel = t => new Date(t * 1000).toLocaleString();
   const firstLabel = tsLabel(series[0].at);
@@ -6540,7 +6581,7 @@ async function loadCreditHistory(btn){
         + '<td>' + esc(x.model || '') + '</td>'
         + '<td class="mono">' + esc(String(x.account || '').slice(0,8)) + '</td>'
         + '<td>' + fmt(x.credit) + '</td>'
-        + '<td>' + fmt(x.total_tokens || 0) + '</td>'
+        + '<td>' + fmtTokens(x.total_tokens || 0) + '</td>'
         + '</tr>').join('') || '<tr><td colspan="5" style="color:var(--dim)">没有积分扣减记录</td></tr>';
     }
     if(btn) toast('积分扣减历史已刷新', 'ok');
@@ -6568,20 +6609,20 @@ function renderAnalytics(data){
   const elTodayDetail = document.getElementById('kpiTodayTokensDetail');
   const elTodayTitle = document.getElementById('kpiRangeTokenTitle');
   if(elTodayTitle) elTodayTitle.textContent = rangeLabel() + '消耗 Token';
-  if(elTodayTok) elTodayTok.textContent = fmt(currentSum.total_tokens || 0);
+  if(elTodayTok) elTodayTok.textContent = fmtTokens(currentSum.total_tokens || 0);
   if(elTodayDetail) elTodayDetail.innerHTML =
-    '<span style="color:var(--accent)">输入 ' + fmt(currentSum.prompt_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(currentSum.completion_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(currentSum.reasoning_tokens || 0) + '</span>';
+    '<span style="color:var(--accent)">输入 ' + fmtTokens(currentSum.prompt_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmtTokens(currentSum.completion_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmtTokens(currentSum.reasoning_tokens || 0) + '</span>';
 
   // KPI 2: always the all-time figure, as the stable reference next to KPI 1.
   const elTotalTok = document.getElementById('kpiTotalTokens');
   const elTotalDetail = document.getElementById('kpiTotalTokensDetail');
-  if(elTotalTok) elTotalTok.textContent = fmt(sumAll.total_tokens || 0);
+  if(elTotalTok) elTotalTok.textContent = fmtTokens(sumAll.total_tokens || 0);
   if(elTotalDetail) elTotalDetail.innerHTML =
-    '<span style="color:var(--accent)">输入 ' + fmt(sumAll.prompt_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmt(sumAll.completion_tokens || 0) + '</span>' +
-    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmt(sumAll.reasoning_tokens || 0) + '</span>' +
+    '<span style="color:var(--accent)">输入 ' + fmtTokens(sumAll.prompt_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--accent2)">输出 ' + fmtTokens(sumAll.completion_tokens || 0) + '</span>' +
+    ' <span style="color:var(--dim-light)">/</span> ' + '<span style="color:var(--think)">思考 ' + fmtTokens(sumAll.reasoning_tokens || 0) + '</span>' +
     // Two cards showing the same number reads as a broken counter rather than
     // as "there is nothing older to show", so say which case it is.
     ((analyticsRange === 'all' && (sumAll.total_tokens || 0) > 0)
@@ -6646,7 +6687,7 @@ function renderAnalytics(data){
           pills = entries.map(([mid, ms]) => {
             return '<span class="model-pill">'
               + '<b style="color:var(--fg)">' + esc(mid) + '</b>: '
-              + ms.requests + '次 · <b style="color:var(--accent)">' + fmt(ms.tokens) + '</b> tok'
+              + ms.requests + '次 · <b style="color:var(--accent)">' + fmtTokens(ms.tokens) + '</b> tok'
               + '</span>';
           }).join('');
         }
@@ -6672,7 +6713,7 @@ function renderAnalytics(data){
           + '<td>' + realmBadge + '</td>'
           + '<td>' + creditStr + '</td>'
           + '<td>' + fmt(st.requests || 0) + '</td>'
-          + '<td><b style="color:var(--accent)">' + fmt(st.total_tokens || 0) + '</b></td>'
+          + '<td><b style="color:var(--accent)">' + fmtTokens(st.total_tokens || 0) + '</b></td>'
           + '<td><b style="color:var(--accent2)">' + (st.credit != null ? Number(st.credit).toFixed(2) : '0.00') + '</b></td>'
           + '<td style="text-align:left;max-width:440px">' + pills + '</td>'
           + '<td style="color:var(--warn)" title="OpenRouter 价估算：按 OpenRouter 公布的模型价折算，覆盖该账号在所选区间内的请求；按条件定价的模型（输入长度阈值或时段）按每条请求取档；单条请求实际用的策略、三档单价与匹配来源见「最近请求」里那条的悬停提示">'
@@ -6704,14 +6745,14 @@ function keyModelPills(k){
   const pills = (k.models || []).map(m =>
     '<span class="model-pill">'
     + '<b style="color:var(--fg)">' + esc(m.model) + '</b>: '
-    + m.requests + '次 · <b style="color:var(--accent)">' + fmt(m.tokens) + '</b> tok'
+    + m.requests + '次 · <b style="color:var(--accent)">' + fmtTokens(m.tokens) + '</b> tok'
     + '</span>');
   const rest = k.models_other;
   if(rest){
     pills.push('<span class="model-pill">'
       + '<b style="color:var(--dim)">' + esc(rest.model || '(其他)') + '</b> '
       + '<span style="color:var(--dim)">' + (rest.models || 0) + ' 个模型 · </span>'
-      + rest.requests + '次 · ' + fmt(rest.tokens) + ' tok</span>');
+      + rest.requests + '次 · ' + fmtTokens(rest.tokens) + ' tok</span>');
   }
   return pills.length ? pills.join('') : '<span style="color:var(--dim)">无调用</span>';
 }
@@ -6756,13 +6797,13 @@ function renderKeyTable(data){
       + (st.errors ? '<span style="color:var(--bad);font-size:11px"> · 失败 ' + fmt(st.errors) + '</span>' : '')
       + '</td>';
     const tokCell = '<td data-label="消耗总 Token"><b style="color:var(--accent)">'
-      + fmt(st.total_tokens || 0) + '</b></td>';
+      + fmtTokens(st.total_tokens || 0) + '</b></td>';
     const splitCell = '<td data-label="输入 · 输出 · 思考" style="font-size:12px">'
-      + '<span style="color:var(--accent)">' + fmt(st.prompt_tokens || 0) + '</span>'
+      + '<span style="color:var(--accent)">' + fmtTokens(st.prompt_tokens || 0) + '</span>'
       + ' <span style="color:var(--dim-light)">/</span> '
-      + '<span style="color:var(--accent2)">' + fmt(st.completion_tokens || 0) + '</span>'
+      + '<span style="color:var(--accent2)">' + fmtTokens(st.completion_tokens || 0) + '</span>'
       + ' <span style="color:var(--dim-light)">/</span> '
-      + '<span style="color:var(--think)">' + fmt(st.reasoning_tokens || 0) + '</span>'
+      + '<span style="color:var(--think)">' + fmtTokens(st.reasoning_tokens || 0) + '</span>'
       + '</td>';
     const cacheCell = '<td data-label="缓存命中">'
       + (st.cache_hit_pct != null ? st.cache_hit_pct.toFixed(1) : '0.0') + '%</td>';
@@ -6849,6 +6890,7 @@ const ACTION_HANDLERS = {
   commitImport: (el) => commitImport(el),
   handleLogTerminalScroll: () => handleLogTerminalScroll(),
   toggleAccount: (el, ev, arg) => toggleAccount(el.dataset.uid, arg === '1', el),
+  setAccountPriority: (el) => setAccountPriority(el.dataset.uid, el),
   testAccount: (el) => testAccount(el.dataset.uid, el),
   refreshOne: (el) => refreshOne(el.dataset.uid, el),
   syncProfile: (el) => syncProfile(el.dataset.uid, el),
