@@ -201,13 +201,14 @@ def credits_spent_today(account):
 
 def least_credit_spent(candidates):
     """Keep accounts with the lowest counted credit spend today."""
-    candidates = list(candidates)
-    if not candidates:
+    # Read each account once: a concurrent usage refresh must not move every
+    # candidate above the minimum between measuring and filtering the list.
+    spends = [(a, credits_spent_today(a)) for a in candidates]
+    if not spends:
         return []
-    minimum = min(credits_spent_today(a) for a in candidates)
-    return [a for a in candidates
-            if math.isclose(credits_spent_today(a), minimum,
-                            rel_tol=1e-12, abs_tol=1e-9)]
+    minimum = min(value for _account, value in spends)
+    return [a for a, value in spends
+            if math.isclose(value, minimum, rel_tol=1e-12, abs_tol=1e-9)]
 
 
 def account_weight(account, max_remain, now, cfg):
