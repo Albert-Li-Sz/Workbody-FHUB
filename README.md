@@ -1,7 +1,7 @@
 # Workbody-FHUB — WorkBuddy 国内与国际多账号网关
 
 <p align="center">
-  <a href="https://github.com/Albert-Li-Sz/Workbody-FHUB/releases"><img src="https://img.shields.io/badge/Workbody_FHUB-v1.0.5-2496ED?style=flat-square" alt="Workbody-FHUB 1.0.5"></a>
+  <a href="https://github.com/Albert-Li-Sz/Workbody-FHUB/releases"><img src="https://img.shields.io/badge/Workbody_FHUB-v1.0.6-2496ED?style=flat-square" alt="Workbody-FHUB 1.0.6"></a>
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-Intl_&_CN-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Vibe_Coding-100%25-ff69b4?style=flat-square" alt="Vibe Coding">
 </p>
 
-Workbody-FHUB 是 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 的衍生项目，当前版本 **1.0.5**，基于上游 **1.6.13**。本衍生项目沿用目标仓库的 [Apache-2.0 许可证](LICENSE)；原项目的 Vibe Coding 声明、致谢、贡献者、免责声明和 [MIT 许可证原文](LICENSE.upstream)均保留。本分支负责自己的安全修复、网络搜索和镜像构建。
+Workbody-FHUB 是 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 的衍生项目，当前版本 **1.0.6**，基于上游 **1.6.13**。本衍生项目沿用目标仓库的 [Apache-2.0 许可证](LICENSE)；原项目的 Vibe Coding 声明、致谢、贡献者、免责声明和 [MIT 许可证原文](LICENSE.upstream)均保留。本分支负责自己的安全修复、网络搜索和镜像构建。
 
 把腾讯 **[www.workbuddy.ai](https://www.workbuddy.ai)**（国际版）与 **[codebuddy.cn](https://www.codebuddy.cn)**（国内版）的原生服务封装成标准 OpenAI 兼容接口（Chat Completions 与 Responses API），并补齐多账号调度与运维能力：
 
@@ -98,7 +98,7 @@ Unix 系统上的账号目录权限为 `0700`，凭证和 Key 设置文件权限
 
 ### 5. Workbody-FHUB Docker 镜像
 
-云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.5`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
+云镜像发布到 **`ghcr.io/albert-li-sz/workbody-fhub`**，包含 `linux/amd64`、`linux/arm64`，固定版本为 `1.0.6`，稳定版本别名为 `latest`。发布和构建状态可在[本仓库 Releases](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases)及[镜像工作流](https://github.com/Albert-Li-Sz/Workbody-FHUB/actions/workflows/docker-publish.yml)查看。
 
 ```bash
 docker compose pull
@@ -124,21 +124,21 @@ docker compose up -d
 
 ```bash
 # 独立构建及保存，便于向其他服务器导入
-docker build -t workbody-fhub:1.0.5 .
-docker save workbody-fhub:1.0.5 | gzip > workbody-fhub-1.0.5.tar.gz
-# 目标主机：docker load < workbody-fhub-1.0.5.tar.gz
+docker build -t workbody-fhub:1.0.6 .
+docker save workbody-fhub:1.0.6 | gzip > workbody-fhub-1.0.6.tar.gz
+# 目标主机：docker load < workbody-fhub-1.0.6.tar.gz
 ```
 
 构建双架构镜像并验证两种架构的启动、鉴权和关键回归：
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t workbody-fhub:1.0.5 --load .
-python3 scripts/verify_image.py workbody-fhub:1.0.5 --non-root
+docker buildx build --platform linux/amd64,linux/arm64 -t workbody-fhub:1.0.6 --load .
+python3 scripts/verify_image.py workbody-fhub:1.0.6 --non-root
 ```
 
 验证脚本使用隔离的临时数据卷与 `--network none`，结束后清理测试容器。审计发现、修复证据和剩余验证边界见[修复报告](docs/project-repair-2026-10-07.md)。
 
-发布流程先校验统一版本与测试，再构建并推送两种架构的固定版本镜像；成品通过启动、鉴权、关键回归及普通 UID 验证后，再更新 `latest`。配置 Docker Hub 凭据时也发布同名镜像。验证已有云镜像可增加 `--revision v1.0.5 --pull`，按指定 release 比对源码。镜像包含 release 源码及两份许可证。
+发布流程先校验统一版本与测试，再构建并推送两种架构的固定版本镜像；成品通过启动、鉴权、关键回归及普通 UID 验证后，再更新 `latest`。配置 Docker Hub 凭据时也发布同名镜像。验证已有云镜像可增加 `--revision v1.0.6 --pull`，按指定 release 比对源码。镜像包含 release 源码及两份许可证。
 
 ### 6. 测试
 
@@ -382,7 +382,7 @@ curl http://127.0.0.1:8788/v1/balance \
 
 ## 六、Workbody-FHUB 更新记录
 
-### 1.0.5
+### 1.0.6
 
 - 新增 DeepSeek `user/balance` 余额格式、`api/billing/balance` 余额查询与 `api/billing/usage` Token 消耗查询；支持裸路径与 `/v1` 前缀，按有效 Key 限定查询范围。
 - 新增 `GET /v1/models/{id}`，返回与模型列表一致的单个模型详情，未知 ID 返回 404。
