@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import shlex
 import shutil
@@ -49,13 +50,16 @@ def run(arguments, directory=None, input_text=None, timeout=300):
 
 def private_write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as output:
-        output.write(data)
-    os.replace(temporary, path)
-    if os.name != "nt":
-        os.chmod(path, 0o600)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
+        os.replace(temporary, path)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_json(path, data):
@@ -282,6 +286,55 @@ def persistent_mounts(containers):
     return mounts
 
 
+def pin_container_mounts(model, containers):
+    """Preserve actual volumes, including anonymous Dockerfile VOLUMEs."""
+    model = copy.deepcopy(model)
+    aliases = {}
+    for name, container in containers.items():
+        if not container:
+            continue
+        cfg = model["services"][name]
+        volumes = {volume["target"]: volume for volume in cfg.get("volumes") or []}
+        for mount in container.get("Mounts", []):
+            if mount["Type"] not in ("bind", "volume"):
+                continue
+            target = mount["Destination"]
+            volume = copy.deepcopy(volumes.get(target) or {})
+            volume.update(type=mount["Type"], target=target, read_only=not mount.get("RW", True))
+            if mount["Type"] == "bind":
+                volume["source"] = mount["Source"]
+            else:
+                source = mount["Name"]
+                if source not in aliases:
+                    alias = "workbody_preserved_" + hashlib.sha256(source.encode()).hexdigest()[:12]
+                    aliases[source] = alias
+                    model.setdefault("volumes", {})[alias] = {"external": True, "name": source}
+                volume["source"] = aliases[source]
+            volumes[target] = volume
+        cfg["volumes"] = list(volumes.values())
+    return model
+
+
+def require_persisted_data(container):
+    config = container.get("Config") or {}
+    environment = dict(item.split("=", 1) for item in config.get("Env") or [] if "=" in item)
+    paths = {"--accounts-dir": environment.get("ACCOUNTS_DIR") or "/app/accounts",
+             "--usage-dir": environment.get("WB_PROXY_USAGE_DIR") or "/app/usage"}
+    command = config.get("Cmd") or []
+    for index, item in enumerate(command):
+        flag, _, value = item.partition("=")
+        if flag in paths:
+            paths[flag] = value or (command[index + 1] if index + 1 < len(command) else paths[flag])
+    if environment.get("WB_SQLITE_PATH"):
+        paths["WB_SQLITE_PATH"] = posixpath.dirname(environment["WB_SQLITE_PATH"]) or "."
+    for label, path in paths.items():
+        path = posixpath.normpath(posixpath.join(config.get("WorkingDir") or "/app", path))
+        if not any(mount["Type"] in ("bind", "volume") and mount.get("RW", True)
+                   and (path == mount["Destination"] or path.startswith(mount["Destination"].rstrip("/") + "/"))
+                   for mount in container.get("Mounts", [])):
+            raise UpgradeError(label + " 指向容器内未持久化的数据，尚未停止服务；请先迁移该目录到数据卷。")
+
+
 # This helper has no network access. Docker can read root-owned bind mounts and
 # named volumes without making private account data world-readable on the host.
 DATA_HELPER = r'''
@@ -453,12 +506,14 @@ def upgrade(args):
         old_command = compose_command(directory, original_files)
         old_model = json.loads(run(old_command + ["config", "--format", "json"], directory))
         app = app_service(old_model, args.service)
-        new_model, managed = deployment_model(old_model, app, version, args, directory)
         old_managed = [app] + managed_nginx(old_model)
         containers = {name: container_for(old_command, name, directory) for name in old_managed}
         mounts = persistent_mounts(containers)
         if containers[app] is None:
             raise UpgradeError("没有找到现有应用容器；首次安装请直接使用 docker compose up -d。")
+        require_persisted_data(containers[app])
+        old_model = pin_container_mounts(old_model, containers)
+        new_model, managed = deployment_model(old_model, app, version, args, directory)
         for mount in mounts:
             if "," in mount["source"] or "," in str(directory):
                 raise UpgradeError("安装或数据挂载路径包含逗号，需手动备份后迁移。")
