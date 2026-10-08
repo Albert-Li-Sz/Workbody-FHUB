@@ -470,24 +470,59 @@ def _cached_search(query):
             _search_condition.notify_all()
 
 
-def search(query, num_results=5):
-    """DuckDuckGo HTML 版搜尋，回傳要餵給模型的可讀字串。"""
+def search_results(query, num_results=5, allowed_domains=None, blocked_domains=None):
+    """Structured DDG results shared by the Responses and Messages adapters."""
     query = re.sub(r"\s+", " ", str(query or "")).strip()
+    result = {"query": query, "results": []}
     if len(query) < 2:
-        return ('Error: web_search needs a query of at least 2 characters; '
-                'got %r. Pass it as {"query": "..."}.' % query)
+        result["error"] = ('Error: web_search needs a query of at least 2 characters; '
+                           'got %r. Pass it as {"query": "..."}.' % query)
+        return result
     if len(query) > MAX_QUERY_CHARS:
-        return "Error: web_search query exceeds %d characters." % MAX_QUERY_CHARS
+        result["error"] = "Error: web_search query exceeds %d characters." % MAX_QUERY_CHARS
+        return result
     try:
         n = int(num_results)
     except (TypeError, ValueError, OverflowError):
         n = 5
     n = max(1, min(MAX_RESULTS, n))
 
-    rows, error = _cached_search(query)
+    backend_query = query
+    if allowed_domains:
+        backend_query += " (" + " OR ".join("site:" + d for d in allowed_domains) + ")"
+    if blocked_domains:
+        backend_query += " " + " ".join("-site:" + d for d in blocked_domains)
+    if len(backend_query) > MAX_QUERY_CHARS:
+        result["error"] = "Error: web_search query with domain filters exceeds %d characters." % MAX_QUERY_CHARS
+        return result
+    rows, error = _cached_search(backend_query)
     if error:
-        return error
-    results = rows[:n]
+        result["error"] = error
+        return result
+
+    def matches(host, domains):
+        return any(host == d or host.endswith("." + d) for d in domains or [])
+
+    filtered = []
+    for row in rows:
+        try:
+            host = (urllib.parse.urlsplit(row["url"]).hostname or "").rstrip(".").lower().encode("idna").decode("ascii")
+        except (ValueError, UnicodeError):
+            continue
+        if allowed_domains and not matches(host, allowed_domains):
+            continue
+        if matches(host, blocked_domains):
+            continue
+        filtered.append(dict(row))
+    result["results"] = filtered[:n]
+    return result
+
+
+def format_search_results(result):
+    """Keep the readable tool format used by models and source extraction."""
+    if result.get("error"):
+        return result["error"]
+    query, results = result.get("query") or "", result.get("results") or []
 
     if not results:
         return ("No results found for: %s%sTry a broader or differently worded query."
@@ -498,6 +533,10 @@ def search(query, num_results=5):
     return ("Search results for: %s%s%s%s%sCite the sources you used at the end of "
             "your answer." % (query, chr(10) + chr(10), (chr(10) + chr(10)).join(lines),
                               chr(10) + chr(10), ""))
+
+
+def search(query, num_results=5):
+    return format_search_results(search_results(query, num_results))
 
 
 def _guard_url(url):

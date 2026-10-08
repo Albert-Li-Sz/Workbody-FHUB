@@ -1,4 +1,4 @@
-"""State and hard budgets for one Responses request with local web tools."""
+"""State and hard budgets for one request with local web tools."""
 import copy
 import json
 import socket
@@ -40,6 +40,15 @@ class WebToolFlow:
             raise WebToolLimitError("web tool time limit exceeded")
         return seconds
 
+    def is_internal_tool(self, name):
+        return W.is_internal_tool(name)
+
+    def exhausted(self):
+        return self.rounds >= W.MAX_WEB_ROUNDS or self.calls >= W.MAX_WEB_CALLS
+
+    def execute_call(self, name, arguments):
+        return W.execute(name, arguments)
+
     def execute(self, calls, assistant_message=None):
         self.remaining()
         if self.rounds >= W.MAX_WEB_ROUNDS or self.calls + len(calls) > W.MAX_WEB_CALLS:
@@ -59,7 +68,7 @@ class WebToolFlow:
             fn = tc["function"]
             token = W._call_deadline.set(self.deadline)
             try:
-                result = W.execute(fn["name"], fn["arguments"])
+                result = self.execute_call(fn["name"], fn["arguments"])
             finally:
                 W._call_deadline.reset(token)
             self.remaining()
@@ -75,12 +84,17 @@ class WebToolFlow:
         body = copy.deepcopy(self.body)
         body["messages"] = copy.deepcopy(self.messages)
         body["stream"] = True
-        if self.rounds >= W.MAX_WEB_ROUNDS or self.calls >= W.MAX_WEB_CALLS:
+        if self.exhausted():
             body["tools"] = [t for t in body.get("tools") or []
-                             if not W.is_internal_tool((t.get("function") or t).get("name"))]
+                             if not self.is_internal_tool((t.get("function") or t).get("name"))]
             body["tool_choice"] = "auto"
             body["messages"].append({"role": "system", "content":
                 "Web tools are exhausted. Answer using the available results or call a client-owned tool."})
+        elif (self.rounds and isinstance(body.get("tool_choice"), dict)
+              and self.is_internal_tool((body["tool_choice"].get("function") or {}).get("name"))):
+            # A forced search selects the first action. Repeating that force
+            # on every continuation prevents the model from ever answering.
+            body["tool_choice"] = "auto"
         return body
 
     def iter_upstream(self, upstream, set_timeout):

@@ -15,6 +15,7 @@ import random
 DEFAULTS = {
     "weighted_pick": True,
     "free_fair_pick": True,
+    "free_switch_window_tokens": 262144,
     "soft_rate": 600.0,
     "soft_rate_max": 7200.0,
     "breaker_threshold": 3,
@@ -39,6 +40,7 @@ DEFAULTS = {
 
 _BOOL_KEYS = ("weighted_pick", "free_fair_pick")
 _INT_MIN = {
+    "free_switch_window_tokens": 0,
     "breaker_threshold": 1,
     "degrade_threshold": 1,
     "max_in_flight": 0,

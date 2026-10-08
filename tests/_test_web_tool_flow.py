@@ -213,6 +213,26 @@ def run_stream(documents, max_rounds=3):
 
 
 class StreamFlowTests(unittest.TestCase):
+    def test_search_completed_event_is_emitted_only_after_backend_returns(self):
+        handler = StreamHandler()
+        body = {"messages": [], "_web_tools": True, "tools": [W.web_search_tool_def()]}
+        snapshots = []
+
+        def execute(*args):
+            snapshots.append(handler.wfile.getvalue().decode())
+            return "Search results for: synthetic\n\n1. Source\n   https://example.org/\n   Snippet."
+
+        with mock.patch.object(P, "open_upstream", return_value=(Upstream(completion()), FakeAccount(), None)), \
+                mock.patch.object(P, "record_usage"), mock.patch.object(P, "record_error") as error, \
+                mock.patch.object(W, "execute", side_effect=execute):
+            P.Handler._responses_stream_response(handler, Upstream(completion("web_search")),
+                "synthetic", set(), {}, "fp", FakeAccount(), time.time(), base_body=body)
+        self.assertEqual(len(snapshots), 1)
+        self.assertIn("response.web_search_call.searching", snapshots[0])
+        self.assertNotIn("response.web_search_call.completed", snapshots[0])
+        self.assertIn("response.web_search_call.completed", handler.wfile.getvalue().decode())
+        error.assert_not_called()
+
     def test_failed_terminal_usage_includes_the_partially_received_round(self):
         class Broken(Upstream):
             def __iter__(self):

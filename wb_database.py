@@ -54,6 +54,10 @@ class Database:
                 key TEXT PRIMARY KEY, account TEXT NOT NULL, expires_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS affinity_expiry ON affinity(expires_at);
+            CREATE TABLE IF NOT EXISTS web_replay (
+                reference TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS web_replay_expiry ON web_replay(expires_at);
         """)
         connection.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
         self._restrict()
@@ -83,6 +87,24 @@ class Database:
         if connection is not None:
             connection.close()
             del self.local.connection
+
+    def put_web_result(self, reference, payload, expires_at, limit=4096):
+        """Bounded opaque Messages search references; never account credentials."""
+        with self.write_lock:
+            connection = self.connection()
+            connection.execute("DELETE FROM web_replay WHERE expires_at<=?", (time.time(),))
+            connection.execute("INSERT OR REPLACE INTO web_replay VALUES(?,?,?)",
+                               (reference, json.dumps(payload, ensure_ascii=False), expires_at))
+            connection.execute("""DELETE FROM web_replay WHERE reference IN (
+                SELECT reference FROM web_replay ORDER BY expires_at DESC LIMIT -1 OFFSET ?
+            )""", (limit,))
+            self._restrict()
+
+    def get_web_result(self, reference):
+        row = self.connection().execute(
+            "SELECT payload FROM web_replay WHERE reference=? AND expires_at>?",
+            (reference, time.time())).fetchone()
+        return json.loads(row[0]) if row else None
 
     def document_key(self, path):
         path = os.path.abspath(path)

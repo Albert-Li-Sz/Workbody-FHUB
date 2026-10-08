@@ -225,7 +225,7 @@ class DegradedRetryTests(unittest.TestCase):
             def list_public(self):
                 return []
 
-            def reserve_for_session(self, payload, realm=None, session_key=None, exclude=(), model=None, estimate=None):
+            def reserve_for_session(self, payload, realm=None, session_key=None, exclude=(), model=None, estimate=None, preferred_uid=None):
                 chosen = self.pick_for_session(realm, session_key, exclude, model)
                 return (chosen, None) if chosen and chosen.acquire() else (None, None)
 

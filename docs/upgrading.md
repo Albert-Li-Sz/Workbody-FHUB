@@ -1,4 +1,4 @@
-# 从旧版升级到 1.1.0
+# 从旧版升级到 1.1.1
 
 升级工具为根目录的 `update.sh` 和 `update.py`。适用于单实例、本机 Docker Compose 安装；原生 Python 安装使用 `--source-only`。在**原安装目录**执行，不能先用新版 Compose 覆盖旧配置。
 
@@ -9,12 +9,12 @@
 旧安装没有更新脚本时，先下载固定版本：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.0/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.1/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
 
-下载到文件后再执行。引导脚本校验 `update.py`，迁移工具校验源码附件的 SHA-256；`--dry-run` 只下载、解析并显示计划，不停服、不拉镜像、不写安装目录。
+下载到文件后再执行。引导脚本核对本地 `update.py` 的版本；缺失或版本不同则下载并校验匹配的迁移器，避免仍按旧版升级。迁移工具校验源码附件的 SHA-256；`--dry-run` 只下载、解析并显示计划，不停服、不拉镜像、不写安装目录。
 
 默认保留原 Compose 项目、服务名、端口、环境、用户、网络、命令和数据挂载；不新增公网入口。原来使用 `0.0.0.0:8788`、1Panel 或独立反代的安装继续使用原入口。
 
@@ -33,7 +33,7 @@ bash ./update.sh --compose-file docker-compose.yml \
 2. 解析旧编排、识别容器与实际挂载，拉取固定版本镜像并检查新配置。
 3. 固定旧容器的实际镜像 ID 和数据卷，包括原来的匿名卷；停止应用和本项目的 Nginx，备份全部可写 bind mount、named volume、将被覆盖的源码及旧编排。
 4. 安装源码，生成私有 `compose.runtime.json`，启动新版；首次启动导入旧账号、优先级、Key、设置和 JSONL 用量到 SQLite。
-5. 从容器内确认 `/health` 返回 `version: 1.1.0`。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
+5. 从容器内确认 `/health` 返回 `version: 1.1.1`。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
 
 备份位于 `.update-backups/<时间-随机标识>/`，目录权限 `0700`、归档与配置权限 `0600`。旧 JSON／JSONL 不会因迁移被删除。SQLite 主文件、WAL 与 SHM 在停服后一起保存，避免只复制主文件漏掉已提交数据。
 
@@ -104,8 +104,8 @@ Windows 使用 `python update.py`；下载的附件可通过同一 Release 的 `
 正式镜像均支持 `linux/amd64` 与 `linux/arm64`：
 
 ```text
-ghcr.io/albert-li-sz/workbody-fhub:1.1.0
-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.0
+ghcr.io/albert-li-sz/workbody-fhub:1.1.1
+ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.1
 ```
 
 Release 同时附带源码归档、升级脚本、`checksums.txt` 与 `images.json`。后者记录应用／Nginx 摘要和提交，`latest` 在应用镜像验证通过后才更新。

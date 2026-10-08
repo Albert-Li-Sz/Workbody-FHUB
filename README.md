@@ -2,19 +2,20 @@
 
 WorkBuddy 国内与国际多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages，提供账号调度、渠道绑定、积分余额查询和实时用量控制台。
 
-当前版本 **1.1.0** · Python **3.9+** · 应用仅依赖 Python 标准库
+当前版本 **1.1.1** · Python **3.9+** · 应用仅依赖 Python 标准库
 
 [版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
 ## 功能
 
-- **公平调度**：数字较小的账号优先。同优先级内，免费模型比较当天免费 Token 加在途预估；付费模型比较当天积分消耗加在途预估。国内、国际独立均衡，结束后按实际用量校正。
+- **公平调度**：数字较小的账号优先。同优先级内，免费模型比较当天免费 Token 加在途预估；付费模型比较当天积分消耗加在途预估。国内、国际独立均衡，结束后按实际用量校正；免费会话默认使用 256K Token 换号窗口。
 - **连接复用**：有界 HTTP/1.1 连接池，按目标、账号和代理隔离连接；保留带认证的 HTTP、SOCKS5／SOCKS5h 代理。
 - **稳定流式生成**：三种生成协议支持 SSE，默认 15 秒无内容时发送心跳；配套 Nginx 关闭缓冲、延长流式读写超时。
 - **自动 HTTPS**：Nginx 自动检测公网 IP，签发并续签 Let’s Encrypt IP 证书；也可配置域名，每六小时检查续签并重载证书。
 - **本地持久化**：SQLite WAL 保存账号、优先级、设置、Key、用量和会话绑定；自动导入旧 JSON／JSONL，保留兼容导出。
 - **实时控制台**：中性色侧栏布局，支持手机、深浅主题、简繁体；SSE 推送刷新通知，断线重连和低频恢复刷新；Token 显示 `K/M/B`。
 - **协议兼容**：模型详情、渠道积分余额、按 Key 查询 Token；支持 DeepSeek、Kimi、千问及 OpenAI 旧版余额响应格式。
+- **Messages 联网搜索**：本地 DDG 执行与模型续轮，原生搜索结果及引用、DSH 文本兼容、搜索历史回放；支持次数限制与域名过滤，需开启面板本地网络工具。详见 [Messages 接入](docs/api.md#messages-搜索请求)。
 - 账号导入／导出、OAuth、代理槽、保留积分、每日限额、签到和任务调度；可选[本地网络工具](docs/research/web-search-support.md)。
 
 ## 公网部署：Nginx + 自动 HTTPS
@@ -63,7 +64,7 @@ Windows、macOS、Linux 启动脚本继续可用。面板密码和 API Key 分�
 在原安装目录执行，先保留旧 Compose 配置：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.0/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.1/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -108,7 +109,7 @@ curl https://<公网IP>/v1/models \
 
 应用无额外 pip 依赖；Nginx 镜像额外包含 Certbot。发布工作流同时构建两个镜像的 `linux/amd64`、`linux/arm64` 版本，验证后更新稳定标签，并在 [Release](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) 附带源码、升级脚本、SHA-256 和镜像摘要。
 
-应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.1.0`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.0`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 90 个套件：74 个 Python + 16 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。
+应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.1.1`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.1`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 92 个套件：76 个 Python + 16 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。
 
 界面设计记录见 [docs/ui-design.md](docs/ui-design.md)，部署参数、升级与回滚见[部署说明](docs/integration-plan.md)。
 

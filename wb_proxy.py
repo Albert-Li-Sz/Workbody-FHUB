@@ -59,6 +59,7 @@ import wb_pricing
 import wb_settings
 import wb_webtools
 import wb_webflow
+import wb_messages_web
 import wb_identity
 import wb_prompt
 import wb_global
@@ -221,6 +222,8 @@ for _billing_prefix in ("/dashboard/billing/", "/v1/dashboard/billing/",
         CLIENT_BALANCE_ROUTES[_billing_prefix + _billing_kind] = _billing_kind
 CLIENT_USAGE_ROUTES = frozenset(("/api/billing/usage", "/v1/api/billing/usage"))
 CLIENT_BILLING_PATHS = frozenset(CLIENT_BALANCE_ROUTES) | CLIENT_USAGE_ROUTES
+MESSAGES_PATHS = ("/v1/messages", "/messages", "/anthropic/v1/messages", "/anthropic/messages")
+MESSAGES_ROUTES = frozenset(MESSAGES_PATHS + tuple(p + "/count_tokens" for p in MESSAGES_PATHS))
 CLIENT_BALANCES = wb_balance.ChannelBalances()
 
 def is_qwen_balance_request(request_path):
@@ -235,7 +238,7 @@ def cors_origin_allowed(path):
     path = (path or "").split("?")[0]
     if path.startswith(MANAGEMENT_PATH_PREFIXES):
         return False
-    return path in CLIENT_BILLING_PATHS or path.startswith(CORS_PATH_PREFIXES)
+    return path in CLIENT_BILLING_PATHS or path in MESSAGES_ROUTES or path.startswith(CORS_PATH_PREFIXES)
 _lock = threading.Lock()
 _login_lock = threading.Lock()
 _chat_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CHAT)
@@ -2504,7 +2507,7 @@ def current_account():
 # 于是 hub 走纯轮询，同一对话每一轮都换账号，缓存必然归零。
 #
 # 这里在缺少显式会话键时，用【对话稳定前缀】派生亲和键：
-# 取消息列表的前两条（system + 首条 user），它们在整段对话生命周期内不变，
+# 取首条 system 与首条 user，它们在整段对话生命周期内不变，
 # 因此同一对话的每一轮都会落到同一账号；而不同对话的首条 user 不同，
 # 依旧会分散到各账号，负载均衡不受影响。
 AFFINITY_BY_PREFIX = os.environ.get("WB_AFFINITY_BY_PREFIX", "1").lower() not in (
@@ -2513,7 +2516,7 @@ AFFINITY_DEBUG = os.environ.get("WB_AFFINITY_DEBUG", "0").lower() in (
     "1", "true", "yes", "on")
 def derive_affinity_key(messages):
     """Derive a stable affinity key from a conversation's stable prefix.
-    The first two messages (system + first user turn) stay byte-identical for
+    The first system prompt and user turn stay byte-identical for
     the whole life of a conversation, so hashing them pins every later turn of
     that conversation to the same upstream account - exactly what prompt
     caching needs. Distinct conversations differ in their first user turn and
@@ -2525,7 +2528,11 @@ def derive_affinity_key(messages):
         msgs = messages or []
         if not msgs:
             return None
-        head = msgs[:2]
+        first_user = next((m for m in msgs if m.get("role") == "user"), None)
+        if first_user is None:
+            return None
+        first_system = next((m for m in msgs if m.get("role") == "system"), None)
+        head = [first_system, first_user] if first_system is not None else [first_user]
         blob = json.dumps(head, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return "pfx-" + hashlib.sha256(blob).hexdigest()[:16]
     except Exception:
@@ -4727,7 +4734,8 @@ def no_usable_account_message(realm, accounts):
 
 
 def open_upstream(payload, session_key=None, target_realm=None,
-                  session_meta=None, inbound_request_id="", trace_id="", deadline=None):
+                  session_meta=None, inbound_request_id="", trace_id="", deadline=None,
+                  preferred_uid=None):
     # Refresh the daily token guard before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -4778,7 +4786,8 @@ def open_upstream(payload, session_key=None, target_realm=None,
             apply_model_daily_token_limit()
             account, reservation_id = POOL.reserve_for_session(
                 upstream_body, realm=realm, session_key=session_key,
-                exclude=tried, model=model, estimate=reservation_estimate) if POOL else (None, None)
+                exclude=tried, model=model, estimate=reservation_estimate,
+                preferred_uid=preferred_uid) if POOL else (None, None)
         if account is None:
             if transient_hits and _attempt < max_attempts - 1:
                 tried.clear()
@@ -4983,6 +4992,7 @@ def extract_session_key(headers, payload):
         headers.get("Conversation-Id") or
         headers.get("X-Session-Id") or
         headers.get("Session-Id") or
+        headers.get("X-DeepSeek-Harness-Session-Id") or
         payload.get("conversation_id") or
         payload.get("session_id") or
         (payload.get("metadata") or {}).get("conversation_id")
@@ -5722,7 +5732,8 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
     holder["round_started_at"] = time.time()
     return open_upstream(body, session_key=session_key,
                          target_realm=holder.get("realm"),
-                         session_meta=holder.get("session_meta"), deadline=flow.deadline)
+                         session_meta=holder.get("session_meta"), deadline=flow.deadline,
+                         preferred_uid=holder.get("preferred_uid"))
 
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
@@ -5748,6 +5759,20 @@ def web_response_frame(holder, event, payload):
     holder["sequence_number"] = holder.get("sequence_number", 0) + 1
     data = dict(payload, type=event, sequence_number=holder["sequence_number"])
     return ("event: " + event + "\ndata: " + json.dumps(data, ensure_ascii=False) + "\n\n").encode()
+
+
+def completed_web_call_frames(holder):
+    """Mark search items complete only after the executor has returned."""
+    outputs = holder["response_outputs"]
+    for index, item in holder.pop("pending_web_items", []):
+        completed = dict(item, status="completed")
+        outputs[index] = completed
+        yield web_response_frame(holder, "response.output_item.done", {
+            "output_index": index, "item": completed})
+        yield web_response_frame(holder, "response.web_search_call.completed", {
+            "output_index": index, "item_id": completed["id"]})
+    if holder.get("round_response"):
+        holder["round_response"]["output"] = [o for o in outputs if o]
 
 
 def mixed_web_result_frames(holder, flow):
@@ -6270,19 +6295,50 @@ def anthropic_effort_from_messages(payload):
     return "low"
 
 
-def _anthropic_blocks_to_messages(role, blocks):
+def _anthropic_blocks_to_messages(role, blocks, replay_scope=None):
     tool_calls = []
     tool_messages = []
     content_parts = []
     texts = []
+    reasoning = []
     has_non_text = False
+    out = []
+    server_ids = set()
+    result_ids = set()
+    cited = wb_messages_web.citations_from_blocks(blocks)
+
+    def flush():
+        nonlocal tool_calls, content_parts, texts, reasoning, has_non_text
+        if not tool_calls and not texts and not has_non_text and not reasoning:
+            return
+        msg = {"role": role or "user"}
+        if tool_calls:
+            msg["tool_calls"] = tool_calls
+        msg["content"] = content_parts if has_non_text else "".join(texts)
+        if reasoning and role == "assistant":
+            msg["reasoning_content"] = "".join(reasoning)
+        out.append(msg)
+        tool_calls, content_parts, texts, reasoning = [], [], [], []
+        has_non_text = False
+
     for block in blocks:
         if not isinstance(block, dict):
             continue
         typ = str(block.get("type") or "")
-        if typ in ("thinking", "redacted_thinking"):
+        if typ == "thinking":
+            if role == "assistant" and isinstance(block.get("thinking"), str):
+                reasoning.append(block["thinking"])
+            continue
+        if typ == "redacted_thinking":
             continue
         if typ in ("tool_use", "server_tool_use"):
+            if typ == "server_tool_use":
+                call_id = _anthropic_text(block.get("id"))
+                if role != "assistant" or block.get("name") != wb_webtools.WEB_SEARCH_NAME or not call_id:
+                    raise ValueError("only assistant server web_search history with a call ID is supported")
+                if call_id in server_ids:
+                    raise ValueError("duplicate server web_search history call ID")
+                server_ids.add(call_id)
             tool_calls.append({
                 "id": _anthropic_text(block.get("id")),
                 "type": "function",
@@ -6291,6 +6347,18 @@ def _anthropic_blocks_to_messages(role, blocks):
                     "arguments": _anthropic_json_text(block.get("input")),
                 },
             })
+            continue
+        if typ == "web_search_tool_result":
+            call_id = _anthropic_text(block.get("tool_use_id"))
+            if call_id not in server_ids or call_id in result_ids:
+                raise ValueError("web_search_tool_result must match a preceding server_tool_use ID")
+            result_ids.add(call_id)
+            # Unlike user-owned tool_result, server results live in the
+            # assistant content. Chat requires their call to come first.
+            if tool_calls:
+                flush()
+            out.append({"role": "tool", "tool_call_id": call_id,
+                        "content": wb_messages_web.history_result_text(block, cited, replay_scope)})
             continue
         if typ == "tool_result":
             tool_messages.append({
@@ -6311,26 +6379,17 @@ def _anthropic_blocks_to_messages(role, blocks):
             has_non_text = True
             content_parts.append({"type": "text", "text": _anthropic_document_text(block)})
             continue
-        text = _anthropic_block_text(block)
+        text = (wb_messages_web.text_with_citations(block) if typ == "text"
+                else _anthropic_block_text(block))
         texts.append(text)
         content_parts.append({"type": "text", "text": text})
-    out = list(tool_messages)
-    if not tool_calls and not texts and not has_non_text:
-        return out
-    msg = {"role": role or "user"}
-    if tool_calls:
-        msg["tool_calls"] = tool_calls
-    if has_non_text:
-        msg["content"] = content_parts
-    elif texts:
-        msg["content"] = "".join(texts)
-    else:
-        msg["content"] = ""
-    out.append(msg)
-    return out
+    if server_ids != result_ids:
+        raise ValueError("server web_search history requires the matching web_search_tool_result")
+    flush()
+    return tool_messages + out
 
 
-def messages_to_chat(payload):
+def messages_to_chat(payload, replay_scope=None):
     """Translate an Anthropic Messages request into Chat Completions."""
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
@@ -6360,7 +6419,17 @@ def messages_to_chat(payload):
     metadata = payload.get("metadata")
     if isinstance(metadata, dict) and metadata.get("user_id") is not None:
         chat["user"] = metadata.get("user_id")
-    tools, skipped = anthropic_tools_to_chat(payload.get("tools"))
+    search = wb_messages_web.search_options(payload.get("tools"))
+    declared = payload.get("tools") or []
+    regular = [t for t in declared if t.get("type") not in ("web_search", "web_search_20250305")]
+    tools, skipped = anthropic_tools_to_chat(regular)
+    if search is not None:
+        if not local_web_tools_enabled():
+            raise ValueError("Messages server web_search requires the panel's local web tools switch")
+        if any(tool_name_of(t) == wb_webtools.WEB_SEARCH_NAME for t in tools):
+            raise ValueError("native and client-owned web_search tools cannot share a name")
+        tools.append(wb_webtools.web_search_tool_def())
+        chat["_messages_web_search"] = search
     if tools:
         chat["tools"] = tools
     choice = _anthropic_tool_choice(payload.get("tool_choice"))
@@ -6392,7 +6461,7 @@ def messages_to_chat(payload):
         if isinstance(content, str):
             messages.append({"role": role, "content": content})
         elif isinstance(content, list):
-            messages.extend(_anthropic_blocks_to_messages(role, content))
+            messages.extend(_anthropic_blocks_to_messages(role, content, replay_scope))
         elif content is not None:
             text = _anthropic_text(content)
             if text:
@@ -6508,6 +6577,174 @@ def _anthropic_estimate_chat_tokens(chat):
     return sum(estimate_tokens(value) for value in values if value)
 
 
+def messages_web_start(holder, model, chunk=None):
+    if holder.get("messages_started"):
+        return None
+    holder["messages_started"] = True
+    chunk = chunk or {}
+    holder["messages_id"] = _anthropic_message_id(chunk.get("id"))
+    return anthropic_sse_frame("message_start", {"message": {
+        "id": holder["messages_id"], "type": "message", "role": "assistant", "content": [],
+        "model": chunk.get("model") or model, "stop_reason": None, "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0}}})
+
+
+def messages_web_block_events(holder, block):
+    """Emit a complete block; indexes span every upstream/search round."""
+    index = holder.get("messages_next_index", 0)
+    holder["messages_next_index"] = index + 1
+    typ = block["type"]
+    start = dict(block)
+    if typ == "text":
+        start["text"] = ""
+        start.pop("citations", None)
+    elif typ in ("tool_use", "server_tool_use"):
+        start["input"] = {}
+    yield anthropic_sse_frame("content_block_start", {"index": index, "content_block": start})
+    if typ == "text":
+        if block.get("text"):
+            yield anthropic_sse_frame("content_block_delta", {
+                "index": index, "delta": {"type": "text_delta", "text": block["text"]}})
+        for citation in block.get("citations") or []:
+            yield anthropic_sse_frame("content_block_delta", {
+                "index": index, "delta": {"type": "citations_delta", "citation": citation}})
+    elif typ in ("tool_use", "server_tool_use"):
+        yield anthropic_sse_frame("content_block_delta", {
+            "index": index, "delta": {"type": "input_json_delta",
+                "partial_json": _anthropic_json_text(block["input"])}})
+    yield anthropic_sse_frame("content_block_stop", {"index": index})
+
+
+def messages_web_end_events(holder, flow):
+    usage = _anthropic_usage(flow.usage)
+    usage["server_tool_use"] = {"web_search_requests": flow.searches}
+    yield anthropic_sse_frame("message_delta", {
+        "delta": {"stop_reason": holder.get("messages_stop") or "end_turn", "stop_sequence": None},
+        "usage": usage})
+    yield anthropic_sse_frame("message_stop", {})
+
+
+def stream_messages_web_events(raw_iter, model, holder):
+    """Stream answer text while holding internal calls for the server executor."""
+    flow = holder["web_flow"]
+    text_parts, reasoning, tools, dsml = [], [], {}, []
+    buffer = ""
+    text_index = None
+    finish = None
+    saw_done = False
+
+    def emit_text(text):
+        nonlocal text_index
+        if not text:
+            return
+        text_parts.append(text)
+        if text_index is None:
+            text_index = holder.get("messages_next_index", 0)
+            holder["messages_next_index"] = text_index + 1
+            yield anthropic_sse_frame("content_block_start", {
+                "index": text_index, "content_block": {"type": "text", "text": ""}})
+        yield anthropic_sse_frame("content_block_delta", {
+            "index": text_index, "delta": {"type": "text_delta", "text": text}})
+
+    for raw in raw_iter:
+        data = strip_data_prefix(raw.decode("utf-8", "replace"))
+        if not data:
+            continue
+        if data == "[DONE]":
+            saw_done = True
+            continue
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        if isinstance(chunk.get("usage"), dict):
+            holder["usage"] = chunk["usage"]
+        if chunk.get("error"):
+            raise RuntimeError("messages upstream error: %s" % chunk["error"])
+        start = messages_web_start(holder, model, chunk)
+        if start:
+            yield start
+        for choice in (chunk.get("choices") or [])[:1]:
+            delta = choice.get("delta") or {}
+            if isinstance(delta.get("reasoning_content"), str):
+                reasoning.append(delta["reasoning_content"])
+            for call in delta.get("tool_calls") or []:
+                index = call.get("index", 0)
+                entry = tools.setdefault(index, {"id": _new_id("toolu_"), "name": "", "arguments": ""})
+                if call.get("id"):
+                    entry["id"] = call["id"]
+                fn = call.get("function") or {}
+                entry["name"] += fn.get("name") or ""
+                entry["arguments"] += fn.get("arguments") or ""
+            fc = delta.get("function_call")
+            if isinstance(fc, dict) and fc.get("name"):
+                entry = tools.setdefault(0, {"id": _new_id("toolu_"), "name": "", "arguments": ""})
+                entry["name"] = fc["name"]
+                entry["arguments"] += fc.get("arguments") or ""
+            piece = delta.get("content")
+            if isinstance(piece, str):
+                buffer += piece
+                # Hide DSML calls, including tags split across frames. Plain
+                # answer text continues immediately, preserving first token time.
+                while buffer:
+                    index = buffer.find("<")
+                    if index == -1:
+                        yield from emit_text(buffer)
+                        buffer = ""
+                        break
+                    match = DSML_CALLS_RE.search(buffer)
+                    if match and match.start() == index:
+                        yield from emit_text(buffer[:index])
+                        calls, _ = parse_dsml_tool_calls(match.group(0))
+                        dsml.extend(calls or [])
+                        buffer = buffer[match.end():]
+                        continue
+                    candidate = buffer[index:index + 30]
+                    if "DSML" in candidate or (len(candidate) < 10 and not any(c in candidate for c in " \t\n>")):
+                        yield from emit_text(buffer[:index])
+                        buffer = buffer[index:]
+                        break
+                    end = buffer.find("<", index + 1)
+                    end = end if end >= 0 else len(buffer)
+                    yield from emit_text(buffer[:end])
+                    buffer = buffer[end:]
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+    if not saw_done and not finish:
+        raise RuntimeError("messages upstream stream ended before completion")
+    if "DSML" in buffer:
+        raise RuntimeError("messages upstream returned an incomplete DSML tool call")
+    start = messages_web_start(holder, model)
+    if start:
+        yield start
+    yield from emit_text(buffer)
+    if text_index is not None:
+        yield anthropic_sse_frame("content_block_stop", {"index": text_index})
+    calls = [tools[index] for index in sorted(tools) if tools[index]["name"]]
+    if not calls:
+        calls = dsml
+    message = {"role": "assistant", "content": "".join(text_parts) or None,
+               "tool_calls": [{"id": c["id"], "type": "function", "function": {
+                   "name": c["name"], "arguments": c.get("arguments") or "{}"}} for c in calls]}
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+    holder["round_message"] = message
+    holder["internal_calls"] = flow.internal_calls(message)
+    if finish == "length" and holder["internal_calls"]:
+        raise RuntimeError("messages server search arguments were truncated by max_tokens")
+    client_calls = [c for c in calls if not flow.is_internal_tool(c["name"])]
+    holder["client_calls"] = bool(client_calls)
+    holder["messages_stop"] = "tool_use" if client_calls else _anthropic_stop_reason(finish)
+    holder["client_blocks"] = []
+    for call in client_calls:
+        if is_truncated_arguments(call.get("arguments")):
+            raise RuntimeError("messages client tool arguments are incomplete")
+        holder["client_blocks"].append({"type": "tool_use", "id": call["id"],
+            "name": call["name"], "input": _anthropic_parse_tool_input(call.get("arguments"))})
+
+
 def stream_messages_events(raw_iter, model, holder=None):
     """Yield Anthropic Messages SSE frames from a chat-completions SSE stream."""
     holder = holder if isinstance(holder, dict) else {}
@@ -6578,15 +6815,8 @@ def stream_messages_events(raw_iter, model, holder=None):
             state["usage"] = chunk["usage"]
             holder["usage"] = state["usage"]
         if isinstance(chunk.get("error"), dict):
-            state["failed"] = True
             err = chunk["error"]
-            yield anthropic_sse_frame("error", {
-                "error": {
-                    "type": anthropic_error_type(502),
-                    "message": _anthropic_text(err.get("message") or "upstream error"),
-                }
-            })
-            return
+            raise RuntimeError(_anthropic_text(err.get("message") or "upstream error"))
         start = ensure_start(chunk)
         if start:
             yield start
@@ -7000,26 +7230,19 @@ def stream_responses_events(upstream, model, holder):
                     _action = {"type": "search", "query": wb_webtools.query_args(_a)}
                 _ws_id = _new_id("ws_")
                 _ws_idx = len(outputs)
-                outputs.append(None)
+                _ws_item = {"id": _ws_id, "type": "web_search_call", "status": "in_progress"}
+                if _action.get("query") or _action.get("url"):
+                    _ws_item["action"] = _action
+                outputs.append(_ws_item)
+                holder.setdefault("pending_web_items", []).append((_ws_idx, _ws_item))
                 yield ev("response.output_item.added", {
                     "output_index": _ws_idx,
-                    "item": {"id": _ws_id, "type": "web_search_call",
-                             "status": "in_progress"},
+                    "item": _ws_item,
                 })
                 yield ev("response.web_search_call.in_progress", {
                     "output_index": _ws_idx, "item_id": _ws_id,
                 })
                 yield ev("response.web_search_call.searching", {
-                    "output_index": _ws_idx, "item_id": _ws_id,
-                })
-                _ws_item = {"id": _ws_id, "type": "web_search_call", "status": "completed"}
-                if _action.get("query") or _action.get("url"):
-                    _ws_item["action"] = _action
-                outputs[_ws_idx] = _ws_item
-                yield ev("response.output_item.done", {
-                    "output_index": _ws_idx, "item": _ws_item,
-                })
-                yield ev("response.web_search_call.completed", {
                     "output_index": _ws_idx, "item_id": _ws_id,
                 })
         # 3. Emit message item only if text was emitted OR no other output item exists
@@ -8449,10 +8672,7 @@ class Handler(BaseHTTPRequestHandler):
         have to answer in the Anthropic envelope, or a Claude Code client sees
         an OpenAI-shaped error it cannot parse.
         """
-        return self.path.split("?")[0] in (
-            "/v1/messages", "/messages",
-            "/v1/messages/count_tokens", "/messages/count_tokens",
-        )
+        return self.path.split("?")[0] in MESSAGES_ROUTES
     def _validate_settings_save(self, payload):
         """Validate the whole panel save before anything is written.
 
@@ -9814,10 +10034,14 @@ class Handler(BaseHTTPRequestHandler):
                         holder.pop(field, None)
                     holder["suppress_lifecycle"] = rounds > 0
                     raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
-                    for frame in stream_responses_events(
-                            timing.wrap(writer.iterate(raw)), model, holder):
-                        writer.write(clean_responses_frame(frame))
-                        writer.flush()
+                    try:
+                        for frame in stream_responses_events(
+                                timing.wrap(writer.iterate(raw)), model, holder):
+                            writer.write(clean_responses_frame(frame))
+                            writer.flush()
+                    finally:
+                        if flow:
+                            raw.close()
                     usage = holder.get("usage")
                     if flow:
                         flow.usage = wb_webflow.add_usage(flow.usage, usage)
@@ -9828,17 +10052,24 @@ class Handler(BaseHTTPRequestHandler):
                     internal = holder.get("internal_calls") or []
                     if not internal:
                         break
+                    upstream.close()
+                    writer.check()
+                    flow.execute(internal, holder.get("round_message"))
+                    writer.check()
+                    holder["web_sources"] = flow.sources
+                    for frame in completed_web_call_frames(holder):
+                        writer.write(clean_responses_frame(frame))
+                        writer.flush()
                     if holder.get("client_calls"):
-                        flow.execute(internal, holder.get("round_message"))
-                        writer.check()
                         for frame in mixed_web_result_frames(holder, flow):
                             writer.write(clean_responses_frame(frame))
                             writer.flush()
                         break
-                    upstream.close()
-                    upstream, account, _ = follow_up_with_tool_results(
-                        internal, holder, model, session_key, t_start, cancel_check=writer.check)
-                    timing = wb_metrics.GenerationTiming(holder.get("round_started_at", time.time()))
+                    round_started_at = time.time()
+                    upstream, account, effort = open_upstream(
+                        flow.followup_body(), session_key=session_key, target_realm=realm,
+                        session_meta=session_meta, deadline=flow.deadline, preferred_uid=account.uid)
+                    timing = wb_metrics.GenerationTiming(round_started_at)
                     rounds += 1
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 if not round_recorded:
@@ -9888,6 +10119,7 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 message = chat_obj["choices"][0]["message"]
                 holder["round_message"] = message
+                holder["preferred_uid"] = account.uid
                 client_calls = [tc for tc in message.get("tool_calls") or []
                                 if not wb_webtools.is_internal_tool((tc.get("function") or {}).get("name"))]
                 if client_calls:
@@ -9923,7 +10155,7 @@ class Handler(BaseHTTPRequestHandler):
         official model-token count.
         """
         try:
-            chat = messages_to_chat(payload)
+            chat = messages_to_chat(payload, replay_scope=self._key_id())
         except ValueError as exc:
             return self._anthropic_error(400, str(exc), "invalid_request_error")
         return self._json(200, {"input_tokens": _anthropic_estimate_chat_tokens(chat)})
@@ -9931,7 +10163,10 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_messages(self, payload):
         """Serve an Anthropic Messages request through the chat pipeline."""
         try:
-            chat_req = messages_to_chat(payload)
+            chat_req = messages_to_chat(payload, replay_scope=self._key_id())
+            web_format = wb_messages_web.response_format(self.headers)
+            flow = (wb_messages_web.MessagesWebFlow(chat_req, web_format, self._key_id())
+                    if "_messages_web_search" in chat_req else None)
         except ValueError as exc:
             return self._anthropic_error(400, str(exc), "invalid_request_error")
         model = chat_req.get("model") or "unknown"
@@ -9950,9 +10185,10 @@ class Handler(BaseHTTPRequestHandler):
             user_agent=self.headers.get("User-Agent") or "",
             path=self.path.split("?")[0],
         )
-        log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d"
+        log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d local_search=%s web_format=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
-               chat_req.get("reasoning_effort"), len(chat_req.get("tools") or [])))
+               chat_req.get("reasoning_effort"), len(chat_req.get("tools") or []),
+               flow is not None, web_format))
         try:
             req_realm = self._request_realm() or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
@@ -9971,7 +10207,7 @@ class Handler(BaseHTTPRequestHandler):
                 trace_id=(self.headers.get("X-Trace-ID") or ""))
             upstream, account, effort = open_upstream(
                 chat_req, session_key=session_key, target_realm=req_realm,
-                session_meta=session_meta)
+                session_meta=session_meta, deadline=flow.deadline if flow else None)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -10012,27 +10248,81 @@ class Handler(BaseHTTPRequestHandler):
                 return self._messages_stream_response(
                     upstream, model, fp, account, t_start,
                     base_body=chat_req, session_key=session_key,
-                    realm=req_realm, session_meta=session_meta, effort=effort)
+                    realm=req_realm, session_meta=session_meta, effort=effort, web_flow=flow)
             return self._messages_nonstream_response(
                 upstream, model, fp, account, t_start,
                 base_body=chat_req, session_key=session_key,
-                realm=req_realm, effort=effort)
+                realm=req_realm, session_meta=session_meta, effort=effort, web_flow=flow)
 
     def _messages_nonstream_response(self, upstream, model, fp, account, t_start,
                                      base_body=None, session_key=None, realm=None,
-                                     effort=None):
+                                     session_meta=None, effort=None, web_flow=None):
+        flow = web_flow
+        content = []
         timing = wb_metrics.GenerationTiming(t_start)
+        round_recorded = False
         try:
-            chat_obj = aggregate_stream(timing.wrap(upstream), model, None)
-            result = chat_to_messages(chat_obj)
-            wall = int((time.time() - t_start) * 1000)
-            record_usage(model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
-                         **timing.fields(), fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
+            while True:
+                round_recorded = False
+                raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
+                chat_obj = aggregate_stream(timing.wrap(raw), model, None)
+                usage = chat_obj.get("usage")
+                if flow:
+                    flow.usage = wb_webflow.add_usage(flow.usage, usage)
+                record_usage(model, usage, stream=False, elapsed_ms=int((time.time() - t_start) * 1000),
+                             **timing.fields(), fp=fp, account=account.uid, upstream=upstream,
+                             key=self._key_id(), effort=effort)
+                round_recorded = True
+                result = chat_to_messages(chat_obj)
+                if not flow:
+                    break
+                message = chat_obj["choices"][0]["message"]
+                internal = flow.internal_calls(message)
+                if chat_obj["choices"][0].get("finish_reason") == "length" and internal:
+                    raise RuntimeError("messages server search arguments were truncated by max_tokens")
+                client_calls = [tc for tc in message.get("tool_calls") or []
+                                if not flow.is_internal_tool((tc.get("function") or {}).get("name"))]
+                content.extend(block for block in result["content"] if block["type"] != "tool_use")
+                client_blocks = [block for block in result["content"]
+                                 if block["type"] == "tool_use" and block["name"] != wb_webtools.WEB_SEARCH_NAME]
+                if not internal:
+                    content.extend(client_blocks)
+                    break
+                upstream.close()
+                if flow.mode == "native":
+                    content.extend(wb_messages_web.call_block(call) for call in internal)
+                flow.execute(internal, message)
+                content.extend(flow.output_results())
+                content.extend(client_blocks)
+                if client_calls:
+                    result["stop_reason"] = "tool_use"
+                    break
+                if flow.remaining_output_tokens() == 0:
+                    result["stop_reason"] = "max_tokens"
+                    break
+                round_started_at = time.time()
+                upstream, account, effort = open_upstream(
+                    flow.followup_body(), session_key=session_key, target_realm=realm,
+                    session_meta=session_meta, deadline=flow.deadline, preferred_uid=account.uid)
+                timing = wb_metrics.GenerationTiming(round_started_at)
+            if flow:
+                result["content"] = content
+                result["usage"] = _anthropic_usage(flow.usage)
+                result["usage"]["server_tool_use"] = {"web_search_requests": flow.searches}
             return self._json(200, result)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            if not round_recorded:
+                record_usage(model, getattr(flow, "current_usage", None), stream=False,
+                             elapsed_ms=int((time.time() - t_start) * 1000), **timing.fields(),
+                             fp=fp, account=account.uid, upstream=upstream, key=self._key_id(),
+                             outcome="client_aborted", effort=effort)
+            return
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
-            record_error(model, 502, "messages upstream error: %s" % exc,
-                         elapsed_ms=wall, account=account.uid, upstream=upstream, key=self._key_id())
+            record_error(model, 502, "messages upstream/web error: %s" % exc,
+                         elapsed_ms=wall, account=account.uid, upstream=upstream, key=self._key_id(),
+                         usage=None if round_recorded else getattr(flow, "current_usage", None),
+                         stream=False, **timing.fields(), fp=fp)
             return self._anthropic_error(502, "upstream stream error: %s" % exc)
         finally:
             try:
@@ -10042,39 +10332,94 @@ class Handler(BaseHTTPRequestHandler):
 
     def _messages_stream_response(self, upstream, model, fp, account, t_start,
                                   base_body=None, session_key=None, realm=None,
-                                  session_meta=None, effort=None):
+                                  session_meta=None, effort=None, web_flow=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
         self.send_header("X-Accel-Buffering", "no")
+        if web_flow:
+            self.send_header("X-FHUB-Web-Format", web_flow.mode)
         self.send_header("Connection", "close")
         if cors_origin_allowed(self.path):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         with wb_stream.HeartbeatWriter(self.wfile, lambda: upstream) as writer:
-            holder = {"usage": None}
+            flow = web_flow
+            holder = {"usage": None, "web_flow": flow}
             timing = wb_metrics.GenerationTiming(t_start)
+            round_recorded = False
             try:
-                for frame in stream_messages_events(
-                        timing.wrap(writer.iterate(upstream)), model, holder):
-                    writer.write(frame)
-                    writer.flush()
-                wall = int((time.time() - t_start) * 1000)
-                record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                             **timing.fields(),
-                             fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
+                while True:
+                    round_recorded = False
+                    holder["usage"] = None
+                    raw = flow.iter_upstream(upstream, _apply_stream_idle_timeout) if flow else upstream
+                    frames = (stream_messages_web_events if flow else stream_messages_events)(
+                        timing.wrap(writer.iterate(raw)), model, holder)
+                    try:
+                        for frame in frames:
+                            writer.write(frame)
+                            writer.flush()
+                    finally:
+                        if flow:
+                            raw.close()
+                    usage = holder.get("usage")
+                    if flow:
+                        flow.usage = wb_webflow.add_usage(flow.usage, usage)
+                    record_usage(model, usage, stream=True, elapsed_ms=int((time.time() - t_start) * 1000),
+                                 **timing.fields(), fp=fp, account=account.uid, upstream=upstream,
+                                 key=self._key_id(), effort=effort)
+                    round_recorded = True
+                    internal = holder.get("internal_calls") or []
+                    if not internal:
+                        for block in holder.get("client_blocks") or []:
+                            for frame in messages_web_block_events(holder, block):
+                                writer.write(frame)
+                                writer.flush()
+                        break
+                    upstream.close()
+                    writer.check()
+                    if flow.mode == "native":
+                        for call in internal:
+                            for frame in messages_web_block_events(holder, wb_messages_web.call_block(call)):
+                                writer.write(frame)
+                                writer.flush()
+                    flow.execute(internal, holder["round_message"])
+                    writer.check()
+                    for block in flow.output_results():
+                        for frame in messages_web_block_events(holder, block):
+                            writer.write(frame)
+                            writer.flush()
+                    for block in holder.get("client_blocks") or []:
+                        for frame in messages_web_block_events(holder, block):
+                            writer.write(frame)
+                            writer.flush()
+                    if holder.get("client_calls"):
+                        break
+                    if flow.remaining_output_tokens() == 0:
+                        holder["messages_stop"] = "max_tokens"
+                        break
+                    round_started_at = time.time()
+                    upstream, account, effort = open_upstream(
+                        flow.followup_body(), session_key=session_key, target_realm=realm,
+                        session_meta=session_meta, deadline=flow.deadline, preferred_uid=account.uid)
+                    timing = wb_metrics.GenerationTiming(round_started_at)
+                if flow:
+                    for frame in messages_web_end_events(holder, flow):
+                        writer.write(frame)
+                        writer.flush()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 wall = int((time.time() - t_start) * 1000)
-                record_usage(model, holder.get("usage"), stream=True, elapsed_ms=wall,
-                             **timing.fields(),
-                             fp=fp, account=account.uid, upstream=upstream,
-                             outcome="client_aborted", key=self._key_id(), effort=effort)
+                if not round_recorded:
+                    record_usage(model, holder.get("usage") or getattr(flow, "current_usage", None),
+                                 stream=True, elapsed_ms=wall, **timing.fields(),
+                                 fp=fp, account=account.uid, upstream=upstream,
+                                 outcome="client_aborted", key=self._key_id(), effort=effort)
                 return
             except Exception as exc:
                 wall = int((time.time() - t_start) * 1000)
                 record_error(model, 502, "messages stream aborted: %s" % exc,
                              elapsed_ms=wall, account=account.uid, upstream=upstream,
-                             usage=holder.get("usage"), stream=True,
+                             usage=None if round_recorded else (holder.get("usage") or getattr(flow, "current_usage", None)), stream=True,
                              **timing.fields(), fp=fp, outcome="upstream_aborted",
                              key=self._key_id())
                 try:
@@ -10136,10 +10481,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_panel(path)
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
-        is_messages_route = path in (
-            "/v1/messages", "/messages",
-            "/v1/messages/count_tokens", "/messages/count_tokens",
-        )
+        is_messages_route = path in MESSAGES_ROUTES
         is_account_route = (
             path.startswith("/accounts/")
             or path == "/realm"

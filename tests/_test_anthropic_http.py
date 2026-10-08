@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +69,7 @@ MOCK = {
     "chunks": [],
     "json": {},
     "requests": [],
+    "rounds": [],
 }
 
 
@@ -95,7 +97,8 @@ class MockUpstream(BaseHTTPRequestHandler):
         MOCK["requests"].append({"path": self.path, "body": body})
         if self.path.endswith("/chat/completions"):
             if MOCK["stream"]:
-                payload = sse(MOCK["chunks"])
+                chunks = MOCK["rounds"].pop(0) if MOCK["rounds"] else MOCK["chunks"]
+                payload = sse(chunks)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(payload)))
@@ -418,6 +421,85 @@ try:
               for r in stream_rows), stream_rows[-3:])
     check("streamed messages record cache hits",
           any((r.get("cached_tokens") or 0) == 3 for r in stream_rows), stream_rows[-3:])
+
+    print()
+    print("[8] Messages aliases retain authentication, CORS and count_tokens")
+    for path in P.MESSAGES_PATHS:
+        code, _h, body = request("POST", path, {"model": "deepseek-v4.1-flash",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        check(path + " rejects anonymous access", code == 401, code)
+        code, headers, _body = request("OPTIONS", path, headers={"Origin": "https://example.org"})
+        check(path + " permits browser preflight", code in (200, 204) and headers.get("Access-Control-Allow-Origin") == "*",
+              (code, headers))
+        code, _h, body = request("POST", path + "/count_tokens", {"model": "deepseek-v4.1-flash",
+                              "messages": [{"role": "user", "content": "hi"}]}, headers={"x-api-key": "TESTKEY"})
+        check(path + " count_tokens", code == 200 and json.loads(body)["input_tokens"] > 0, (code, body))
+
+    print()
+    print("[9] real HTTP search, DSH output modes, history and SSE continuation")
+    search_chunks = [{"choices": [{"delta": {"reasoning_content": "actual reasoning", "tool_calls": [{
+        "index": 0, "id": "http-search", "type": "function", "function": {
+            "name": "web_search", "arguments": '{"query":"synthetic query"}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+         "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}}]
+    search_payload = {"model": "deepseek-v4.1-flash", "max_tokens": 64,
+                      "messages": [{"role": "user", "content": "search for facts"}],
+                      "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}]}
+    original_enabled = P.wb_settings.local_web_tools(ACCOUNTS)
+    source = {"query": "synthetic query", "results": [{"url": "https://example.org/",
+              "title": "HTTP source", "snippet": "Real backend excerpt."}]}
+    try:
+        P.wb_settings.set_local_web_tools(ACCOUNTS, False)
+        before = len(MOCK["requests"])
+        code, _h, body = request("POST", "/v1/messages", search_payload, headers={"x-api-key": "TESTKEY"})
+        check("disabled server search fails before upstream call", code == 400 and len(MOCK["requests"]) == before,
+              (code, body))
+        P.wb_settings.set_local_web_tools(ACCOUNTS, True)
+        with mock.patch.object(P.wb_webtools, "search_results", return_value=source):
+            native_content = None
+            for stream, main_chat in ((False, False), (True, False), (False, True), (True, True)):
+                MOCK["requests"] = []
+                MOCK["rounds"] = [search_chunks, TEXT_CHUNKS]
+                headers = {"x-api-key": "TESTKEY", "User-Agent": "deepseek-harness/0.0.1",
+                           "X-DeepSeek-Harness-Session-Id": "http-session"}
+                if main_chat:
+                    headers["X-DeepSeek-Harness-User-Id"] = "http-user"
+                code, h, body = request("POST", "/anthropic/v1/messages", dict(search_payload, stream=stream), headers=headers)
+                check("search request returns 200 stream=%s main=%s" % (stream, main_chat), code == 200, (code, body[:300]))
+                if stream:
+                    parsed = parse_sse(body)
+                    blocks = [p["content_block"] for e, p in parsed if e == "content_block_start"]
+                    final = [p for e, p in parsed if e == "message_delta"]
+                    check("web SSE has one successful lifecycle", sum(e == "message_start" for e, _ in parsed) == 1
+                          and sum(e == "message_stop" for e, _ in parsed) == 1 and not any(e == "error" for e, _ in parsed), parsed)
+                    check("web SSE disables reverse proxy buffering", h.get("X-Accel-Buffering") == "no", h)
+                    usage = final[-1]["usage"] if final else {}
+                else:
+                    payload = json.loads(body)
+                    blocks, usage = payload.get("content", []), payload.get("usage", {})
+                    if not main_chat:
+                        native_content = blocks
+                check("DSH chat hides server blocks; auxiliary search retains them",
+                      (all(b["type"] == "text" for b in blocks) if main_chat else
+                       any(b["type"] == "web_search_tool_result" for b in blocks)), blocks)
+                check("all upstream rounds contribute tokens", usage.get("input_tokens") == 16
+                      and usage.get("output_tokens") == 5 and usage.get("server_tool_use", {}).get("web_search_requests") == 1, usage)
+                check("HTTP request opens exactly two model rounds", len(MOCK["requests"]) == 2, MOCK["requests"])
+                follow = MOCK["requests"][-1]["body"]
+                assistant = next((m for m in follow["messages"] if m.get("tool_calls")), {})
+                check("continuation retains real reasoning and reduces max_tokens", assistant.get("reasoning_content") == "actual reasoning"
+                      and follow.get("max_tokens") == 61, follow)
+                check("private search markers never leave FHUB", not any(k.startswith("_") for k in follow), follow.keys())
+            MOCK["rounds"] = []
+            code, _h, body = request("POST", "/anthropic/messages", {"model": "deepseek-v4.1-flash", "max_tokens": 64,
+                "messages": [{"role": "user", "content": "search for facts"}, {"role": "assistant", "content": native_content},
+                             {"role": "user", "content": "continue"}]}, headers={"x-api-key": "TESTKEY"})
+            check("native history round-trips through authenticated HTTP", code == 200, (code, body[:300]))
+            history = MOCK["requests"][-1]["body"]["messages"]
+            check("history contains paired server call and visible results", any(m.get("tool_calls") for m in history)
+                  and any(m.get("role") == "tool" and "Real backend excerpt." in str(m.get("content")) for m in history), history)
+    finally:
+        P.wb_settings.set_local_web_tools(ACCOUNTS, original_enabled)
 finally:
     try:
         gateway.shutdown()

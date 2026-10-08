@@ -106,7 +106,7 @@ class _StubPool(object):
         return next((a for a in self.accounts if a.uid not in exclude
                      and a.realm == realm and a.ready(model=model)), None)
 
-    def reserve_for_session(self, payload, realm=None, session_key=None, exclude=(), model=None, estimate=None):
+    def reserve_for_session(self, payload, realm=None, session_key=None, exclude=(), model=None, estimate=None, preferred_uid=None):
         account = self.pick_for_session(realm, session_key, exclude, model)
         return (account, None) if account and account.acquire() else (None, None)
 

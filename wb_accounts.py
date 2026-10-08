@@ -2208,49 +2208,56 @@ class AccountPool(object):
         return sum(1 for a in snapshot if a.enabled and a.access_token
                    and a.ready(model=model, allow_refresh=allow_refresh))
 
-    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None, allow_refresh=True):
+    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None,
+                         allow_refresh=True, preferred_uid=None):
         exclude = exclude or set()
         now = time.time()
         with self._lock:
-            fair_free = self.pool_cfg.get("free_fair_pick", True) and any(
-                (not realm or a.realm == realm) and self._model_free_for(a, model, now)
-                for a in self.accounts)
-        # Free traffic should not remain pinned for hours to one account.
-        # Paid requests retain affinity and its prompt-cache benefit.
-        if session_key and not fair_free:
-            bound_uid = self.affinity.get(session_key)
-            if bound_uid and bound_uid not in exclude:
-                account = self.get(bound_uid)
-                if account and (not realm or account.realm == realm) and account.ready(model=model, allow_refresh=allow_refresh):
-                    with self._lock:
-                        preferred = [a for a in self.accounts
-                                     if (not realm or a.realm == realm) and a.uid not in exclude
-                                     and getattr(a, "priority", DEFAULT_PRIORITY)
-                                     < getattr(account, "priority", DEFAULT_PRIORITY)]
-                        cfg = dict(self.pool_cfg)
-                    if cfg.get("weighted_pick", True):
-                        preferred = self._apply_credit_floor(preferred, model, cfg, now)
-                    if not any(a.ready(model=model, allow_refresh=allow_refresh) for a in preferred):
-                        # A paid session may keep its cache only while its
-                        # account is still among the least-spent peers.
-                        # Otherwise the next send must join credit fairness.
-                        if not model:
-                            return account
-                        with self._lock:
-                            peers = [a for a in self.accounts
-                                     if (not realm or a.realm == realm)
-                                     and a.uid not in exclude
-                                     and getattr(a, "priority", DEFAULT_PRIORITY)
-                                     == getattr(account, "priority", DEFAULT_PRIORITY)]
-                        if cfg.get("weighted_pick", True):
-                            peers = self._apply_credit_floor(peers, model, cfg, now)
-                        peers = [a for a in peers if a.ready(model=model, allow_refresh=allow_refresh)]
-                        if (self._model_free_for(account, model, now)
-                                or account in wb_pool.least_credit_spent(peers)):
-                            return account
+            cfg = dict(self.pool_cfg)
+        # A continuation may prefer its actual preceding account even when
+        # the caller has no session ID. It still obeys health and priority.
+        bound_uid = preferred_uid or (self.affinity.get(session_key) if session_key else None)
+        if bound_uid and bound_uid not in exclude:
+            account = self.get(bound_uid)
+            if account and (not realm or account.realm == realm) and account.ready(model=model, allow_refresh=allow_refresh):
+                priority = getattr(account, "priority", DEFAULT_PRIORITY)
+                with self._lock:
+                    eligible = [a for a in self.accounts
+                                if (not realm or a.realm == realm) and a.uid not in exclude
+                                and getattr(a, "priority", DEFAULT_PRIORITY) <= priority]
+                if cfg.get("weighted_pick", True):
+                    eligible = self._apply_credit_floor(eligible, model, cfg, now)
+                eligible = [a for a in eligible if a.ready(model=model, allow_refresh=allow_refresh)]
+                peers = [a for a in eligible if getattr(a, "priority", DEFAULT_PRIORITY) == priority]
+                if account in peers and not any(getattr(a, "priority", DEFAULT_PRIORITY) < priority for a in eligible):
+                    reuse = bool(preferred_uid) or not model
+                    if not reuse and self._model_free_for(account, model, now):
+                        if cfg.get("free_fair_pick", True):
+                            free_peers = [a for a in peers if self._model_free_for(a, model, now)]
+                            known_free = [a for a in free_peers if a.model_is_free(model)]
+                            if cfg.get("weighted_pick", True) and known_free:
+                                free_peers = known_free
+                            loads = [(a, wb_pool.free_tokens_today(a)) for a in free_peers]
+                            bound_load = next((value for a, value in loads if a is account), None)
+                            window = cfg.get("free_switch_window_tokens", 262144)
+                            reuse = (bound_load is not None
+                                     and bound_load - min(value for a, value in loads) < window)
+                            if window == 0:
+                                reuse = bound_load is not None and bound_load == min(value for a, value in loads)
+                        else:
+                            reuse = True
+                    elif not reuse:
+                        # Paid balancing still uses credits, never token growth.
+                        reuse = account in wb_pool.least_credit_spent(peers)
+                    if reuse:
+                        account.last_used_at = now
+                        if session_key and preferred_uid:
+                            self.affinity.bind(session_key, account.uid)
+                        return account
+            if session_key:
                 self.affinity.unbind(session_key)
         account = self.pick(realm=realm, exclude=exclude, model=model, allow_refresh=allow_refresh)
-        if account and session_key and not fair_free:
+        if account and session_key:
             self.affinity.bind(session_key, account.uid)
         return account
 
@@ -2260,14 +2267,16 @@ class AccountPool(object):
         tier = self._cost_tier(account, model, self.pool_cfg, now)
         return tier == 0 or (tier == 1 and account.model_is_free(model))
 
-    def reserve_for_session(self, payload, realm=None, session_key=None, exclude=None, model=None, estimate=None):
+    def reserve_for_session(self, payload, realm=None, session_key=None, exclude=None, model=None,
+                            estimate=None, preferred_uid=None):
         """Selection and reservation are one operation for concurrent arrivals."""
         estimated = estimate or wb_fairness.estimate(payload, realm)
         excluded = set(exclude or ())
         with self._lock:
             for _ in range(len(self.accounts) + 1):
                 account = self.pick_for_session(realm=realm, session_key=session_key,
-                                                exclude=excluded, model=model, allow_refresh=False)
+                                                exclude=excluded, model=model, allow_refresh=False,
+                                                preferred_uid=preferred_uid)
                 if account is None:
                     return None, None
                 reservation = dict(estimated)

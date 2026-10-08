@@ -4898,7 +4898,8 @@ const ADVANCED_SETTING_GROUPS = [
     desc: '公平调度、并发上限、限流恢复与会话绑定。',
     fields: [
       {key:'weighted_pick', label:'加权选号', type:'bool', hint:'同优先级付费账号先比较当日积分消耗与在途预估；并列时加权，关闭后并列轮询。'},
-      {key:'free_fair_pick', label:'免费模型 Token 公平调度', type:'bool', hint:'国内、国际分别比较当日免费 Token 与在途预估，优先使用量较少的同优先级账号。'},
+      {key:'free_fair_pick', label:'免费模型 Token 公平调度', type:'bool', hint:'国内、国际分别比较当日免费 Token 与在途预估；同一会话在切换窗口内优先沿用账号。'},
+      {key:'free_switch_window_tokens', label:'免费会话换号窗口（Token）', type:'int', min:0, hint:'默认 262144（256K）。绑定账号比同优先级最低用量账号多出该值后才重新选号；0 = 每次比较最低用量。'},
       {key:'soft_rate', label:'软冷却基数（秒）', type:'number', min:0, step:'any', hint:'遇到上游软限流后的基础冷却秒数。'},
       {key:'soft_rate_max', label:'软冷却上限（秒）', type:'number', min:0, step:'any', hint:'指数退避的封顶秒数。'},
       {key:'breaker_threshold', label:'熔断阈值', type:'int', min:1, hint:'连续失败达到此数后进入熔断。'},

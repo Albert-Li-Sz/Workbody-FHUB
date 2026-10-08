@@ -1,13 +1,24 @@
 #!/bin/sh
 set -eu
-UPDATE_VERSION=1.1.0
+UPDATE_VERSION=1.1.1
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if ! command -v python3 >/dev/null 2>&1; then
     printf '%s\n' '需要 Python 3.9+；Debian/Ubuntu 可先安装 python3。' >&2
     exit 1
 fi
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else "需要 Python 3.9+")'
-if [ -f "$script_dir/update.py" ]; then
+if [ -f "$script_dir/update.py" ] && python3 - "$script_dir/update.py" "$UPDATE_VERSION" <<'PY'
+import ast, pathlib, sys
+try:
+    tree = ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    version = next(ast.literal_eval(node.value) for node in tree.body
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "VERSION" for target in node.targets))
+except (OSError, SyntaxError, ValueError, StopIteration):
+    raise SystemExit(1)
+raise SystemExit(0 if version == sys.argv[2] else 1)
+PY
+then
     exec python3 "$script_dir/update.py" --directory "$script_dir" "$@"
 fi
 # A copy downloaded into an old installation can bootstrap its matching

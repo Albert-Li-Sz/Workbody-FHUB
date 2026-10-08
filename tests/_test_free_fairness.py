@@ -1,4 +1,4 @@
-"""Free requests rotate within each realm, including concurrent sessions."""
+"""Free fairness uses a large session window within each realm."""
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -15,6 +15,7 @@ os.environ["WB_PROXY_USAGE_DIR"] = _RUNTIME.name
 import wb_accounts as A
 import wb_pool
 import wb_proxy as P
+import wb_settings
 
 
 class FairnessTests(unittest.TestCase):
@@ -39,16 +40,65 @@ class FairnessTests(unittest.TestCase):
         self.assertEqual(Counter(cn), {"cn0": 4, "cn1": 4, "cn2": 4})
         self.assertEqual(Counter(intl), {"intl0": 4, "intl1": 4, "intl2": 4})
 
-    def test_a_long_session_does_not_pin_every_free_request(self):
-        with mock.patch.object(wb_pool, "choose", side_effect=lambda candidates, *args, **kwargs: candidates[0]):
-            picked = [self.pool.pick_for_session(realm="cn", model="free-model",
-                      session_key="synthetic-session").uid for _ in range(9)]
-        self.assertEqual(Counter(picked), {"cn0": 3, "cn1": 3, "cn2": 3})
+    def test_token_growth_below_window_keeps_the_session_account(self):
+        for realm in ("cn", "intl"):
+            key = realm + "-session"
+            account = self.pool.pick_for_session(realm=realm, model="free-model", session_key=key)
+            for load in (1, 1000, 64000, 262143):
+                account.free_tokens_today = load
+                self.assertIs(self.pool.pick_for_session(realm=realm, model="free-model", session_key=key), account)
+            account.free_tokens_today = 262144
+            chosen = self.pool.pick_for_session(realm=realm, model="free-model", session_key=key)
+            self.assertIsNot(chosen, account)
+            self.assertEqual(chosen.realm, realm)
+            self.assertEqual(self.pool.affinity.get(key), chosen.uid)
+
+    def test_window_counts_pending_tokens_and_zero_uses_exact_minimum(self):
+        account = self.pool.get("cn0")
+        self.pool.affinity.bind("session", account.uid)
+        account.free_tokens_today = 262143
+        reservation = {"id": "pending", "kind": "free", "tokens": 1, "credit": 0}
+        self.assertTrue(account.acquire(reservation))
+        try:
+            self.assertIsNot(self.pool.pick_for_session(realm="cn", model="free-model", session_key="session"), account)
+        finally:
+            account.release("pending")
+        self.pool.apply_pool_config({"free_switch_window_tokens": 0})
+        self.pool.affinity.bind("session", account.uid)
+        account.free_tokens_today = 0
+        self.assertIs(self.pool.pick_for_session(realm="cn", model="free-model", session_key="session"), account)
+        account.free_tokens_today = 1
+        self.assertIsNot(self.pool.pick_for_session(realm="cn", model="free-model", session_key="session"), account)
+
+    def test_preferred_continuation_ignores_growth_but_obeys_health_priority_and_realm(self):
+        account = self.pool.get("cn0")
+        account.free_tokens_today = 1000000
+        account.daily_credits_today = 1000000
+        for model in ("free-model", "paid-model"):
+            self.assertIs(self.pool.pick_for_session(realm="cn", model=model, preferred_uid=account.uid), account)
+        self.assertIsNot(self.pool.pick_for_session(realm="intl", model="free-model", preferred_uid=account.uid), account)
+        self.assertIsNot(self.pool.pick_for_session(realm="cn", model="free-model", preferred_uid=account.uid,
+                                                  exclude={account.uid}), account)
+        account.enabled = False
+        self.assertIsNot(self.pool.pick_for_session(realm="cn", model="free-model", preferred_uid=account.uid), account)
+        account.enabled = True
+        self.pool.get("cn1").priority = 0
+        self.assertEqual(self.pool.pick_for_session(realm="cn", model="free-model", preferred_uid=account.uid).uid, "cn1")
+
+    def test_window_survives_settings_reload_and_invalid_values_are_rejected(self):
+        self.assertEqual(wb_settings.pool_config(self.directory.name)["free_switch_window_tokens"], 262144)
+        wb_settings.set_pool_config(self.directory.name, {"free_switch_window_tokens": 524288})
+        restored = A.AccountPool(self.directory.name)
+        restored.load()
+        self.assertEqual(restored.pool_cfg["free_switch_window_tokens"], 524288)
+        for invalid in (-1, True, "1024", 1.5):
+            with self.assertRaises(ValueError):
+                wb_pool.validate_patch({"free_switch_window_tokens": invalid})
 
     def test_cost_learning_does_not_starve_untried_free_accounts(self):
         picked = []
-        for _ in range(12):
-            account = self.pool.pick_for_session(realm="cn", model="free-model", session_key="same-session")
+        for i in range(12):
+            account = self.pool.pick_for_session(realm="cn", model="free-model", session_key="new-session-%d" % i)
             picked.append(account.uid)
             self.pool.note_model_cost(account.uid, "free-model", 0)
         self.assertEqual(Counter(picked), {"cn0": 4, "cn1": 4, "cn2": 4})

@@ -3,7 +3,7 @@ ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-alpine@sha256:d9368b3
 FROM ${PYTHON_IMAGE}
 
 LABEL org.opencontainers.image.title="Workbody-FHUB" \
-      org.opencontainers.image.version="1.1.0" \
+      org.opencontainers.image.version="1.1.1" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT" \
       org.opencontainers.image.description="WorkBuddy multi-account gateway; fork of workbuddy2api-hub" \
       org.opencontainers.image.source="https://github.com/Albert-Li-Sz/Workbody-FHUB"

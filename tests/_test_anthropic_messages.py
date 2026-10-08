@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+from unittest import mock
 
 _startup_dir = tempfile.TemporaryDirectory(prefix="anthropic-messages-")
 os.environ["ACCOUNTS_DIR"] = _startup_dir.name
@@ -74,13 +75,14 @@ request = {
     "context_management": {"edits": []},
     "top_k": 5,
 }
-chat = P.messages_to_chat(request)
+with mock.patch.object(P, "local_web_tools_enabled", return_value=True):
+    chat = P.messages_to_chat(request)
 check("model is preserved", chat.get("model") == "deepseek-v4.1-flash", chat.get("model"))
 check("stream is preserved", chat.get("stream") is True, chat.get("stream"))
 check("max_tokens is preserved", chat.get("max_tokens") == 128, chat.get("max_tokens"))
 _sys = chat["messages"][0]["content"]
-check("system blocks are joined and note appended",
-      _sys.startswith("sys-a\nsys-b") and "web_search" in _sys, chat["messages"][0])
+check("system blocks are preserved without an unavailable search note",
+      _sys == "sys-a\nsys-b", chat["messages"][0])
 check("stop_sequences map to stop", chat.get("stop") == ["END"], chat.get("stop"))
 check("metadata.user_id maps to user", chat.get("user") == "u", chat.get("user"))
 check("parallel tool calls are disabled", chat.get("parallel_tool_calls") is False, chat.get("parallel_tool_calls"))
@@ -88,14 +90,15 @@ check("effort maps from output_config", chat.get("reasoning_effort") == "high", 
 check("top_k is dropped", "top_k" not in chat, chat)
 check("thinking/output_config are not forwarded",
       "thinking" not in chat and "output_config" not in chat and "context_management" not in chat, chat)
-check("only client tool with input_schema is forwarded",
-      len(chat.get("tools") or []) == 1 and chat["tools"][0]["function"]["name"] == "Bash",
+check("client tool and internal search definition are forwarded",
+      [P.tool_name_of(t) for t in chat.get("tools") or []] == ["Bash", "web_search"],
       chat.get("tools"))
 user = chat["messages"][1]
 img = user["content"][1]["image_url"]["url"]
 check("base64 image becomes a data URL", img == "data:image/png;base64,aaa", img)
 asst = chat["messages"][2]
-check("thinking is not forwarded", "secret" not in json.dumps(asst, ensure_ascii=False), asst)
+check("real assistant thinking is retained for upstream tool history",
+      asst.get("reasoning_content") == "secret", asst)
 call = (asst.get("tool_calls") or [{}])[0]
 check("tool_use maps to an OpenAI tool call",
       call.get("id") == "toolu_1" and call["function"]["name"] == "Bash"
@@ -182,11 +185,13 @@ check("tool stop reason is tool_use", tool_final["delta"]["stop_reason"] == "too
 
 print()
 print("[6] streaming error event")
-err_events = parse_events(list(P.stream_messages_events(iter([
-    b'data: {"error":{"message":"boom"}}\n\n']), "m")))
-check("error event is emitted", err_events and err_events[-1][0] == "error", err_events)
-check("error payload has a native type",
-      err_events[-1][1]["error"]["type"] == "api_error" if err_events else False, err_events)
+try:
+    list(P.stream_messages_events(iter([
+        b'data: {"error":{"message":"boom"}}\n\n']), "m"))
+except RuntimeError as exc:
+    check("upstream error reaches the handler for failed usage accounting", "boom" in str(exc), exc)
+else:
+    check("upstream error reaches the handler for failed usage accounting", False)
 
 print()
 print("[7] count_tokens uses the native response shape")

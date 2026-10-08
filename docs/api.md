@@ -1,6 +1,6 @@
 # API 与余额协议说明
 
-适用版本：**1.1.0**。
+适用版本：**1.1.1**。
 
 ## 地址与鉴权
 
@@ -10,7 +10,7 @@
 Authorization: Bearer <WORKBODY_API_KEY>
 ```
 
-本文路径相对于服务根地址。模型协议遵循对应 SDK；余额和用量接口始终要求有效、已启用的网关 Key，面板会话及关闭模型调用鉴权不能绕过这一要求。返回使用 `Cache-Control: no-store`。
+本文路径相对于服务根地址。对话接口通过 WorkBuddy 的 Chat Completions 上游转换，兼容范围以本文为准；余额和用量接口始终要求有效、已启用的网关 Key，面板会话及关闭模型调用鉴权不能绕过这一要求。余额和用量返回使用 `Cache-Control: no-store`。
 
 Key 固定绑定 `cn` 或 `intl` 时，查询只读取该渠道；未绑定时跟随当前默认出口。余额与客户端用量不接受 `X-Realm`、`realm` 或 `channel` 参数覆盖 Key 的渠道。
 
@@ -25,6 +25,57 @@ Key 固定绑定 `cn` 或 `intl` 时，查询只读取该渠道；未绑定时�
 | POST | `/v1/messages` | Anthropic Messages |
 
 模型 ID 可以 URL 编码，包含 `/` 时使用 `%2F`。未知模型详情返回 `404 model not found`。目录可随上游更新，具体 ID、上下文、输出上限和能力以当前响应为准。
+
+### 联网搜索兼容范围
+
+| 接口 | 当前执行路径 | 兼容边界 |
+| --- | --- | --- |
+| Chat Completions | 普通函数工具由客户端执行，再回传结果 | 没有接入网关本地搜索执行循环 |
+| Responses | 开启面板的本地网络工具，并在请求中声明搜索／抓取工具后，由网关执行 DuckDuckGo 搜索／网页抓取，再让模型继续回答 | 支持流式和非流式；搜索后端及结果格式不等同于 DeepSeek 官方原生搜索 |
+| Messages | 开启面板的本地网络工具后，识别原生搜索声明，执行 DDG 搜索，再将真实结果回传模型续轮 | 支持流式、非流式及普通工具混合调用；提供原生结果和文本兼容两种输出 |
+
+[DeepSeek 官方 Anthropic 兼容文档](https://api-docs.deepseek.com/guides/anthropic_api/)已列出 `server_tool_use` 和 `web_search_tool_result` 支持。FHUB 通过本地 DDG 后端适配这些块；普通函数仍交给客户端执行。混合调用完成服务端搜索后返回 `stop_reason: "tool_use"`，等待客户端结果，不伪造普通工具结果。
+
+### Messages 搜索请求
+
+支持 `/v1/messages`、`/messages`、`/anthropic/v1/messages`、`/anthropic/messages`，各路径也支持 `/count_tokens` 后缀。仍使用 FHUB 网关 Key；不能传 DeepSeek 账号令牌代替。
+
+```json
+{
+  "model": "deepseek-v4.1-flash",
+  "max_tokens": 4096,
+  "messages": [{"role": "user", "content": "搜索相关资料并注明来源"}],
+  "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+}
+```
+
+支持 `web_search_20250305` 及 `web_search` 声明，支持 `max_uses`，以及二选一的 `allowed_domains`／`blocked_domains`（域名及其子域名）。位置参数、新版动态过滤工具或其他未实现选项返回 `400`。本地工具开关关闭时，原生搜索请求也明确返回 `400`。普通 `input_schema` 函数不受该开关影响；原生和客户端函数不能同时占用 `web_search` 名称。
+
+一次请求默认最多执行 3 轮工具、16 次调用、180 秒，`WB_MAX_WEB_ROUNDS` 可配置为 1–8；`max_uses` 是额外的搜索次数限制。达到工具预算时撤下服务端工具，让模型使用已有结果作答；超时或不完整的上游流返回错误。续轮按上游已报告的输出 Token 扣减 `max_tokens`，用尽时返回 `stop_reason: "max_tokens"`；上游未报告用量时无法精确扣减。Token 用量汇总所有模型续轮，调度记账按每轮实际账号进行；搜索阶段也持续发送 SSE 心跳。Responses 的 `web_search_call.completed` 在本地执行返回后发送。
+
+同一次联网请求的续轮优先使用上一轮账号；免费会话跨请求使用默认 256K Token 换号窗口，面板可持久化调整。详见[账号调度与会话绑定](account-scheduling.md#免费与付费均衡)。
+
+### 输出格式与 DSH
+
+请求头 `X-FHUB-Web-Format` 控制 Messages 的搜索输出：
+
+| 值 | 行为 |
+| --- | --- |
+| `native` | 返回配对的 `server_tool_use`／`web_search_tool_result`，真实来源与摘录的 `text.citations` |
+| `text` | 搜索仍由网关执行，返回包含来源、摘录或错误的文本，普通客户端工具仍返回 `tool_use` |
+| `auto`（默认） | 带 `x-deepseek-harness-user-id` 时选择 `text`，其他请求选择 `native`；可用上面两个值覆盖 |
+
+自动选择依据已核对的 [DSH 主聊天请求头](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/llm/llm-deepseek/src/adapter.ts#L113-L124)：该适配器不接受服务端工具块。辅助搜索未发送这个标识，并且[要求结构化搜索结果](https://github.com/deepseek-ai/deepseek-harness/blob/5badb15009ae1756c3afe0ae0cef1faafc290ccc/packages/web/web-search-deepseek/src/provider.ts#L109-L168)，因此使用原生模式。不同版本或反代移除标识时，可显式设置 `X-FHUB-Web-Format: text`。SSE 响应头会返回实际格式。
+
+DSH 的辅助搜索入口独立配置，需将 `DEEPSEEK_SEARCH_BASE_URL` 或搜索插件 `baseURL` 指向 FHUB 的 `/v1`（也可使用 `/anthropic/v1`），搜索模型填写本网关 `/v1/models` 返回的 ID。只修改聊天入口不会改变辅助搜索入口。
+
+### 搜索历史与存储
+
+回传完整的 assistant 内容块，调用 ID 与 `tool_use_id` 必须配对。FHUB 将其按“助手调用 → 工具结果 → 后续助手文本”转为上游历史，保留 URL、标题、摘录、文本引用和输入的真实 `thinking`；本次续轮也保留上游的 `reasoning_content`。不能恢复外部 `redacted_thinking`，也不生成官方思考签名。
+
+原生结果的 `encrypted_content`／`encrypted_index` 使用 `fhub_web_v1:` 开头的 FHUB 不透明回放引用，与当前网关 Key ID 绑定，并非 DeepSeek 官方密文。结果存入 SQLite 的 `web_replay` 表，保留 7 天，最多 4096 条；没有数据库时使用同样上限的进程内存，重启后失效。引用失效或 Key 不匹配会明确返回 `400`，不会悄悄丢弃结果；可改传可读结果文本。来自其他服务的密文无法解密，只保留可见 URL、标题及引用摘录，并在上游上下文注明完整内容不可用。
+
+协议差异、客户端报错出处及修复方案见[DeepSeek 联网搜索核对报告](research/deepseek-web-search-compatibility-2026-10-08.md)。
 
 ## 余额来源与刷新
 
