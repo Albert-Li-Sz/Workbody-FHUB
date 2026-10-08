@@ -110,6 +110,8 @@ ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.0
 
 Release 同时附带源码归档、升级脚本、`checksums.txt` 与 `images.json`。后者记录应用／Nginx 摘要和提交，`latest` 在应用镜像验证通过后才更新。
 
+维护者打包源码使用 `python3 scripts/package_release.py --ref <发布标签> --output-dir <输出目录>`。工具仅读取该 Git 提交，排除 `accounts`、`usage` 等运行时目录；这些目录即使只有跟踪的 `README.txt` 占位说明，也不能进入升级归档。发布工作流采用同一打包工具，并在上传全部附件后刷新校验文件。
+
 源码构建使用独立 overlay，不需要修改默认发布镜像配置：
 
 ```bash
