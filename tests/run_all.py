@@ -49,6 +49,11 @@ def tail(path):
 
 
 def main(argv):
+    # The parent also prints UTF-8 child failures (including model labels).
+    # Windows' default stdout encoding must not hide the original failure.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     if len(argv) > 1 and argv[1] in ("-h", "--help"):
         print(__doc__)
         return 0

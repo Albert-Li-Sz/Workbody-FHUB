@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
 const source = html.slice(html.indexOf('const MODEL_CHANNEL_LABELS'), html.indexOf('let CURRENT_GROWTH_UID'));
+const formatting = html.slice(html.indexOf('const fmt ='), html.indexOf('const esc ='));
 assert.ok(source.includes('async function selectModelsChannel'));
 const options = /id="modelChannelSelect"[\s\S]*?<\/select>/.exec(html)[0];
 assert.deepStrictEqual([...options.matchAll(/<option value="([^"]+)"/g)].map(m => m[1]),
@@ -19,7 +20,7 @@ const pending = [];
 const getJSON = url => new Promise((resolve,reject)=>pending.push({url,resolve,reject}));
 const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 global.MODELS_DATA = [];
-const api = new Function('window','document','localStorage','getJSON','esc',source +
+const api = new Function('window','document','localStorage','getJSON','esc',formatting + source +
   '\nreturn {loadModels,selectModelsChannel,renderAvailableModels};')(window,document,localStorage,getJSON,esc);
 
 (async()=>{

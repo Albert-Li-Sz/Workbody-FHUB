@@ -70,7 +70,7 @@ assert.ok(out.includes('钳制'), 'clamped model must show the 钳制 note: ' + 
 assert.ok(out.includes('4.1×'), 'ratio must be claimed/measured (131072/32000 = 4.1×): ' + out);
 assert.ok(out.includes('32K'), 'measured value must be shown: ' + out);
 assert.ok(out.includes('⚠'), 'clamped model must carry the warning marker: ' + out);
-assert.ok(out.includes('声称 131K'), 'tooltip must carry the claimed value: ' + out);
+assert.ok(out.includes('声称 131.07K'), 'tooltip must carry the claimed value: ' + out);
 
 // 2. The probe says the claimed spec holds -> green check, no clamp note.
 out = render([{ id: 'm2', context_length: 1000,
