@@ -507,7 +507,7 @@ def upgrade(args):
                    "previously_running": previously_running, "managed": managed,
                    "helper_image": new_app_image, "backup_complete": False}
         write_json(backup / "state.json", state)
-        installed = data_saved = False
+        installed = data_saved = runtime_installed = False
         runtime_command = compose_command(directory, [directory / RUNTIME_FILE])
         try:
             run(old_command + ["stop"] + old_managed, directory)
@@ -518,12 +518,13 @@ def upgrade(args):
             installed = True
             install_source(directory, staging, files)
             write_json(directory / RUNTIME_FILE, new_model)
+            runtime_installed = True
             run(runtime_command + ["up", "-d", "--no-build", "--pull", "never"] + managed, directory)
             wait_application(runtime_command, app, directory, version, args.timeout)
         except BaseException:
             say("升级未完成，正在恢复原安装。")
             try:
-                if installed:
+                if runtime_installed:
                     run(runtime_command + ["stop"] + managed, directory)
                 if data_saved:
                     # Retain any data produced by the failed new process too.

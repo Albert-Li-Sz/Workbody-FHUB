@@ -124,6 +124,10 @@ class ModelCooldownTests(unittest.TestCase):
             def list_public(self):
                 return [a.public() for a in self.accounts]
 
+            def reserve_for_session(self, payload, realm=None, session_key=None, exclude=(), model=None, estimate=None):
+                chosen = self.pick_for_session(realm, session_key, exclude, model)
+                return (chosen, None) if chosen and chosen.acquire() else (None, None)
+
             def apply_daily_token_limit(self, value=None, usage=None):
                 # The production path pushes the daily guard into the pool before
                 # picking; this stub only needs to answer the call.

@@ -67,15 +67,16 @@ class TimeseriesTests(unittest.TestCase):
         totals = {
             "requests": sum(b["requests"] for b in result["series"]),
             "errors": sum(b["errors"] for b in result["series"]),
+            "client_aborted": sum(b["client_aborted"] for b in result["series"]),
             "tokens": sum(b["total_tokens"] for b in result["series"]),
             "credit": sum(b["credit"] for b in result["series"]),
         }
         self.assertEqual(totals["requests"], 2)
-        # usage_snapshot counts every non-completed row as an error, including
-        # client aborts; the series keeps that same definition.
-        self.assertEqual(totals["errors"], 2)
+        # Aborts have their own count; confirmed partial consumption remains.
+        self.assertEqual(totals["errors"], 1)
+        self.assertEqual(totals["client_aborted"], 1)
         self.assertEqual(totals["tokens"], 150)
-        self.assertAlmostEqual(totals["credit"], 3.5)
+        self.assertAlmostEqual(totals["credit"], 102.5)
 
     def test_realm_filter(self):
         now = time.time()
