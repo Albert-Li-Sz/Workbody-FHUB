@@ -52,6 +52,17 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("group: release-assets-", text)
         self.assertIn("group: release-assets-", publish)
 
+    def test_publication_can_resume_without_rebuilding_versioned_images(self):
+        text = read(".github", "workflows", "docker-publish.yml")
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("reuse_images:", text)
+        self.assertEqual(text.count("if: ${{ !inputs.reuse_images }}"), 2)
+        self.assertIn("ref: ${{ inputs.tag || github.event.release.tag_name }}", text)
+        self.assertIn("org.opencontainers.image.revision=${{ steps.release.outputs.commit }}", text)
+        self.assertIn('sudo "$(command -v python)" scripts/verify_upgrade.py', text)
+        self.assertIn("'{{.Manifest.Digest}}'", text)
+        self.assertNotIn("steps.app_build.outputs.digest", text)
+
 
 class DockerTests(unittest.TestCase):
     def test_healthcheck_probes_the_health_endpoint(self):

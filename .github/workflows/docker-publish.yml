@@ -3,6 +3,16 @@ name: Publish Workbody-FHUB images
 on:
   release:
     types: [ published ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag (e.g. v1.1.2)"
+        required: true
+        type: string
+      reuse_images:
+        description: "Verify and finish publishing existing versioned images"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,12 +23,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency:
-      group: release-assets-${{ github.event.release.tag_name }}
+      group: release-assets-${{ inputs.tag || github.event.release.tag_name }}
       cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.release.tag_name }}
+        ref: ${{ inputs.tag || github.event.release.tag_name }}
         fetch-depth: 0
     - uses: actions/setup-python@v5
       with:
@@ -27,13 +39,23 @@ jobs:
       with:
         node-version: "20"
     - name: Verify the release tag matches the source version
+      id: release
       env:
-        RELEASE_TAG: ${{ github.event.release.tag_name }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_REPO: ${{ github.repository }}
       run: |
         python - <<'PY'
-        import os
+        import json, os, subprocess
         from wb_version import verify_artifacts
         print('release version:', verify_artifacts(tag=os.environ['RELEASE_TAG']))
+        release = json.loads(subprocess.check_output([
+            'gh', 'release', 'view', os.environ['RELEASE_TAG'],
+            '--json', 'tagName,isDraft,isPrerelease'], text=True))
+        if release['isDraft'] or release['tagName'] != os.environ['RELEASE_TAG']:
+            raise ValueError('an already published matching release is required')
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('commit=' + subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() + '\n')
+            output.write('prerelease=' + str(release['isPrerelease']).lower() + '\n')
         PY
     - name: Verify this release before publishing
       run: python tests/run_all.py
@@ -87,10 +109,12 @@ jobs:
         flavor: latest=false
         labels: |
           org.opencontainers.image.licenses=Apache-2.0 AND MIT
+          org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
         tags: |
-          type=raw,value=${{ github.event.release.tag_name }}
-          type=semver,pattern={{version}}
+          type=raw,value=${{ env.RELEASE_TAG }}
+          type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
     - name: Build and push Docker image
+      if: ${{ !inputs.reuse_images }}
       id: app_build
       uses: docker/build-push-action@v6
       with:
@@ -105,10 +129,13 @@ jobs:
       with:
         images: ${{ steps.images.outputs.nginx_list }}
         flavor: latest=false
+        labels: |
+          org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
         tags: |
-          type=raw,value=${{ github.event.release.tag_name }}
-          type=semver,pattern={{version}}
+          type=raw,value=${{ env.RELEASE_TAG }}
+          type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
     - name: Build and push Nginx image
+      if: ${{ !inputs.reuse_images }}
       uses: docker/build-push-action@v6
       id: nginx_build
       with:
@@ -121,19 +148,16 @@ jobs:
     - name: Verify the published image on both architectures
       env:
         IMAGE: ${{ steps.images.outputs.primary }}
-        RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: python scripts/verify_image.py "$IMAGE:$RELEASE_TAG" --revision HEAD --pull --non-root > app-verification.json
     - name: Verify Nginx startup and SSE on both architectures
       env:
         APP_IMAGE: ${{ steps.images.outputs.primary }}
         NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
-        RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: python scripts/verify_nginx_image.py "$NGINX_IMAGE:$RELEASE_TAG" --app-image "$APP_IMAGE:$RELEASE_TAG" --revision HEAD --pull > nginx-verification.json
     - name: Verify native and Compose upgrades with rollback
       env:
         APP_IMAGE: ${{ steps.images.outputs.primary }}
         NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
-        RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: |
         for version in 1.1.0 1.1.1; do
           docker pull "ghcr.io/albert-li-sz/workbody-fhub:$version"
@@ -142,14 +166,16 @@ jobs:
         docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.1.1
         docker pull "$APP_IMAGE:$RELEASE_TAG"
         docker pull "$NGINX_IMAGE:$RELEASE_TAG"
-        python scripts/verify_upgrade.py --archive "release-source/workbody-fhub-${RELEASE_TAG#v}-source.tar.gz" --image "$APP_IMAGE:$RELEASE_TAG" --nginx-image "$NGINX_IMAGE:$RELEASE_TAG" > migration-verification.txt
+        # Container-written private bind mounts belong to root on Linux. Exercise
+        # the real updater with that same authority, retaining its 0700/0600 modes.
+        sudo git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        sudo "$(command -v python)" scripts/verify_upgrade.py --archive "release-source/workbody-fhub-${RELEASE_TAG#v}-source.tar.gz" --image "$APP_IMAGE:$RELEASE_TAG" --nginx-image "$NGINX_IMAGE:$RELEASE_TAG" > migration-verification.txt
     - name: Promote verified stable images to latest
-      if: ${{ !github.event.release.prerelease }}
+      if: ${{ steps.release.outputs.prerelease == 'false' }}
       env:
         IMAGE_TARGETS: |
           ${{ steps.images.outputs.list }}
           ${{ steps.images.outputs.nginx_list }}
-        RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: |
         while IFS= read -r target; do
           [ -n "$target" ] || continue
@@ -159,19 +185,23 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GH_REPO: ${{ github.repository }}
-        RELEASE_TAG: ${{ github.event.release.tag_name }}
         APP_IMAGE: ${{ steps.images.outputs.primary }}
-        APP_DIGEST: ${{ steps.app_build.outputs.digest }}
         NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
-        NGINX_DIGEST: ${{ steps.nginx_build.outputs.digest }}
       run: |
         python - <<'PY'
         import json, os, pathlib, subprocess
+        images = {}
+        for name in ('APP', 'NGINX'):
+            target = os.environ[name + '_IMAGE']
+            digest = subprocess.check_output(['docker', 'buildx', 'imagetools', 'inspect',
+                target + ':' + os.environ['RELEASE_TAG'], '--format', '{{.Manifest.Digest}}'], text=True).strip()
+            if not digest.startswith('sha256:') or len(digest) != 71:
+                raise ValueError('registry returned an invalid manifest digest')
+            images[name] = {'image': target, 'digest': digest}
         receipt = {'tag': os.environ['RELEASE_TAG'],
                    'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                    'platforms': ['linux/amd64', 'linux/arm64'],
-                   'images': {name: {'image': os.environ[name + '_IMAGE'], 'digest': os.environ[name + '_DIGEST']}
-                              for name in ('APP', 'NGINX')}}
+                   'images': images}
         pathlib.Path('images.json').write_text(json.dumps(receipt, indent=2) + '\n')
         PY
         gh release upload "$RELEASE_TAG" images.json app-verification.json nginx-verification.json migration-verification.txt release-source/* --clobber
