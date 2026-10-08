@@ -26,6 +26,11 @@ def finalize(tag):
             verified = json.loads((root / (name + "-verification.json")).read_text())
             if set(verified.get("platforms", {})) != {"linux/amd64", "linux/arm64"}:
                 raise ValueError(name + " image has no complete architecture verification")
+            if verified.get("source") != receipt.get("commit"):
+                raise ValueError(name + " verification belongs to a different source commit")
+            expected_image = receipt["images"][name.upper()]["image"] + ":" + tag
+            if verified.get("image") != expected_image:
+                raise ValueError(name + " verification belongs to a different image tag")
         manifest = "".join(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name + "\n"
                            for path in sorted(root.iterdir()) if path.is_file() and path.name != "checksums.txt")
         (root / "checksums.txt").write_text(manifest, encoding="utf-8")

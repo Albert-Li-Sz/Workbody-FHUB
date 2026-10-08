@@ -95,6 +95,14 @@ def compose_case(old_version, new_image, old_image, root):
     model = {"name":project,"services":{"workbody-fhub":{"image":old_image,"pull_policy":"never",
         "network_mode":"none", "environment":{"HOST":"0.0.0.0","PORT":"8788","PANEL_PASSWORD":PASSWORD},
         "volumes":[str(directory/"accounts")+":/app/accounts",str(directory/"usage")+":/app/usage"]}}}
+    if old_version == "1.1.1":
+        model["services"]["workbody-fhub"].pop("network_mode")
+        model["networks"] = {"default":{"internal":True}}
+        for name in (".tls", ".acme"):
+            (directory/name).mkdir()
+        model["services"]["nginx"] = {"image":"ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.1.1",
+            "pull_policy":"never", "environment":{"WB_TLS_MODE":"off","WB_NGINX_UPSTREAM":"workbody-fhub:8788"},
+            "volumes":[str(directory/".tls")+":/etc/letsencrypt",str(directory/".acme")+":/var/lib/letsencrypt"]}
     compose = directory / "compose.fixture.json"
     compose.write_text(json.dumps(model))
     command = update.compose_command(directory, [compose])
@@ -105,6 +113,8 @@ def compose_case(old_version, new_image, old_image, root):
         update.upgrade(arguments(directory,compose_file=[str(compose)]))
         assert_data(directory,2)
         runtime = update.compose_command(directory,[directory/update.RUNTIME_FILE])
+        if old_version == "1.1.1":
+            assert update.wait_gateway(runtime,"nginx",directory,VERSION,30)["status"] == "disabled"
         backups = list((directory/".update-backups").iterdir())
         assert len(backups) == 1
         update.rollback(arguments(directory,rollback=str(backups[0])))
@@ -148,6 +158,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive",required=True)
     parser.add_argument("--image",default="workbody-fhub:"+VERSION)
+    parser.add_argument("--nginx-image",default="workbody-fhub-nginx:"+VERSION)
     args=parser.parse_args()
     archive=Path(args.archive).read_bytes()
     name="workbody-fhub-%s-source.tar.gz"%VERSION
@@ -156,6 +167,8 @@ def main():
     original_download,original_run,original_registry=update.download,update.run,update.REGISTRY
     local_image="workbody-upgrade-fixture/workbody-fhub:"+VERSION
     update.run(["docker","tag",args.image,local_image])
+    local_nginx="workbody-upgrade-fixture/workbody-fhub-nginx:"+VERSION
+    update.run(["docker","tag",args.nginx_image,local_nginx])
     def download(url,maximum=update.MAX_DOWNLOAD):
         if "/releases/tags/" in url: return json.dumps(release).encode()
         if url.endswith("checksums.txt"):return (hashlib.sha256(archive).hexdigest()+"  "+name+"\n").encode()
@@ -176,6 +189,7 @@ def main():
     finally:
         update.download,update.run,update.REGISTRY=original_download,original_run,original_registry
         subprocess.run(["docker","image","rm",local_image],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        subprocess.run(["docker","image","rm",local_nginx],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 
 if __name__=="__main__":main()

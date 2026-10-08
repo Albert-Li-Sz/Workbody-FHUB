@@ -101,8 +101,13 @@ def main():
     parser.add_argument("--platform", action="append", choices=["linux/amd64", "linux/arm64"])
     parser.add_argument("--pull", action="store_true")
     args = parser.parse_args()
-    source = subprocess.check_output(["git", "show", args.revision + ":deploy/nginx/gateway.py"], cwd=ROOT) if args.revision else (ROOT / "deploy/nginx/gateway.py").read_bytes()
-    results = {"image": args.image, "source": args.revision or "working tree", "platforms": {}}
+    revision = None
+    if args.revision:
+        if args.revision.startswith("-"):
+            parser.error("invalid Git revision")
+        revision = subprocess.check_output(["git", "rev-parse", "--verify", args.revision + "^{commit}"], cwd=ROOT, text=True).strip()
+    source = subprocess.check_output(["git", "show", revision + ":deploy/nginx/gateway.py"], cwd=ROOT) if revision else (ROOT / "deploy/nginx/gateway.py").read_bytes()
+    results = {"image": args.image, "source": revision or "working tree", "platforms": {}}
     for platform in args.platform or ("linux/amd64", "linux/arm64"):
         if args.pull:
             for image in (args.image, args.app_image):

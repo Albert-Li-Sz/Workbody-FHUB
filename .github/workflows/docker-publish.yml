@@ -19,6 +19,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ github.event.release.tag_name }}
+        fetch-depth: 0
     - uses: actions/setup-python@v5
       with:
         python-version: "3.11"
@@ -128,6 +129,20 @@ jobs:
         NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
         RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: python scripts/verify_nginx_image.py "$NGINX_IMAGE:$RELEASE_TAG" --app-image "$APP_IMAGE:$RELEASE_TAG" --revision HEAD --pull > nginx-verification.json
+    - name: Verify native and Compose upgrades with rollback
+      env:
+        APP_IMAGE: ${{ steps.images.outputs.primary }}
+        NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        for version in 1.1.0 1.1.1; do
+          docker pull "ghcr.io/albert-li-sz/workbody-fhub:$version"
+          docker tag "ghcr.io/albert-li-sz/workbody-fhub:$version" "workbody-fhub:$version"
+        done
+        docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.1.1
+        docker pull "$APP_IMAGE:$RELEASE_TAG"
+        docker pull "$NGINX_IMAGE:$RELEASE_TAG"
+        python scripts/verify_upgrade.py --archive "release-source/workbody-fhub-${RELEASE_TAG#v}-source.tar.gz" --image "$APP_IMAGE:$RELEASE_TAG" --nginx-image "$NGINX_IMAGE:$RELEASE_TAG" > migration-verification.txt
     - name: Promote verified stable images to latest
       if: ${{ !github.event.release.prerelease }}
       env:
@@ -159,5 +174,5 @@ jobs:
                               for name in ('APP', 'NGINX')}}
         pathlib.Path('images.json').write_text(json.dumps(receipt, indent=2) + '\n')
         PY
-        gh release upload "$RELEASE_TAG" images.json app-verification.json nginx-verification.json release-source/* --clobber
+        gh release upload "$RELEASE_TAG" images.json app-verification.json nginx-verification.json migration-verification.txt release-source/* --clobber
         python scripts/finalize_release.py "$RELEASE_TAG"
