@@ -69,25 +69,25 @@ class DailyTokenLimitTests(unittest.TestCase):
             for r in rows:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
         self.assertEqual(P.daily_tokens_by_account(ttl=0),
-                    {"acct-A": 2000, "acct-B": 300})
+                    {"acct-A": 9777, "acct-B": 300})
 
         # The counter resumes from its byte offset: a row appended after the
         # first scan is folded in without recounting the file.
         with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row(midnight + 300, "acct-B", 100)) + "\n")
         self.assertEqual(P.daily_tokens_by_account(ttl=0),
-                    {"acct-A": 2000, "acct-B": 400})
+                    {"acct-A": 9777, "acct-B": 400})
 
         # A row still being written (no trailing newline) is left for the next
         # scan instead of being half-counted.
         with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row(midnight + 400, "acct-A", 50)))
         self.assertEqual(P.daily_tokens_by_account(ttl=0),
-                    {"acct-A": 2000, "acct-B": 400})
+                    {"acct-A": 9777, "acct-B": 400})
         with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
             fh.write("\n")
         self.assertEqual(P.daily_tokens_by_account(ttl=0),
-                    {"acct-A": 2050, "acct-B": 400})
+                    {"acct-A": 9827, "acct-B": 400})
 
     def test_guard_blocks_at_threshold_and_needs_a_count(self):
         account = wb_accounts.Account({"uid": "uid-a", "accessToken": "t"})

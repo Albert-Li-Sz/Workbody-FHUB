@@ -446,6 +446,7 @@ print("[11] the non-stream web-tool path returns its in-flight lease")
 
 class LeaseAccount(object):
     uid = "acct-lease"
+    realm = "intl"
 
     def __init__(self):
         self.in_flight = 0
@@ -454,7 +455,7 @@ class LeaseAccount(object):
         self.in_flight += 1
         return True
 
-    def release(self):
+    def release(self, reservation_id=None):
         if self.in_flight > 0:
             self.in_flight -= 1
 

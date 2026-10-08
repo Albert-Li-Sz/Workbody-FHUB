@@ -95,17 +95,16 @@ class DailyUsageFoldTests(unittest.TestCase):
             for r in rows:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
         stats = P.daily_usage_stats(ttl=0)
-        # Yesterday's rows stay out, and a cancellation is not a consumed
-        # request - neither its tokens nor its credit count.
-        self.assertEqual(stats["tokens"], {"acct-A": 1500, "acct-B": 700})
-        self.assertEqual(stats["credits"], {"acct-A": 30.5, "acct-B": 2.5})
+        # Yesterday stays out; confirmed cancellation consumption is counted.
+        self.assertEqual(stats["tokens"], {"acct-A": 1600, "acct-B": 700})
+        self.assertEqual(stats["credits"], {"acct-A": 31.5, "acct-B": 2.5})
         self.assertEqual(stats["models"], {
-            "acct-A": {"gpt-6-astra": 1000, "deepseek-v4.1-flash": 500},
+            "acct-A": {"gpt-6-astra": 1100, "deepseek-v4.1-flash": 500},
             "acct-B": {"hy4-preview": 700},
         })
         # The original reader keeps its shape for existing callers.
         self.assertEqual(P.daily_tokens_by_account(ttl=0),
-                         {"acct-A": 1500, "acct-B": 700})
+                         {"acct-A": 1600, "acct-B": 700})
 
         # The fold resumes from its byte offset: a row appended after the
         # first scan is folded into every view without recounting the file.

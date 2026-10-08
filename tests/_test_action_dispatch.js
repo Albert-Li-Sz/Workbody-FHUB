@@ -26,7 +26,7 @@ function mk(id){
     focus(){}, blur(){}, click(){},
     appendChild(c){ this.children.push(c); },
     querySelectorAll(){ return []; }, querySelector(){ return null; },
-    addEventListener(){}, setAttribute(){}, getAttribute(){ return ''; },
+    addEventListener(){}, setAttribute(){}, removeAttribute(){}, getAttribute(){ return ''; },
     insertAdjacentHTML(){}, removeChild(){}, remove(){},
   };
   el.classList = {
