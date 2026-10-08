@@ -68,7 +68,7 @@ class DockerTests(unittest.TestCase):
             self.assertIn(pattern, ignored)
 
     def test_original_project_declarations_and_license_are_preserved(self):
-        text = read("README.md")
+        text = read("README.md") + read("docs", "credits.md")
         self.assertTrue(text.startswith("# Workbody-FHUB"))
         self.assertIn("https://github.com/ardeyouxipianyi/workbuddy2api-hub", text)
         self.assertIn("100% Vibe Coding 协同产物", text)

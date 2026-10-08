@@ -6,7 +6,7 @@ Workbody-FHUB 派生自 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/a
 
 > ⚡ **Vibe Coding 产物**：本项目为 100% Vibe Coding 协同产物，由人类开发者提出架构与业务意图，AI 助手端到端完成逆向分析、链路调度、WAF 指纹脱敏与界面编写。
 
-## 致谢与引用声明
+## 致谢与引用声明 (Credits & References)
 
 协议兼容、风控规避与任务链路设计过程中，参考并吸纳了以下开源项目的经验与逆向成果：
 

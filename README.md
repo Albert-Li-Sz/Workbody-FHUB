@@ -101,7 +101,7 @@ curl http://127.0.0.1:8788/health
 
 ## 开发与发布
 
-项目主要使用 Python 标准库；测试目录包含 Python 与 JavaScript 套件。GitHub CI 覆盖 Linux Python 3.9／3.12、Windows Python 3.12，发布工作流构建双架构镜像并完成镜像检查后更新 `latest`。
+项目主要使用 Python 标准库；90 个套件：74 个 Python + 16 个 JS。GitHub CI 覆盖 Linux Python 3.9／3.12、Windows Python 3.12，发布工作流构建双架构镜像并完成镜像检查后更新 `latest`。
 
 ```bash
 python3 tests/run_all.py
