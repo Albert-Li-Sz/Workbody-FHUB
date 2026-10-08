@@ -186,12 +186,17 @@ CORS_PATH_PREFIXES = ("/v1", "/chat", "/completions", "/models", "/responses")
 # /v1/usage reports account-level spend and is gated by the panel session.
 MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
                             "/tasks", "/scheduler", "/panel", "/logs")
+CLIENT_BALANCE_ROUTES = {"/balance": "balance", "/v1/balance": "balance"}
+for _billing_prefix in ("/dashboard/billing/", "/v1/dashboard/billing/"):
+    for _billing_kind in ("credit_grants", "subscription", "usage"):
+        CLIENT_BALANCE_ROUTES[_billing_prefix + _billing_kind] = _billing_kind
+CLIENT_BALANCES = wb_balance.ChannelBalances()
 def cors_origin_allowed(path):
     """True when the OpenAI-style API path should advertise CORS."""
     path = (path or "").split("?")[0]
     if path.startswith(MANAGEMENT_PATH_PREFIXES):
         return False
-    return path.startswith(CORS_PATH_PREFIXES)
+    return path in CLIENT_BALANCE_ROUTES or path.startswith(CORS_PATH_PREFIXES)
 _lock = threading.Lock()
 _login_lock = threading.Lock()
 _chat_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CHAT)
@@ -7256,7 +7261,7 @@ class Handler(BaseHTTPRequestHandler):
         message = fmt % args
         def redact_query(match):
             from urllib.parse import unquote_plus
-            sensitive = {"pwd", "password", "key", "api_key", "token"}
+            sensitive = {"pwd", "password", "key", "api_key", "api-key", "token"}
             if unquote_plus(match.group(2)).lower() in sensitive:
                 return match.group(1) + match.group(2) + "=<REDACTED>"
             return match.group(0)
@@ -7268,6 +7273,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
+        if (getattr(self, "path", "") or "").split("?")[0] in CLIENT_BALANCE_ROUTES:
+            self.send_header("Cache-Control", "no-store")
         if self.close_connection:
             self.send_header("Connection", "close")
         # self.path is unset when parse_request() never ran (an over-long
@@ -7599,6 +7606,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_health()
         if path == "/realm":
             return self._get_realm()
+        if path in CLIENT_BALANCE_ROUTES:
+            return self._get_client_balance(query, CLIENT_BALANCE_ROUTES[path])
         if path in ("/v1/models", "/models"):
             return self._get_v1_models()
         if path in ("/usage", "/v1/usage"):
@@ -7753,18 +7762,36 @@ class Handler(BaseHTTPRequestHandler):
             return
         return self._json(200, wb_balance.summarize(list(POOL.accounts) if POOL else []))
 
+    def _get_client_balance(self, query, kind):
+        # Always identify the supplied API key, including when a panel session
+        # is also present or authentication for model calls has been disabled.
+        self.key_entry = identify_key(self._supplied_key())
+        if not self.key_entry:
+            return self._error(401, "a valid API key is required for balance queries",
+                               "invalid_request_error")
+        # Balance scope comes only from the key binding and the global switch.
+        # A caller cannot use X-Realm, ?realm= or ?channel= to query another pool.
+        realm = self._key_realm() or CURRENT_REALM
+        if realm not in ("cn", "intl"):
+            return self._error(503, "the current channel is not configured correctly")
+        value = (query.get("refresh") or [""])[0].lower()
+        if value not in ("", "1", "true", "yes", "0", "false", "no"):
+            return self._error(400, "refresh must be 1 or 0", "invalid_request_error")
+        refresh = None if not value else value in ("1", "true", "yes")
+        summary = CLIENT_BALANCES.query(list(POOL.accounts) if POOL else [], realm, refresh)
+        if kind == "balance":
+            return self._json(200, summary)
+        response = wb_balance.billing_response(summary, kind)
+        if response is None:
+            return self._error(503, "channel balance is incomplete; query /v1/balance "
+                               "for unknown and failed account counts", "balance_unavailable")
+        return self._json(200, response)
+
     def _route_accounts_balance(self):
         # A disabled account still owns its balance and belongs in this sum.
         # Snapshot the targets once; one failing refresh must not drop others.
-        from concurrent.futures import ThreadPoolExecutor
         accounts = list(POOL.accounts) if POOL else []
-        def fetch(account):
-            try:
-                return account.uid, bool(account.fetch_credits().get("ok"))
-            except Exception:
-                return account.uid, False
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            results = dict(executor.map(fetch, accounts))
+        results = wb_balance.refresh_accounts(accounts)
         return self._json(200, wb_balance.summarize(accounts, results))
 
     def _get_account_credits_detail(self, query):

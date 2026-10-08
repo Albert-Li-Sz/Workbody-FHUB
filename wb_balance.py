@@ -1,6 +1,8 @@
 """Public balance summaries, without credentials or invented zero balances."""
 from decimal import Decimal, InvalidOperation, localcontext
+from concurrent.futures import ThreadPoolExecutor
 import math
+import threading
 import time
 
 
@@ -14,6 +16,28 @@ def _amount(value):
     except (InvalidOperation, ValueError, TypeError, OverflowError):
         pass
     return None
+
+
+def _total(values):
+    # Imported caches may contain large finite values. Default Decimal
+    # precision cannot quantize them, and float overflow is not valid JSON.
+    with localcontext() as context:
+        integer_digits = max((number.adjusted() + 1 for number in values), default=1)
+        decimal_places = min(324, max((-number.as_tuple().exponent for number in values), default=2))
+        context.prec = max(28, integer_digits + max(2, decimal_places) + len(str(len(values))) + 2)
+        number = float(sum(values, Decimal(0)).quantize(Decimal("0.01")))
+    return number if math.isfinite(number) else None
+
+
+def refresh_accounts(accounts):
+    """Refresh a fixed account snapshot; failed queries keep the cached balance."""
+    def fetch(account):
+        try:
+            return account.uid, bool(account.fetch_credits().get("ok"))
+        except Exception:
+            return account.uid, False
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        return dict(executor.map(fetch, accounts))
 
 
 def summarize(accounts, refresh_results=None):
@@ -41,21 +65,12 @@ def summarize(accounts, refresh_results=None):
             "enabled": account.enabled, "remain": float(amount) if amount is not None else None,
             "updated_at": credits.get("updated_at"), "refresh_ok": refresh_ok,
         })
-    def total(values):
-        # Imported caches may contain large finite values. Default Decimal
-        # precision cannot quantize them, and float overflow is not valid JSON.
-        with localcontext() as context:
-            integer_digits = max((number.adjusted() + 1 for number in values), default=1)
-            decimal_places = min(324, max((-number.as_tuple().exponent for number in values), default=2))
-            context.prec = max(28, integer_digits + max(2, decimal_places) + len(str(len(values))) + 2)
-            number = float(sum(values, Decimal(0)).quantize(Decimal("0.01")))
-        return number if math.isfinite(number) else None
     by_realm = {}
     for realm, group in groups.items():
         values = group.pop("amounts")
-        by_realm[realm] = dict(group, total_remain=total(values), known_count=len(values))
+        by_realm[realm] = dict(group, total_remain=_total(values), known_count=len(values))
     unknown = len(accounts) - len(amounts)
-    total_remain = total(amounts)
+    total_remain = _total(amounts)
     complete = (unknown == 0 and failed == 0 and total_remain is not None
                 and all(group["total_remain"] is not None for group in by_realm.values()))
     return {"ok": True, "complete": complete,
@@ -63,3 +78,105 @@ def summarize(accounts, refresh_results=None):
             "known_count": len(amounts), "unknown_count": unknown,
             "by_realm": by_realm, "accounts": rows,
             "refreshed": refreshed, "refresh_failed": failed, "queried_at": time.time()}
+
+
+def summarize_channel(accounts, realm, refresh_results=None):
+    """Only expose one channel's totals, without account or credential details."""
+    accounts = [account for account in accounts if account.realm == realm]
+    remaining, used = [], []
+    failed = 0
+    for account in accounts:
+        # Read each replaced credit dictionary once so remaining and used
+        # amounts belong to the same upstream snapshot during scheduler work.
+        cached = account.credits
+        credits = cached if isinstance(cached, dict) else {}
+        amount = _amount(credits.get("remain"))
+        if amount is not None:
+            remaining.append(amount)
+        used.append(_amount(credits.get("used")))
+        if refresh_results is not None and not refresh_results.get(account.uid, False):
+            failed += 1
+    unknown = len(accounts) - len(remaining)
+    total_remain = _total(remaining)
+    total_used = _total(used) if all(value is not None for value in used) else None
+    total_granted = None
+    if unknown == 0 and total_remain is not None and total_used is not None:
+        total_granted = _total([_amount(total_remain), _amount(total_used)])
+    return {"ok": True, "object": "balance", "realm": realm, "currency": "credits",
+            "channel": {"cn": "workbuddy-cn", "intl": "workbuddy-intl"}[realm],
+            "total_remain": total_remain, "total_used": total_used, "total_granted": total_granted,
+            "account_count": len(accounts), "known_count": len(remaining), "unknown_count": unknown,
+            "complete": unknown == 0 and failed == 0 and total_remain is not None,
+            "refreshed": refresh_results is not None, "refresh_failed": failed,
+            "queried_at": time.time()}
+
+
+class ChannelBalances:
+    """Coalesce per-channel queries and briefly cache successes and failures."""
+    def __init__(self, cache_seconds=60):
+        self.cache_seconds = cache_seconds
+        self._locks = {realm: threading.Lock() for realm in ("cn", "intl")}
+        self._attempts = {realm: {} for realm in ("cn", "intl")}
+
+    def query(self, accounts, realm, refresh=None):
+        accounts = [account for account in accounts if account.realm == realm]
+        if refresh is False:
+            return summarize_channel(accounts, realm)
+        with self._locks[realm]:
+            attempts = self._attempts[realm]
+            live_ids = {id(account) for account in accounts}
+            for identity in list(attempts):
+                if identity not in live_ids:
+                    del attempts[identity]
+            targets, results = [], {}
+            now = time.time()
+            for account in accounts:
+                cached = account.credits
+                credits = cached if isinstance(cached, dict) else {}
+                updated_at = _amount(credits.get("updated_at"))
+                fresh = (updated_at is not None and 0 <= now - float(updated_at) < self.cache_seconds
+                         and _amount(credits.get("remain")) is not None
+                         and _amount(credits.get("used")) is not None)
+                previous = attempts.get(id(account))
+                recent_attempt = previous and 0 <= now - previous[1] < self.cache_seconds
+                updated_since_attempt = fresh and previous and float(updated_at) > previous[1]
+                if refresh is not True and recent_attempt and not updated_since_attempt:
+                    results[account.uid] = previous[2]
+                elif refresh is not True and fresh:
+                    results[account.uid] = True
+                else:
+                    targets.append(account)
+            if targets:
+                fetched = refresh_accounts(targets)
+                attempted_at = time.time()
+                for account in targets:
+                    # Keep the object alive so an imported replacement cannot
+                    # inherit a removed account's refresh result by id reuse.
+                    attempts[id(account)] = (account, attempted_at, fetched[account.uid])
+                results.update(fetched)
+            summary = summarize_channel(accounts, realm, results)
+            summary["refreshed"] = bool(targets)
+            return summary
+
+
+def billing_response(summary, kind):
+    """Legacy OpenAI billing shapes; amounts remain WorkBuddy credit units."""
+    if not summary["complete"] or summary["total_used"] is None or summary["total_granted"] is None:
+        return None
+    response = dict(summary)
+    if kind == "credit_grants":
+        response.update(object="credit_summary", total_available=summary["total_remain"],
+                        grants={"object": "list", "data": []})
+    elif kind == "subscription":
+        response.update(object="billing_subscription", has_payment_method=True,
+                        soft_limit_usd=summary["total_granted"],
+                        hard_limit_usd=summary["total_granted"],
+                        system_hard_limit_usd=summary["total_granted"], access_until=0)
+    elif kind == "usage":
+        usage = _total([_amount(summary["total_used"]) * 100])
+        if usage is None:
+            return None
+        response.update(object="list", total_usage=usage)
+    else:
+        raise ValueError("unknown billing response kind")
+    return response
