@@ -1,6 +1,6 @@
 # 部署、升级与迁移
 
-适用版本：**1.0.7**。入口索引见 [README](../README.md)，协议和鉴权见 [API 说明](api.md)。
+适用版本：**1.0.8**。入口索引见 [README](../README.md)，协议和鉴权见 [API 说明](api.md)。
 
 ## Docker Compose 部署
 
@@ -12,7 +12,7 @@ docker compose up -d
 docker compose logs workbody-fhub
 ```
 
-默认镜像 `ghcr.io/albert-li-sz/workbody-fhub:1.0.7`，支持 `linux/amd64` 和 `linux/arm64`。Compose 映射 `0.0.0.0:8788:8788`；面板为 `http://<服务器IP>:8788/`，OpenAI Base URL 为 `http://<服务器IP>:8788/v1`。
+默认镜像 `ghcr.io/albert-li-sz/workbody-fhub:1.0.8`，支持 `linux/amd64` 和 `linux/arm64`。Compose 映射 `0.0.0.0:8788:8788`；面板为 `http://<服务器IP>:8788/`，OpenAI Base URL 为 `http://<服务器IP>:8788/v1`。
 
 | 宿主机数据 | 容器位置 | 内容 |
 | --- | --- | --- |
@@ -23,7 +23,7 @@ docker compose logs workbody-fhub
 
 ### 1Panel
 
-在编排中导入仓库的 Compose 配置，将 `./accounts`、`./usage` 换成所选宿主机持久化目录。选择固定版本 `1.0.7`，开放或反代 `8788` 端口，查看容器日志取得初始密码。升级时修改镜像版本，拉取并重新部署同一编排，继续使用原数据目录。
+在编排中导入仓库的 Compose 配置，将 `./accounts`、`./usage` 换成所选宿主机持久化目录。选择固定版本 `1.0.8`，开放或反代 `8788` 端口，查看容器日志取得初始密码。升级时修改镜像版本，拉取并重新部署同一编排，继续使用原数据目录。
 
 ### 普通 UID
 
@@ -48,13 +48,13 @@ python3 wb_proxy.py --host 127.0.0.1 --port 8788 \
 
 ```bash
 tar -czf workbody-data-backup.tar.gz accounts usage
-export WORKBODY_IMAGE=ghcr.io/albert-li-sz/workbody-fhub:1.0.7
+export WORKBODY_IMAGE=ghcr.io/albert-li-sz/workbody-fhub:1.0.8
 docker compose pull
 docker compose up -d
 curl http://127.0.0.1:8788/health
 ```
 
-确认响应中的 `version` 是 `1.0.7`。若 `.env` 已配置 `WORKBODY_IMAGE`，同时更新其中的值，确保后续重启仍使用所选版本。本机脚本部署需要更新源码并重新启动原服务，继续使用原账号与日志路径。
+确认响应中的 `version` 是 `1.0.8`。若 `.env` 已配置 `WORKBODY_IMAGE`，同时更新其中的值，确保后续重启仍使用所选版本。本机脚本部署需要更新源码并重新启动原服务，继续使用原账号与日志路径。
 
 升级后检查：
 

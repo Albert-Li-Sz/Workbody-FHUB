@@ -2,7 +2,7 @@
 
 WorkBuddy 国内与国际多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages 协议，提供账号调度、API Key 渠道绑定、积分余额查询和用量看板。
 
-当前版本 **1.0.7** · Python **3.9+** · 镜像 **linux/amd64 / linux/arm64**
+当前版本 **1.0.8** · Python **3.9+** · 镜像 **linux/amd64 / linux/arm64**
 
 [版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [部署说明](docs/integration-plan.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
@@ -28,7 +28,7 @@ docker compose up -d
 docker compose logs workbody-fhub
 ```
 
-默认使用 `ghcr.io/albert-li-sz/workbody-fhub:1.0.7`。首次启动日志会显示面板初始密码和局域网 API Key。
+默认使用 `ghcr.io/albert-li-sz/workbody-fhub:1.0.8`。首次启动日志会显示面板初始密码和局域网 API Key。
 
 | 入口 | 地址 |
 | --- | --- |
@@ -86,18 +86,18 @@ curl http://127.0.0.1:8788/v1/models \
 
 **余额来源与单位：**所有适配入口返回网关 Key 对应的国内或国际渠道内全部账号的积分总和，包含停用账号；金额字段保留客户端所需结构，数值单位始终是 WorkBuddy 积分。千问入口使用网关 Bearer Key，采用阿里云余额响应格式；OpenAI 为旧版账单兼容。GLM、MiniMax 的入口属于本网关扩展，目前未在官方文档中找到普通模型 Key 可用的公开现金余额接口。详见[兼容范围](docs/api.md#余额协议兼容范围)。
 
-## 升级到 1.0.7
+## 升级到 1.0.8
 
 在原部署目录保留 `accounts`、`usage` 和 Compose 配置，指定新镜像后重新创建容器：
 
 ```bash
-export WORKBODY_IMAGE=ghcr.io/albert-li-sz/workbody-fhub:1.0.7
+export WORKBODY_IMAGE=ghcr.io/albert-li-sz/workbody-fhub:1.0.8
 docker compose pull
 docker compose up -d
 curl http://127.0.0.1:8788/health
 ```
 
-确认 `/health` 的 `version` 为 `1.0.7`，再刷新面板。拉取镜像后需要重新创建容器，运行中的旧进程会继续提供旧界面和接口。备份、回滚和 404 排查见[部署与迁移说明](docs/integration-plan.md)。
+确认 `/health` 的 `version` 为 `1.0.8`，再刷新面板。拉取镜像后需要重新创建容器，运行中的旧进程会继续提供旧界面和接口。备份、回滚和 404 排查见[部署与迁移说明](docs/integration-plan.md)。
 
 ## 开发与发布
 

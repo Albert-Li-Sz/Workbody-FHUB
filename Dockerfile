@@ -3,7 +3,7 @@ ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-alpine@sha256:d9368b3
 FROM ${PYTHON_IMAGE}
 
 LABEL org.opencontainers.image.title="Workbody-FHUB" \
-      org.opencontainers.image.version="1.0.7" \
+      org.opencontainers.image.version="1.0.8" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT" \
       org.opencontainers.image.description="WorkBuddy multi-account gateway; fork of workbuddy2api-hub" \
       org.opencontainers.image.source="https://github.com/Albert-Li-Sz/Workbody-FHUB"
@@ -18,7 +18,8 @@ RUN apk add --no-cache tzdata ca-certificates &&     cp /usr/share/zoneinfo/${TZ
 
 # Copy application files (Zero external pip dependencies needed)
 COPY wb_*.py dashboard.html ./
-COPY README.md LICENSE LICENSE.upstream ./
+COPY README.md CHANGELOG.md CHANGELOG.upstream.md LICENSE LICENSE.upstream upstreams.json ./
+COPY docs/ ./docs/
 
 # Create data directories
 RUN mkdir -p /app/accounts /app/usage

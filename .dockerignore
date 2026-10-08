@@ -18,7 +18,6 @@ usage/
 *.info
 *.info.*
 tests/
-docs/
 scripts/
 tools/
 .github/

@@ -37,10 +37,13 @@ def source_bytes(name):
 def expected_source():
     if REVISION:
         names = run(["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", REVISION]).splitlines()
+        documentation = [name for name in names if name.startswith("docs/")]
     else:
         names = [item.name for item in ROOT.glob("wb_*.py")]
+        documentation = [str(item.relative_to(ROOT)) for item in (ROOT / "docs").rglob("*") if item.is_file()]
     names = [name for name in names if "/" not in name and name.startswith("wb_") and name.endswith(".py")]
-    names += ["dashboard.html", "README.md", "LICENSE", "LICENSE.upstream"]
+    names += ["dashboard.html", "README.md", "CHANGELOG.md", "CHANGELOG.upstream.md",
+              "LICENSE", "LICENSE.upstream", "upstreams.json"] + documentation
     hashes = {name: hashlib.sha256(source_bytes(name)).hexdigest() for name in names}
     if "wb_version.py" in names:
         version = re.search(r'^VERSION\s*=\s*"([^"]+)"', source_bytes("wb_version.py").decode(), re.M).group(1)
@@ -142,7 +145,7 @@ assert settings['version'] == expected_version
 stored = pathlib.Path('/app/accounts/settings.json')
 assert stored.stat().st_mode & 0o777 == 0o600
 assert not pathlib.Path('/app/wb_opencode.py').exists()
-assert '100% Vibe Coding' in pathlib.Path('/app/README.md').read_text()
+assert '100% Vibe Coding' in pathlib.Path('/app/docs/credits.md').read_text()
 assert 'MIT License' in pathlib.Path('/app/LICENSE.upstream').read_text()
 assert 'Apache License' in pathlib.Path('/app/LICENSE').read_text()
 print(json.dumps({'health': 200, 'anonymous_api': 401, 'admin_login': 401,
