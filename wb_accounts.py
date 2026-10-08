@@ -2264,10 +2264,16 @@ class AccountPool(object):
                 if cfg.get("free_fair_pick", True) and catalogue_free:
                     account = self._pick_fair_free(catalogue_free, realm, model)
                 else:
-                    candidates = self._apply_cost_layer(candidates, model, cfg, now)
                     candidates = self._apply_credit_floor(candidates, model, cfg, now)
                     if not candidates:
                         continue
+                    # For paid traffic, daily spend is the primary rule.
+                    # Cost exploration may break ties, but must not favour
+                    # an expensive unknown model on an already busy account.
+                    if model and not any(self._model_free_for(a, model, now)
+                                         for a in candidates):
+                        candidates = wb_pool.least_credit_spent(candidates)
+                    candidates = self._apply_cost_layer(candidates, model, cfg, now)
                     free_candidates = [a for a in candidates if self._model_free_for(a, model, now)]
                     if cfg.get("free_fair_pick", True) and free_candidates:
                         account = self._pick_fair_free(free_candidates, realm, model)
