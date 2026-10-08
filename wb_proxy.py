@@ -188,16 +188,29 @@ MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
                             "/tasks", "/scheduler", "/panel", "/logs")
 CLIENT_BALANCE_ROUTES = {"/balance": "balance", "/v1/balance": "balance",
                          "/user/balance": "deepseek", "/v1/user/balance": "deepseek",
+                         "/users/me/balance": "kimi", "/v1/users/me/balance": "kimi",
                          "/api/billing/balance": "billing_balance",
                          "/v1/api/billing/balance": "billing_balance"}
-for _billing_prefix in ("/dashboard/billing/", "/v1/dashboard/billing/"):
+for _provider, _billing_kind in wb_balance.PROVIDERS.items():
+    for _billing_prefix in ("/api/billing/balance/", "/v1/api/billing/balance/"):
+        CLIENT_BALANCE_ROUTES[_billing_prefix + _provider] = _billing_kind
+for _billing_prefix in ("/dashboard/billing/", "/v1/dashboard/billing/",
+                        "/billing/", "/v1/billing/"):
     for _billing_kind in ("credit_grants", "subscription", "usage"):
         CLIENT_BALANCE_ROUTES[_billing_prefix + _billing_kind] = _billing_kind
 CLIENT_USAGE_ROUTES = frozenset(("/api/billing/usage", "/v1/api/billing/usage"))
 CLIENT_BILLING_PATHS = frozenset(CLIENT_BALANCE_ROUTES) | CLIENT_USAGE_ROUTES
 CLIENT_BALANCES = wb_balance.ChannelBalances()
+
+def is_qwen_balance_request(request_path):
+    parsed = urlparse(request_path or "")
+    return (parsed.path in ("/", "/v1", "/v1/")
+            and parse_qs(parsed.query).get("Action") == ["QueryAccountBalance"])
+
 def cors_origin_allowed(path):
     """True when the OpenAI-style API path should advertise CORS."""
+    if is_qwen_balance_request(path):
+        return True
     path = (path or "").split("?")[0]
     if path.startswith(MANAGEMENT_PATH_PREFIXES):
         return False
@@ -7266,7 +7279,8 @@ class Handler(BaseHTTPRequestHandler):
         message = fmt % args
         def redact_query(match):
             from urllib.parse import unquote_plus
-            sensitive = {"pwd", "password", "key", "api_key", "api-key", "token"}
+            sensitive = {"pwd", "password", "key", "api_key", "api-key", "token",
+                         "accesskeyid", "signature", "securitytoken"}
             if unquote_plus(match.group(2)).lower() in sensitive:
                 return match.group(1) + match.group(2) + "=<REDACTED>"
             return match.group(0)
@@ -7278,7 +7292,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
-        if (getattr(self, "path", "") or "").split("?")[0] in CLIENT_BILLING_PATHS:
+        if ((getattr(self, "path", "") or "").split("?")[0] in CLIENT_BILLING_PATHS
+                or is_qwen_balance_request(getattr(self, "path", ""))):
             self.send_header("Cache-Control", "no-store")
         if self.close_connection:
             self.send_header("Connection", "close")
@@ -7601,6 +7616,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        if is_qwen_balance_request(self.path):
+            return self._get_client_balance(query, "qwen")
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
         if path in ("/", "/dashboard", "/ui"):
@@ -7687,6 +7704,7 @@ class Handler(BaseHTTPRequestHandler):
         rep = current_account()
         info = {
             "ok": True,
+            "version": VERSION,
             # Report the realm actually in use; this used to be the
             # literal "intl" and drifted from the panel switch.
             "realm": CURRENT_REALM,
@@ -7797,11 +7815,18 @@ class Handler(BaseHTTPRequestHandler):
         realm = self._client_billing_realm()
         if realm is None:
             return
+        if kind == "billing_balance" and "provider" in query:
+            provider = (query.get("provider") or [""])[0].strip().lower()
+            kind = wb_balance.PROVIDERS.get(provider)
+            if kind is None:
+                return self._error(400, "unsupported balance provider: use deepseek, kimi, glm, "
+                                   "qwen, minimax or openai", "invalid_request_error")
         value = (query.get("refresh") or [""])[0].lower()
         if value not in ("", "1", "true", "yes", "0", "false", "no"):
             return self._error(400, "refresh must be 1 or 0", "invalid_request_error")
         refresh = None if not value else value in ("1", "true", "yes")
-        summary = CLIENT_BALANCES.query(list(POOL.accounts) if POOL else [], realm, refresh)
+        summary = CLIENT_BALANCES.query(list(POOL.accounts) if POOL else [], realm, refresh,
+                                       require_used=kind in ("balance", "subscription", "usage"))
         if kind == "balance":
             return self._json(200, summary)
         response = wb_balance.billing_response(summary, kind)
@@ -8096,6 +8121,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with open(DASHBOARD_HTML, "rb") as fh:
                 body = fh.read()
+            body = body.replace(b"__WORKBODY_VERSION__", VERSION.encode("ascii"))
         except Exception as exc:
             return self._error(500, f"dashboard.html unavailable: {exc}")
         # M4 D3 stage 2: stamp the two inline <script> blocks with a fresh

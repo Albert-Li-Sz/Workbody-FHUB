@@ -368,16 +368,17 @@ a:hover{text-decoration:underline}
   table.account-cards td:nth-child(3){order:2;grid-column:span 3;justify-content:flex-end}
   table.account-cards td:nth-child(4){order:4;grid-column:span 6;flex-direction:column;align-items:stretch;gap:4px}
   table.account-cards td:nth-child(4)::before{font-size:10px}
-  table.account-cards td:nth-child(5){order:5;grid-column:span 6}
-  table.account-cards td:nth-child(6),
+  table.account-cards td:nth-child(5){order:5;grid-column:span 6;align-items:center}
+  table.account-cards td:nth-child(6){order:6;grid-column:span 6}
   table.account-cards td:nth-child(7),
-  table.account-cards td:nth-child(8){order:6;grid-column:span 2;flex-direction:column-reverse;
+  table.account-cards td:nth-child(8),
+  table.account-cards td:nth-child(9){order:7;grid-column:span 2;flex-direction:column-reverse;
     align-items:center;justify-content:center;gap:0;padding:4px 0;
     background:var(--panel2);border-radius:8px}
-  table.account-cards td:nth-child(6)::before,
   table.account-cards td:nth-child(7)::before,
-  table.account-cards td:nth-child(8)::before{font-size:10px}
-  table.account-cards td.acct-actions{order:7;grid-column:span 6;justify-content:flex-start}
+  table.account-cards td:nth-child(8)::before,
+  table.account-cards td:nth-child(9)::before{font-size:10px}
+  table.account-cards td.acct-actions{order:8;grid-column:span 6;justify-content:flex-start}
   table.account-cards td.acct-actions::before{content:none}
   table.account-cards .acct-actions-col{flex-direction:row;flex-wrap:wrap;align-items:flex-start;
     justify-content:flex-start;gap:6px}
@@ -613,7 +614,7 @@ a:hover{text-decoration:underline}
 <body>
 <header>
   <div class="header-left" style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
-    <h1><span class="dot" id="statusDot"></span>Workbody-FHUB 网关看板</h1>
+    <h1><span class="dot" id="statusDot"></span>Workbody-FHUB 网关看板 <span id="headerVersion">v__WORKBODY_VERSION__</span></h1>
     <nav class="main-nav">
       <button class="main-nav-btn active" id="btnNavGateway" data-action="switchMainTab" data-on="click" data-arg="gateway" title="总览">总览</button>
       <button class="main-nav-btn" id="btnNavAccounts" data-action="switchMainTab" data-on="click" data-arg="accounts" title="账号池与运维">账号</button>
@@ -814,7 +815,7 @@ a:hover{text-decoration:underline}
       <div>
         <div class="eyebrow">账号池</div>
         <h2>账号池与运维</h2>
-        <p>新增、导入、启停与绑定出口；表格徽章显示在途、熔断、降权、402 冷却与 session-dead。这些状态由账号池治理模组实时提供。</p>
+        <p>管理国内与国际账号、代理出口和调度优先级。数字越小越早调用；点击“保存优先级”后，重启仍保留。</p>
       </div>
       <div class="page-actions">
         <button class="sec" data-action="switchMainTab" data-on="click" data-arg="tasks">任务中心</button>
@@ -835,6 +836,7 @@ a:hover{text-decoration:underline}
       <div class="card"><div class="k">国内版剩余积分</div><div class="v" id="accountBalanceCn">—</div></div>
     </div>
     <div id="accountBalanceStatus" class="section-note" style="margin-bottom:12px">查询所有账号余额后显示积分汇总。</div>
+    <div class="section-note" style="margin-bottom:12px"><b>账号优先级：</b>在下方账号行输入数字并点击“保存优先级”。默认 100，0 最优先；已保存的值会显示在账号名称旁。当前优先级无可用账号时自动尝试下一优先级。</div>
     <div class="toolbar">
     <button  data-action="openLoginModal" data-on="click">+ 添加 WorkBuddy 账号 (OAuth)</button>
     <!-- 桌面客户端自 2026-09-24 起把 token 改成加密存储（$wbEncrypted 信封）。
@@ -2622,6 +2624,12 @@ function fmtTokens(n){
   }
   return scaled.toLocaleString('en-US', {maximumFractionDigits: 2}) + units[index];
 }
+function fmtTokenRate(n){
+  if(n == null || n === '') return '—';
+  const value = Number(n);
+  if(!Number.isFinite(value)) return '—';
+  return Math.abs(value) >= 1000 ? fmtTokens(value) : value.toFixed(1);
+}
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ms = v => v == null ? '—' : (v >= 1000 ? (v/1000).toFixed(2) + ' s' : Math.round(v) + ' ms');
 const pct = v => v == null ? '—' : v.toFixed(1) + '%';
@@ -2680,7 +2688,7 @@ function fmtRate(v){
 }
 function costUnitLabel(r){
   const n = Number(r.cost_unit);
-  return (isFinite(n) && n > 0) ? fmt(n) + ' token' : '百万 token';
+  return (isFinite(n) && n > 0) ? fmtTokens(n) + ' token' : '1M token';
 }
 // 气泡的结构化内容：{lines: 纯文字行, rates: 三档单价, notes: 补充说明}。
 // 文本与 HTML 两种渲染共用这一份，口径不会两处走样。
@@ -2994,6 +3002,9 @@ function modelLimitPills(a){
   ).join('') + '</div>';
 }
 
+const ACCOUNT_PRIORITY_DRAFTS = new Map();
+const ACCOUNT_PRIORITY_SAVING = new Set();
+
 function accountRow(a){
   const realmBadge = a.realm === 'cn'
     ? '<span class="realm-badge-cn">国内版</span>'
@@ -3004,6 +3015,12 @@ function accountRow(a){
   const uidAttr = esc(String(a.uid || '').replace(/[^\w.@-]/g, ''));
   const nameAttr = esc(String(a.nickname || '').replace(/["'\\<>]/g, ''));
   const usage = USAGE_BY_ACCOUNT[a.uid] || {};
+  const priority = a.priority ?? 100;
+  const draft = ACCOUNT_PRIORITY_DRAFTS.has(a.uid) ? ACCOUNT_PRIORITY_DRAFTS.get(a.uid) : String(priority);
+  const priorityValid = String(draft).trim() !== '' && Number.isInteger(Number(draft))
+    && Number(draft) >= 0 && Number(draft) <= 2147483647;
+  const priorityDirty = !priorityValid || Number(draft) !== priority;
+  const prioritySaving = ACCOUNT_PRIORITY_SAVING.has(a.uid);
   const state = !a.enabled
               ? (a.sessionDeadFails > 0
                   ? '<span class="badge bad" title="Session 连续失效达到阈值后自动停用">Session失效 ' + a.sessionDeadFails + '/' + (a.sessionDeadThreshold || 3) + '</span>'
@@ -3048,16 +3065,23 @@ function accountRow(a){
   return '<tr>'
     + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + '</td>'
     + '<td style="text-align:left" data-label="账号">'
-    +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.nickname) + '</div>'
+    +   '<div style="font-weight:600;font-size:13px;color:var(--fg)">' + esc(a.nickname)
+    + ' <span class="badge mini" title="已保存的账号调度优先级，数字越小越早调用">优先级 ' + priority + '</span></div>'
     + '<div class="mono" style="color:var(--dim);font-size:11px">' + esc(a.uid.slice(0,8)) + ' · ' + esc(a.source) + ' · 到期 ' + esc(a.expiresIn || '?') + '</div>'
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
     + err + pills + limitPills + '</td>'
     + '<td style="text-align:center" data-label="状态">' + state + flight + '</td>'
     + '<td style="text-align:center" data-label="出口">' + slotSelectHtml(a) + '</td>'
     + '<td style="text-align:center" data-label="优先级">'
-    + '<input type="number" min="0" max="2147483647" step="1" value="' + (a.priority ?? 100)
-    + '" aria-label="账号调度优先级" title="数字越小越早调用；修改后自动保存" style="width:76px"'
-    + ' data-action="setAccountPriority" data-on="change" data-uid="' + uidAttr + '"></td>'
+    + '<div class="account-priority" style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;justify-content:center">'
+    + '<input type="number" min="0" max="2147483647" step="1" value="' + esc(draft)
+    + '" aria-label="账号调度优先级" title="数字越小越早调用；点击保存优先级后生效" style="width:76px"'
+    + (prioritySaving ? ' disabled' : '')
+    + ' data-action="editAccountPriority" data-on="input" data-uid="' + uidAttr + '">'
+    + '<button class="sec mini" data-action="setAccountPriority" data-on="click" data-uid="' + uidAttr + '"'
+    + (prioritySaving || !priorityValid || !priorityDirty ? ' disabled' : '') + '>保存优先级</button>'
+    + '<span class="priority-status" role="status" style="font-size:11px;color:var(--dim);width:100%">'
+    + (prioritySaving ? '保存中…' : !priorityValid ? '请填写非负整数' : priorityDirty ? '未保存' : '已保存 · 重启保留') + '</span></div></td>'
     + '<td style="text-align:left;white-space:nowrap" data-label="积分">' + credText + '</td>'
     + '<td style="text-align:right" data-label="请求">' + fmt(usage.requests) + '</td>'
     + '<td style="text-align:right" data-label="总 token">' + fmtTokens(usage.total_tokens) + '</td>'
@@ -3089,7 +3113,7 @@ function renderAccounts(){
   const box = document.getElementById('accounts');
   const active = document.activeElement;
   if(active && typeof box.contains === 'function' && box.contains(active)
-      && active.dataset && active.dataset.action === 'setAccountPriority') return;
+      && active.dataset && active.dataset.action === 'editAccountPriority') return;
   const currentView = (window.VIEW_REALM || "intl");
   let list = (window.ACCOUNTS || []).filter(a => (a.realm || 'intl') === currentView);
   // Enabled accounts first, then scheduling priority; ties retain server order.
@@ -3120,7 +3144,7 @@ function renderAccounts(){
     + '<th style="text-align:left">账号</th>'
     + '<th style="text-align:center;width:84px">状态</th>'
     + '<th style="text-align:center;width:150px">出口</th>'
-    + '<th style="text-align:center;width:94px">优先级</th>'
+    + '<th style="text-align:center;width:174px">调度优先级</th>'
     + '<th style="text-align:left;width:120px">积分</th>'
     + '<th style="text-align:right;width:70px">请求</th>'
     + '<th style="text-align:right;width:88px">总 token</th>'
@@ -3128,7 +3152,7 @@ function renderAccounts(){
     + '<th style="text-align:center;width:232px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
     + '<div class="legend"><span>出站身份：WB = WorkBuddy 独立桌面客户端（默认），VSC = 官方 VSCode 插件，CLI = 官方 CodeBuddy CLI；三者对应不同的出站指纹与配额渠道。</span></div>'
-    + '<div class="legend"><span>优先级默认 100，数字越小越早调用，修改后自动保存；当前优先级没有可用账号时切到下一优先级。同一优先级内，免费模型按区域公平轮询，收费模型沿用选号与会话粘性设置。</span></div>';
+    + '<div class="legend"><span>优先级默认 100，数字越小越早调用，点击“保存优先级”后写入账号文件，重启保留；当前优先级没有可用账号时切到下一优先级。同一优先级内，免费模型按区域公平轮询，收费模型沿用选号与会话粘性设置。</span></div>';
 }
 
 async function loadAccounts(){
@@ -3212,25 +3236,43 @@ async function toggleAccount(uid, enable, btn){
     if(btn) btn.disabled = false;
   }
 }
-async function setAccountPriority(uid, el){
+function editAccountPriority(uid, el){
+  ACCOUNT_PRIORITY_DRAFTS.set(uid, el.value);
   const account = (window.ACCOUNTS || []).find(a => a.uid === uid);
   const previous = account ? (account.priority ?? 100) : 100;
   const value = Number(el.value);
-  if(!el.value.trim() || !Number.isInteger(value) || value < 0 || value > 2147483647){
-    el.value = previous;
+  const valid = el.value.trim() && Number.isInteger(value) && value >= 0 && value <= 2147483647;
+  const box = el.closest('.account-priority');
+  const button = box.querySelector('button');
+  button.disabled = !valid || value === previous || ACCOUNT_PRIORITY_SAVING.has(uid);
+  box.querySelector('.priority-status').textContent = !valid ? '请填写非负整数' : value === previous ? '已保存 · 重启保留' : '未保存';
+}
+async function setAccountPriority(uid, el){
+  const box = el.closest('.account-priority');
+  const input = box.querySelector('input');
+  const account = (window.ACCOUNTS || []).find(a => a.uid === uid);
+  const previous = account ? (account.priority ?? 100) : 100;
+  const value = Number(input.value);
+  if(!input.value.trim() || !Number.isInteger(value) || value < 0 || value > 2147483647){
     toast('优先级须为 0 至 2147483647 的整数', 'warn');
     return;
   }
+  if(ACCOUNT_PRIORITY_SAVING.has(uid) || value === previous) return;
+  ACCOUNT_PRIORITY_SAVING.add(uid);
+  input.disabled = true;
   el.disabled = true;
+  box.querySelector('.priority-status').textContent = '保存中…';
   try{
-    await postJSON('/accounts/set', {uid: uid, priority: value});
-    toast('账号优先级已保存', 'ok');
-    await loadAccounts();
+    const result = await postJSON('/accounts/set', {uid: uid, priority: value});
+    window.ACCOUNTS = (window.ACCOUNTS || []).map(a => a.uid === uid ? {...a, ...result.account} : a);
+    ACCOUNT_PRIORITY_DRAFTS.delete(uid);
+    toast('账号优先级 ' + value + ' 已保存，重启保留', 'ok');
   }catch(e){
-    el.value = previous;
     toast('优先级保存失败: ' + e.message, 'bad');
   }finally{
-    el.disabled = false;
+    ACCOUNT_PRIORITY_SAVING.delete(uid);
+    input.disabled = false;
+    renderAccounts();
   }
 }
 async function setAccountProduct(uid, prod, btn){
@@ -4316,11 +4358,12 @@ async function refreshInner(gen){
         + '<td data-label="结果">' + outcomeBadge(r) + '</td>'
         + '<td data-label="耗时">' + (r.elapsed_ms!=null ? fmt(r.elapsed_ms)+' ms' : '—') + '</td>'
         + '<td data-label="首字">' + (r.ttft_ms!=null ? fmt(r.ttft_ms)+' ms' : '—') + '</td>'
-        + '<td data-label="速度">' + (r.tokens_per_sec ? r.tokens_per_sec.toFixed(1) : '—') + '</td>'
+        + '<td data-label="速度">' + fmtTokenRate(r.tokens_per_sec) + '</td>'
         + '<td data-label="输入">' + fmtTokens(r.prompt_tokens) + '</td>'
         + '<td data-label="输出">' + fmtTokens(r.completion_tokens) + '</td>'
         + '<td style="color:var(--think)" data-label="思考">' + fmtTokens(r.reasoning_tokens) + '</td>'
-        + '<td data-label="缓存">' + (r.cache_hit_pct!=null ? r.cache_hit_pct+'%' : '—') + '</td>'
+        + '<td data-label="缓存">' + fmtTokens(r.cached_tokens || 0)
+        + ' <span style="color:var(--dim)">(' + (r.cache_hit_pct!=null ? r.cache_hit_pct+'%' : '—') + ')</span></td>'
         + '<td data-label="总 token"><b>' + fmtTokens(r.total_tokens) + '</b></td>'
         + '<td data-label="积分" style="color:var(--accent2)">' + (r.credit != null ? Number(r.credit).toFixed(2) : '—') + '</td>'
         + '<td data-label="OpenRouter 价估算" class="cost-cell" style="color:var(--warn)" data-cost-key="' + esc(costKey) + '">'
@@ -6338,7 +6381,7 @@ function renderPerfMatrix(usage, perf){
       // OpenRouter 价估算的合计：未筛选时取出口级汇总（与上面的数字同源）。
       sumCost = usage.cost_cny || 0;
       totTtft = perf.ttft_ms ? (ms(perf.ttft_ms.avg) + " (P50 " + ms(perf.ttft_ms.p50) + ")") : "-";
-      totTps = perf.tokens_per_sec ? (perf.tokens_per_sec.avg.toFixed(1) + " tok/s") : "-";
+      totTps = perf.tokens_per_sec ? (fmtTokenRate(perf.tokens_per_sec.avg) + " tok/s") : "-";
       totWall = perf.wall_ms ? ms(perf.wall_ms.avg) : "-";
       totCache = perf.cache_hit_pct ? (perf.cache_hit_pct.avg.toFixed(1) + "%") : "-";
     } else {
@@ -6364,7 +6407,7 @@ function renderPerfMatrix(usage, perf){
         if(e.cache_hit_pct && e.cache_hit_pct.samples){ cacheW += e.cache_hit_pct.avg * e.cache_hit_pct.samples; cacheN += e.cache_hit_pct.samples; }
       });
       totTtft = ttftN ? ms(ttftW / ttftN) : "-";
-      totTps = tpsN ? (((tpsW / tpsN)).toFixed(1) + " tok/s") : "-";
+      totTps = tpsN ? (fmtTokenRate(tpsW / tpsN) + " tok/s") : "-";
       totWall = wallN ? ms(wallW / wallN) : "-";
       totCache = cacheN ? ((cacheW / cacheN).toFixed(1) + "%") : "-";
     }
@@ -6372,7 +6415,7 @@ function renderPerfMatrix(usage, perf){
       + '<td style="text-align:left" data-label="模型"><b>' + (filtering ? '筛选结果合计 (Filtered)' : '全部模型合计 (Total)') + '</b></td>'
       + '<td style="text-align:center" data-label="区域"><span style="color:var(--dim)">—</span></td>'
       + '<td style="text-align:left" data-label="账号"><span style="color:var(--dim)">' + (filtering ? '已筛选' : '全部账号') + '</span></td>'
-      + '<td data-label="请求数">' + fmtTokens(sumReq) + '</td>'
+      + '<td data-label="请求数">' + fmt(sumReq) + '</td>'
       + '<td data-label="失败">' + (sumErr
           ? ('<span style="color:var(--bad)">' + fmt(sumErr) + '</span>')
           : '<span style="color:var(--dim)">0</span>') + '</td>'
@@ -6398,7 +6441,7 @@ function renderPerfMatrix(usage, perf){
         ? (mpAcctAll[m.realm][m.acct] || null) : null;
       const mpEff = mpAcct || mpRealm || bmPerf[m.id] || {};
       const m_ttft = mpEff.ttft_ms ? (ms(mpEff.ttft_ms.avg) + " <span style='color:var(--dim);font-size:11px'>(P50 " + ms(mpEff.ttft_ms.p50) + ")</span>") : "-";
-      const m_tps = mpEff.tokens_per_sec ? ('<b style="color:var(--accent2)">' + mpEff.tokens_per_sec.avg.toFixed(1) + '</b> <span style="font-size:11px;color:var(--dim)">tok/s</span>') : "-";
+      const m_tps = mpEff.tokens_per_sec ? ('<b style="color:var(--accent2)">' + fmtTokenRate(mpEff.tokens_per_sec.avg) + '</b> <span style="font-size:11px;color:var(--dim)">tok/s</span>') : "-";
       const m_wall = mpEff.wall_ms ? ms(mpEff.wall_ms.avg) : "-";
       const m_cache = (m.prompt_tokens > 0) ? pct(m.cached_tokens / m.prompt_tokens * 100) : (mpEff.cache_hit_pct ? mpEff.cache_hit_pct.avg.toFixed(1) + "%" : "-");
       const pctTok = Math.round(m.total_tokens / maxTok * 100);
@@ -6635,7 +6678,7 @@ function renderAnalytics(data){
   const elAvgSpeed = document.getElementById('kpiAvgSpeed');
   const elAvgLatency = document.getElementById('kpiAvgLatency');
   if(elAvgSpeed){
-    elAvgSpeed.innerHTML = (Number.isFinite(currentSum.speed_avg) ? currentSum.speed_avg.toFixed(1) : '—') + ' <span style="font-size:12px;font-weight:400;color:var(--dim)">tok/s</span>';
+    elAvgSpeed.innerHTML = fmtTokenRate(currentSum.speed_avg) + ' <span style="font-size:12px;font-weight:400;color:var(--dim)">tok/s</span>';
     elAvgSpeed.title = '有效请求的总输出 Token ÷ 总生成时间；生成时间从首个内容帧到末个内容帧，含思考和工具参数，排除失败、取消与无法测速的请求。样本数：' + (currentSum.speed_n || 0);
   }
   if(elAvgLatency) elAvgLatency.textContent = '平均首字延迟 ' + (currentSum.ttft_ms_avg ? fmt(currentSum.ttft_ms_avg) + ' ms' : '—') + ' · 耗时 ' + (currentSum.elapsed_ms_avg ? (currentSum.elapsed_ms_avg / 1000).toFixed(2) + ' s' : '—');
@@ -6806,7 +6849,8 @@ function renderKeyTable(data){
       + '<span style="color:var(--think)">' + fmtTokens(st.reasoning_tokens || 0) + '</span>'
       + '</td>';
     const cacheCell = '<td data-label="缓存命中">'
-      + (st.cache_hit_pct != null ? st.cache_hit_pct.toFixed(1) : '0.0') + '%</td>';
+      + fmtTokens(st.cached_tokens || 0) + ' <span style="color:var(--dim)">('
+      + (st.cache_hit_pct != null ? st.cache_hit_pct.toFixed(1) : '0.0') + '%)</span></td>';
     const creditCell = '<td data-label="消耗积分"><b style="color:var(--accent2)">'
       + (st.credit != null ? Number(st.credit).toFixed(2) : '0.00') + '</b></td>';
     const modelCell = '<td style="text-align:left;max-width:440px" data-label="调用的模型分布">'
@@ -6891,6 +6935,7 @@ const ACTION_HANDLERS = {
   handleLogTerminalScroll: () => handleLogTerminalScroll(),
   toggleAccount: (el, ev, arg) => toggleAccount(el.dataset.uid, arg === '1', el),
   setAccountPriority: (el) => setAccountPriority(el.dataset.uid, el),
+  editAccountPriority: (el) => editAccountPriority(el.dataset.uid, el),
   testAccount: (el) => testAccount(el.dataset.uid, el),
   refreshOne: (el) => refreshOne(el.dataset.uid, el),
   syncProfile: (el) => syncProfile(el.dataset.uid, el),

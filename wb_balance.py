@@ -4,6 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 import math
 import threading
 import time
+import uuid
+
+
+# Provider names select a response adapter, never a different account pool.
+PROVIDERS = {"deepseek": "deepseek", "kimi": "kimi", "moonshot": "kimi",
+             "glm": "glm", "zhipu": "glm", "qwen": "qwen", "dashscope": "qwen",
+             "minimax": "minimax", "openai": "credit_grants"}
 
 
 def _amount(value):
@@ -118,7 +125,7 @@ class ChannelBalances:
         self._locks = {realm: threading.Lock() for realm in ("cn", "intl")}
         self._attempts = {realm: {} for realm in ("cn", "intl")}
 
-    def query(self, accounts, realm, refresh=None):
+    def query(self, accounts, realm, refresh=None, require_used=True):
         accounts = [account for account in accounts if account.realm == realm]
         if refresh is False:
             return summarize_channel(accounts, realm)
@@ -136,7 +143,7 @@ class ChannelBalances:
                 updated_at = _amount(credits.get("updated_at"))
                 fresh = (updated_at is not None and 0 <= now - float(updated_at) < self.cache_seconds
                          and _amount(credits.get("remain")) is not None
-                         and _amount(credits.get("used")) is not None)
+                         and (not require_used or _amount(credits.get("used")) is not None))
                 previous = attempts.get(id(account))
                 recent_attempt = previous and 0 <= now - previous[1] < self.cache_seconds
                 updated_since_attempt = fresh and previous and float(updated_at) > previous[1]
@@ -161,14 +168,34 @@ class ChannelBalances:
 
 def billing_response(summary, kind):
     """Client billing shapes; amounts remain WorkBuddy credit units."""
-    if kind in ("deepseek", "billing_balance"):
+    if kind in ("deepseek", "kimi", "qwen", "glm", "minimax", "billing_balance", "credit_grants"):
         if not summary["complete"] or summary["total_remain"] is None:
             return None
         response = dict(summary)
-        if kind == "billing_balance":
+        remaining = summary["total_remain"]
+        amount = format(_amount(remaining), ".2f")
+        response["unit"] = "credits"
+        if kind in ("billing_balance", "glm", "minimax"):
             response["balance"] = summary["total_remain"]
+            if kind != "billing_balance":
+                response["provider"] = kind
+                response["compatibility"] = "gateway_extension"
+        elif kind == "kimi":
+            response.update(provider="kimi", code=0, scode="0x0", status=True,
+                            data={"available_balance": remaining,
+                                  "voucher_balance": max(0, remaining),
+                                  "cash_balance": min(0, remaining)})
+        elif kind == "qwen":
+            # Alibaba BSS QueryAccountBalance envelope. This gateway accepts
+            # its own API key; it does not implement Alibaba RPC signatures.
+            response.update(provider="qwen", Code="200", Message="success", Success=True,
+                            RequestId=str(uuid.uuid4()), Data={"AvailableAmount": amount,
+                                "AvailableCashAmount": "0.00", "CreditAmount": "0.00",
+                                "MybankCreditAmount": "0.00", "Currency": "USD"})
+        elif kind == "credit_grants":
+            response.update(provider="openai", object="credit_summary", total_available=remaining,
+                            grants={"object": "list", "data": []})
         else:
-            amount = format(_amount(summary["total_remain"]), ".2f")
             # USD is a protocol label so clients do not apply a CNY exchange
             # rate to points. The outer currency still declares credits.
             # WorkBuddy has no prepaid cash wallet; report the credit grant
@@ -181,10 +208,7 @@ def billing_response(summary, kind):
     if not summary["complete"] or summary["total_used"] is None or summary["total_granted"] is None:
         return None
     response = dict(summary)
-    if kind == "credit_grants":
-        response.update(object="credit_summary", total_available=summary["total_remain"],
-                        grants={"object": "list", "data": []})
-    elif kind == "subscription":
+    if kind == "subscription":
         response.update(object="billing_subscription", has_payment_method=True,
                         soft_limit_usd=summary["total_granted"],
                         hard_limit_usd=summary["total_granted"],
