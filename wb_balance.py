@@ -167,14 +167,14 @@ class ChannelBalances:
 
 
 def billing_response(summary, kind):
-    """Client billing shapes; amounts remain WorkBuddy credit units."""
+    """Client billing shapes; preserve the queried platform's actual unit."""
     if kind in ("deepseek", "kimi", "qwen", "glm", "minimax", "billing_balance", "credit_grants"):
         if not summary["complete"] or summary["total_remain"] is None:
             return None
         response = dict(summary)
         remaining = summary["total_remain"]
         amount = format(_amount(remaining), ".2f")
-        response["unit"] = "credits"
+        response["unit"] = summary.get("unit", "credits")
         if kind in ("billing_balance", "glm", "minimax"):
             response["balance"] = summary["total_remain"]
             if kind != "billing_balance":

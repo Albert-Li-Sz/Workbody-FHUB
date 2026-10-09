@@ -45,8 +45,13 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(db.usage_totals(upstream='workbuddy')[0]['total_tokens'],123)
 
     def test_failed_migration_rolls_back_column_rollups_and_version(self):
-        with mock.patch.object(Database,'_configure_rollups',side_effect=RuntimeError('migration interrupted')):
+        opened=[]
+        def interrupt(database, connection, version):
+            opened.append(connection)
+            raise RuntimeError('migration interrupted')
+        with mock.patch.object(Database,'_configure_rollups',interrupt):
             with self.assertRaises(RuntimeError):Database(self.path,self.work.name,self.work.name)
+        with self.assertRaises(sqlite3.ProgrammingError):opened[0].execute('SELECT 1')
         connection=sqlite3.connect(self.path)
         self.addCleanup(connection.close)
         self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],2)

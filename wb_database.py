@@ -29,6 +29,13 @@ class Database:
         os.makedirs(directory, mode=0o700, exist_ok=True)
         if os.name != "nt":
             os.chmod(directory, 0o700)
+        try:
+            self._initialize()
+        except BaseException:
+            self.close_thread()
+            raise
+
+    def _initialize(self):
         connection = self.connection()
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
@@ -144,9 +151,13 @@ class Database:
             fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
             os.close(fd)
             connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=NORMAL")
-            connection.execute("PRAGMA busy_timeout=5000")
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=NORMAL")
+                connection.execute("PRAGMA busy_timeout=5000")
+            except BaseException:
+                connection.close()
+                raise
             self.local.connection = connection
         return connection
 
