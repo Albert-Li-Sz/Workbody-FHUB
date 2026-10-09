@@ -86,6 +86,11 @@ def validate_request(payload, protocol="chat"):
         _tools(payload["functions"], "functions")
     if payload.get("tool_choice") is not None and not isinstance(payload["tool_choice"], (str, dict)):
         raise RequestValidationError("tool_choice must be a string or object")
+    for field in ("stream_options", "response_format", "reasoning", "text", "output_config", "thinking"):
+        if payload.get(field) is not None and not isinstance(payload[field], dict):
+            raise RequestValidationError("%s must be an object" % field)
+    if payload.get("n") is not None and (type(payload["n"]) is not int or payload["n"] <= 0):
+        raise RequestValidationError("n must be a positive integer")
     if protocol == "responses":
         value = payload.get("input")
         if value is not None and not isinstance(value, (str, list)):

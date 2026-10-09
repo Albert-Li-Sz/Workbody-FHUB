@@ -12,6 +12,21 @@ function renderInfrastructure(data){
 updateWorkspace(window.__MAIN_TAB__ || 'gateway');
 
 const ACTION_HANDLERS = {
+  loadPlatforms: () => loadPlatforms(),
+  filterPlatformModels: () => filterPlatformModels(),
+  changePlatformModelsPage: (el, ev, arg) => changePlatformModelsPage(arg),
+  importPlatformAccount: () => importPlatformAccount(),
+  importPlatformFile: el => importPlatformFile(el),
+  startClineLogin: () => startClineLogin(),
+  savePlatformPriority: el => savePlatformPriority(el.dataset.uid),
+  editPlatformPriority: el => editPlatformPriority(el.dataset.uid, el),
+  editPlatformAccount: el => editPlatformAccount(el.dataset.uid),
+  resetPlatformForm: () => resetPlatformForm(),
+  togglePlatformAccount: el => togglePlatformAccount(el.dataset.uid),
+  deletePlatformAccount: el => deletePlatformAccount(el.dataset.uid),
+  refreshPlatform: (el, ev, arg) => refreshPlatform(arg),
+  saveResponseStorage: () => saveResponseStorage(),
+  deleteResponseConversation: (el, ev, arg) => deleteResponseConversation(arg),
   accountPage: (el, ev, arg) => accountPage(arg),
   switchMainTab: (el, ev, arg) => switchMainTab(arg),
   toggleSidebar: () => toggleSidebar(),

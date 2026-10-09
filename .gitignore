@@ -2,6 +2,7 @@
 accounts/*.json
 accounts/*.sqlite*
 accounts/*.db*
+accounts/upstreams/
 !accounts/README.txt
 
 # 运行时日志和用量统计

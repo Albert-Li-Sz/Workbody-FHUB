@@ -1,6 +1,6 @@
 # API 与余额协议说明
 
-适用版本：**1.1.3**。
+适用版本：**1.2.0**。
 
 ## 地址与鉴权
 
@@ -10,9 +10,9 @@
 Authorization: Bearer <WORKBODY_API_KEY>
 ```
 
-本文路径相对于服务根地址。对话接口通过 WorkBuddy 的 Chat Completions 上游转换，兼容范围以本文为准；余额和用量接口始终要求有效、已启用的网关 Key，面板会话及关闭模型调用鉴权不能绕过这一要求。余额和用量返回使用 `Cache-Control: no-store`。
+本文路径相对于服务根地址。WorkBuddy 通过 Chat Completions 转换；Cline 和 Zen 支持同协议原生转发与跨协议转换，详见[多平台接入](platforms.md)。兼容范围以本文为准；余额和用量接口始终要求有效、已启用的网关 Key，面板会话及关闭模型调用鉴权不能绕过这一要求。余额和用量返回使用 `Cache-Control: no-store`。
 
-Key 固定绑定 `cn` 或 `intl` 时，查询只读取该渠道；未绑定时跟随当前默认出口。余额与客户端用量不接受 `X-Realm`、`realm` 或 `channel` 参数覆盖 Key 的渠道。
+Key 的 `allowed_upstreams` 限定可用平台，旧 Key 默认只允许 WorkBuddy。WorkBuddy Key 固定绑定 `cn` 或 `intl` 时，查询只读取该渠道；未绑定时跟随当前默认出口。余额与客户端用量不接受 `X-Realm`、`realm` 或 `channel` 参数覆盖 Key 的渠道。
 
 ## 模型与生成
 
@@ -23,6 +23,7 @@ Key 固定绑定 `cn` 或 `intl` 时，查询只读取该渠道；未绑定时�
 | POST | `/v1/chat/completions` | Chat Completions，支持流式 |
 | POST | `/v1/responses` | Responses，支持流式 |
 | POST | `/v1/messages` | Anthropic Messages |
+| GET / DELETE | `/v1/responses/{id}` | 当前 Key 的已保存响应；删除不破坏其他分支 |
 
 模型 ID 可以 URL 编码，包含 `/` 时使用 `%2F`。未知模型详情返回 `404 model not found`。目录可随上游更新，具体 ID、上下文、输出上限和能力以当前响应为准。
 
@@ -79,7 +80,7 @@ DSH 的辅助搜索入口独立配置，需将 `DEEPSEEK_SEARCH_BASE_URL` 或搜
 
 ## 余额来源与刷新
 
-所有余额入口都汇总当前 Key 渠道内全部账号的 WorkBuddy 剩余积分，包含停用账号。币种名称及金额字段是响应协议标签，数值单位统一为积分，不做人民币、美元或 Token 的换算。
+WorkBuddy 余额入口汇总当前 Key 渠道内全部账号的剩余积分，包含停用账号。Cline 以积分汇总已配置的官方用户，Zen 以 USD 表示且未提供时保持未知。`upstream=workbuddy|cline|opencode_zen` 指定当前 Key 允许的平台；含 WorkBuddy 的 Key 默认查询 WorkBuddy，单个外部平台 Key 默认该平台，多个外部平台 Key 需指定。不同平台分别查询。币种名称及金额字段是响应协议标签，数值单位统一为积分，不做人民币、美元或 Token 的换算。
 
 | 参数 | 行为 |
 | --- | --- |
@@ -111,7 +112,7 @@ MiniMax Token Plan 的 `token_plan/remains` 属于订阅额度，单位和积分
 
 上述原生和命名入口同时支持 `/v1/api/billing/...` 前缀。阿里云 Action 查询支持根路径、`/v1`、`/v1/`。OpenAI 旧版 `credit_grants`、`subscription`、`usage` 支持 `/dashboard/billing/`、`/v1/dashboard/billing/`、`/billing/`、`/v1/billing/` 四种前缀。
 
-`provider` 只选择响应格式，实际数据渠道仍由当前 Key 决定。不要将官方厂商 Key 传给本网关作为账号凭据。
+`provider` 只选择响应格式，实际平台由 `upstream` 与当前 Key 的权限决定，WorkBuddy 渠道仍由 Key 决定。不要将官方厂商 Key 传给本网关作为账号凭据。
 
 ### 原生余额示例
 
@@ -229,3 +230,7 @@ data: {"topics":["accounts","usage"],"revision":12,"at":1791417600}
 - `POST /accounts/refresh` 发送 `{"async":true}` 返回 `202` 与 `id`、`total`、`completed`、`running`、`results`；`GET /accounts/refresh/status?id=...` 查询批次。只保留当前批次；重启后任务状态清除。省略 `async` 或指定 `uid` 保留同步调用兼容。
 
 Messages 支持 Claude Code 在会话中插入的 `system`／`developer` 消息，按原位置转换为上游 system 消息。部分实时推理元数据按字段合并；未声明 `supportedEfforts` 时保留内置可选档位，防止仅返回默认 effort 的模型被错误锁定。
+
+## Responses 持久化
+
+默认对已鉴权请求保存响应，支持 `previous_response_id` 续接、GET／DELETE 和并发分支。默认保留 7 天、1024 MiB 逻辑容量；`store:false` 不保存当前响应。指令不继承，完整历史按 Key 隔离；保存失败不会发出成功终止事件。详见[续接、分支与删除](platforms.md#responses-续接分支与删除)。

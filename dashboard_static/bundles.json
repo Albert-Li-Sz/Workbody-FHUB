@@ -9,6 +9,7 @@
     "settings.js",
     "proxies.js",
     "analytics.js",
+    "platforms.js",
     "actions.js"
   ]
 }

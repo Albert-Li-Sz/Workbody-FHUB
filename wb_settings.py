@@ -305,6 +305,13 @@ def ensure_launcher_key(accounts_dir):
 # different exits at the same time instead of sharing the global switch.
 
 REALMS = ("", "intl", "cn")
+UPSTREAMS = ("workbuddy", "cline", "opencode_zen")
+
+
+def key_upstreams(entry):
+    """Old keys retain only WorkBuddy access, including launcher keys."""
+    raw = (entry or {}).get("allowed_upstreams", ["workbuddy"])
+    return [name for name in UPSTREAMS if isinstance(raw, list) and name in raw]
 
 
 def _clean_model_patterns(value):
@@ -372,6 +379,7 @@ def _clean_key_entry(entry):
         "name": str(entry.get("name") or "").strip() or "未命名",
         "key": key,
         "realm": realm,
+        "allowed_upstreams": key_upstreams(entry),
         "models": _clean_model_patterns(entry.get("models")),
         "enabled": supported_realm and not deleted_at and entry.get("enabled", True) is not False,
         "created_at": entry.get("created_at") or time.strftime("%Y/%m/%d %H:%M"),

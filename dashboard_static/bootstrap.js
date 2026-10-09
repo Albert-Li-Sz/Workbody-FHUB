@@ -111,7 +111,7 @@
   };
 
   // 3. Tab 初始化
-  var TABS = ['gateway','accounts','tasks','analytics','models','logs','settings'];
+  var TABS = ['gateway','accounts','tasks','analytics','models','logs','settings','platforms'];
   var pick = null;
   try {
     var q = new URLSearchParams(location.search).get('tab');

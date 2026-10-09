@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DATABASE = None
 
 
@@ -64,38 +64,53 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS web_replay_expiry ON web_replay(expires_at);
         """)
-        self._configure_rollups(connection, version)
-        connection.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            if "upstream" not in {row[1] for row in connection.execute("PRAGMA table_info(usage_records)")}:
+                connection.execute("ALTER TABLE usage_records ADD COLUMN upstream TEXT NOT NULL DEFAULT 'workbuddy'")
+            connection.execute("CREATE INDEX IF NOT EXISTS usage_upstream_at ON usage_records(upstream,at)")
+            self._configure_rollups(connection, version)
+            connection.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
         self._restrict()
 
     def _configure_rollups(self, connection, previous_version):
         fields = ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens", "total_tokens")
+        if previous_version < 3:
+            for operation in ("insert", "delete", "update"):
+                connection.execute("DROP TRIGGER IF EXISTS usage_hourly_" + operation)
+            connection.execute("DROP TABLE IF EXISTS usage_hourly")
         connection.execute("""CREATE TABLE IF NOT EXISTS usage_hourly (
             dimensions TEXT PRIMARY KEY, hour INTEGER NOT NULL, realm TEXT, account TEXT, model TEXT, api_key TEXT,
+            upstream TEXT NOT NULL,
             requests INTEGER NOT NULL, client_aborted INTEGER NOT NULL, errors INTEGER NOT NULL,
             prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL,
             cached_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL)""")
         connection.execute("CREATE INDEX IF NOT EXISTS hourly_time ON usage_hourly(hour)")
         connection.execute("CREATE INDEX IF NOT EXISTS hourly_key_realm_time ON usage_hourly(api_key,realm,hour)")
         connection.execute("CREATE INDEX IF NOT EXISTS hourly_account_time ON usage_hourly(account,hour)")
+        connection.execute("CREATE INDEX IF NOT EXISTS hourly_upstream_time ON usage_hourly(upstream,hour)")
         def expressions(prefix=""):
             outcome = "COALESCE(%soutcome, CASE WHEN json_extract(%spayload,'$.error') THEN 'failed' ELSE 'completed' END)" % (prefix, prefix)
             hour = "CAST(%sat/3600 AS INTEGER)*3600" % prefix
-            dimensions = "json_array(%srealm,%saccount,%smodel,%sapi_key,%s)" % (prefix, prefix, prefix, prefix, hour)
+            dimensions = "json_array(%srealm,%saccount,%smodel,%sapi_key,%supstream,%s)" % (prefix, prefix, prefix, prefix, prefix, hour)
             stats = ["CASE WHEN " + outcome + "='completed' THEN 1 ELSE 0 END",
                      "CASE WHEN " + outcome + "='client_aborted' THEN 1 ELSE 0 END",
                      "CASE WHEN " + outcome + " NOT IN ('completed','client_aborted') THEN 1 ELSE 0 END"]
             stats.extend("CASE WHEN COALESCE(json_extract(%spayload,'$.usage_missing'),0)=0 THEN COALESCE(json_extract(%spayload,'$.%s'),0) ELSE 0 END" % (prefix, prefix, field) for field in fields)
             return dimensions, hour, stats
         dims, hour, stats = expressions()
-        if previous_version < 2:
+        if previous_version < 3:
             connection.execute("INSERT OR REPLACE INTO usage_hourly SELECT " + dims + "," + hour
-                               + ",realm,account,model,api_key," + ",".join("SUM(" + stat + ")" for stat in stats)
+                               + ",realm,account,model,api_key,upstream," + ",".join("SUM(" + stat + ")" for stat in stats)
                                + " FROM usage_records GROUP BY " + dims)
         names = ("requests", "client_aborted", "errors") + fields
         for operation, prefix, sign in (("INSERT", "NEW.", 1), ("DELETE", "OLD.", -1)):
             dims, hour, stats = expressions(prefix)
-            values = [dims, hour] + [prefix + field for field in ("realm", "account", "model", "api_key")]
+            values = [dims, hour] + [prefix + field for field in ("realm", "account", "model", "api_key", "upstream")]
             values.extend("(%s)*%d" % (stat, sign) for stat in stats)
             connection.execute("""CREATE TRIGGER IF NOT EXISTS usage_hourly_%s AFTER %s ON usage_records BEGIN
                 INSERT INTO usage_hourly VALUES(%s) ON CONFLICT(dimensions) DO UPDATE SET %s;
@@ -105,7 +120,7 @@ class Database:
         updates = []
         for prefix, sign in (("OLD.", -1), ("NEW.", 1)):
             dims, hour, stats = expressions(prefix)
-            values = [dims, hour] + [prefix + field for field in ("realm", "account", "model", "api_key")]
+            values = [dims, hour] + [prefix + field for field in ("realm", "account", "model", "api_key", "upstream")]
             values.extend("(%s)*%d" % (stat, sign) for stat in stats)
             updates.append("INSERT INTO usage_hourly VALUES(" + ",".join(values)
                            + ") ON CONFLICT(dimensions) DO UPDATE SET "
@@ -229,7 +244,7 @@ class Database:
     @staticmethod
     def _usage_tuple(row):
         if any(row.get(field) is not None and not isinstance(row.get(field), str)
-               for field in ("event_id", "account", "realm", "model", "key", "outcome", "billing_mode")):
+               for field in ("event_id", "account", "realm", "model", "key", "outcome", "billing_mode", "upstream")):
             return None
         payload = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         identifier = row.get("event_id") or hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -242,7 +257,8 @@ class Database:
         if not math.isfinite(at) or credit is not None and not math.isfinite(credit):
             return None
         return (identifier, at, row.get("account"), row.get("realm"), row.get("model"),
-                row.get("key"), row.get("outcome"), row.get("billing_mode"), tokens, credit, payload)
+                row.get("key"), row.get("outcome"), row.get("billing_mode"), tokens, credit, payload,
+                row.get("upstream") or "workbuddy")
 
     def append_usage(self, row):
         row.setdefault("event_id", uuid.uuid4().hex)
@@ -254,7 +270,7 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 inserted = connection.execute(
-                    "INSERT OR IGNORE INTO usage_records(id,at,account,realm,model,api_key,outcome,billing_mode,total_tokens,credit,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)", values)
+                    "INSERT OR IGNORE INTO usage_records(id,at,account,realm,model,api_key,outcome,billing_mode,total_tokens,credit,payload,upstream) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", values)
                 if inserted.rowcount:
                     connection.execute("INSERT OR IGNORE INTO usage_exports VALUES(?)", (inserted.lastrowid,))
                 connection.execute("COMMIT")
@@ -325,7 +341,7 @@ class Database:
             connection = self.connection()
             connection.execute("BEGIN IMMEDIATE")
             try:
-                cursor = connection.executemany("INSERT OR IGNORE INTO usage_records(id,at,account,realm,model,api_key,outcome,billing_mode,total_tokens,credit,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)", batch)
+                cursor = connection.executemany("INSERT OR IGNORE INTO usage_records(id,at,account,realm,model,api_key,outcome,billing_mode,total_tokens,credit,payload,upstream) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", batch)
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -335,11 +351,12 @@ class Database:
     @staticmethod
     def usage_where(since=None, until=None, realm=None, account=None, model=None, api_key=None,
                     after_sequence=None, before_sequence=None, status=None, outcome=None, error=None,
-                    path=None, request_id=None):
+                    path=None, request_id=None, upstream=None):
         clauses, params = [], []
         for name, operator, value in (("at", ">=", since), ("at", "<=", until),
                                      ("realm", "=", realm), ("account", "=", account),
                                      ("model", "=", model), ("api_key", "=", api_key),
+                                     ("upstream", "=", upstream),
                                      ("sequence", ">", after_sequence), ("sequence", "<=", before_sequence)):
             if value is not None:
                 clauses.append(name + operator + "?")
@@ -373,7 +390,7 @@ class Database:
         return self.connection().execute("SELECT COUNT(*) FROM usage_records" + where, params).fetchone()[0]
 
     def _raw_usage_totals(self, group_by=(), **filters):
-        allowed = {"account", "model", "realm", "api_key"}
+        allowed = {"account", "model", "realm", "api_key", "upstream"}
         if any(field not in allowed for field in group_by):
             raise ValueError("invalid usage grouping")
         where, params = self.usage_where(**filters)
@@ -393,10 +410,10 @@ class Database:
         """Hourly materialized sums plus exact raw rows at partial-hour edges."""
         names = ("requests", "client_aborted", "errors", "prompt_tokens", "completion_tokens",
                  "reasoning_tokens", "cached_tokens", "total_tokens")
-        allowed = {"realm", "account", "model", "api_key", "since", "until"}
+        allowed = {"realm", "account", "model", "api_key", "upstream", "since", "until"}
         if any(field not in allowed and value is not None for field, value in filters.items()):
             return self._raw_usage_totals(group_by=group_by, **filters)
-        if any(field not in ("account", "model", "realm", "api_key") for field in group_by):
+        if any(field not in ("account", "model", "realm", "api_key", "upstream") for field in group_by):
             raise ValueError("invalid usage grouping")
         lo, hi = filters.get("since"), filters.get("until")
         start = math.ceil(lo / 3600) * 3600 if lo is not None else None

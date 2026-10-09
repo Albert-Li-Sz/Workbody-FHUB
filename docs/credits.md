@@ -15,6 +15,8 @@ Workbody-FHUB 派生自 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/a
 - **[lovingfish/workbuddy-cliproxy](https://github.com/lovingfish/workbuddy-cliproxy)** 与 **[mmqz/cpa-multi-plugins](https://github.com/mmqz/cpa-multi-plugins)**：网关通信与多插件管理原型参考；
 - **[ardeyouxipianyi/workbuddy2api](https://github.com/ardeyouxipianyi/workbuddy2api)**：国内版分发包逆向分析与出站 User-Agent 规范参考。
 
+新增平台适配独立使用 Python 编写，功能参考 [YuJunZhiXue/Cline-proxy](https://github.com/YuJunZhiXue/Cline-proxy/tree/b07b46ef2da3b2126514270b7b88675398e7e810)，认证与接口核对 [Cline 官方源码](https://github.com/cline/cline/tree/fa840c741c3fc2eb49e7e0a4484895a99dae5cc5) 与 [OpenCode Zen 文档](https://opencode.ai/docs/zen/)。参考提交未附许可证，未移植其 Go 源码；来源与协议边界见[多平台说明](platforms.md)。
+
 PR 贡献者（v1.4.5 之前的改动未进上方更新记录，这里一并列出）：
 
 - **[@ddddd-ren](https://github.com/ddddd-ren)**：用量日志倒序检索与看板防堆叠（PR #14）、原子写入与并发竞争修复（PR #13）、账号池 JSON 导出导入（PR #5）；

@@ -85,6 +85,24 @@
         }
       ],
       "reviewed_version": "1.6.17"
+    },
+    {
+      "url": "https://github.com/YuJunZhiXue/Cline-proxy.git",
+      "reviewed_commit": "b07b46ef2da3b2126514270b7b88675398e7e810",
+      "integration": "independent-implementation-reference",
+      "details": "docs/platforms.md"
+    },
+    {
+      "url": "https://github.com/cline/cline.git",
+      "reviewed_commit": "fa840c741c3fc2eb49e7e0a4484895a99dae5cc5",
+      "integration": "official-protocol-reference",
+      "details": "docs/platforms.md"
+    },
+    {
+      "url": "https://opencode.ai/docs/zen/",
+      "reviewed_on": "2026-10-09",
+      "integration": "official-protocol-reference",
+      "details": "docs/platforms.md"
     }
   ]
 }

@@ -1,13 +1,17 @@
 # Workbody-FHUB
 
-WorkBuddy 国内与国际多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages，提供账号调度、渠道绑定、积分余额查询和实时用量控制台。
+WorkBuddy、Cline 与 OpenCode Zen 多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages，提供平台隔离调度、余额与用量查询、可续接的 Responses 会话及实时控制台。
 
-当前版本 **1.1.3** · Python **3.9+** · 应用仅依赖 Python 标准库
+当前版本 **1.2.0** · Python **3.9+** · 应用仅依赖 Python 标准库
 
-[版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
+1.2.0 当前为预发布：代码、模拟协议回归及容器／迁移验证覆盖新功能，Cline／Zen 真实账号联调待配置后完成。稳定镜像 `latest` 在真实联调及正式发布后更新。
+
+[版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [多平台接入](docs/platforms.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
 ## 功能
 
+- **多平台接入**：Cline 设备登录／凭据导入、自动刷新、积分余额与消费同步；Zen API Key、官方模型目录与协议路由。账号、重试和用量按平台隔离；付费、免费及订阅模型按实际账号权益使用。
+- **Responses 会话**：支持 `previous_response_id`、响应查询／删除及面板整会话删除；SQLite 保存完整分支快照，默认保留 7 天、逻辑容量 1 GiB，按网关 Key 隔离。不可转换的签名／密文返回明确错误。
 - **公平调度**：数字较小的账号优先。同优先级内，免费模型比较当天免费 Token 加在途预估；付费模型比较当天积分消耗加在途预估。国内、国际独立均衡，结束后按实际用量校正；免费会话默认使用 256K Token 换号窗口。
 - **连接复用**：有界 HTTP/1.1 连接池，按目标、账号和代理隔离连接；保留带认证的 HTTP、SOCKS5／SOCKS5h 代理。
 - **稳定流式生成**：三种生成协议支持 SSE，默认 15 秒无内容时发送心跳；配套 Nginx 关闭缓冲、延长流式读写超时。
@@ -64,7 +68,7 @@ Windows、macOS、Linux 启动脚本继续可用。面板密码和 API Key 分�
 在原安装目录执行，先保留旧 Compose 配置：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.1.3/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.0/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -75,9 +79,12 @@ bash ./update.sh
 
 客户端 API Key 使用控制台生成的网关 Key，模型 ID 以该 Key 的 `GET /v1/models` 为准。
 
+控制台 **平台与会话** 添加 Cline／Zen 账号，再在 **设置 → API Key** 勾选允许的平台。旧 Key 默认只允许 WorkBuddy；国内／国际渠道设置只影响 WorkBuddy。多平台 Key 使用 `cline/<上游模型ID>` 或 `opencode/<上游模型ID>`；只允许一个外部平台的 Key 也接受原始模型 ID。平台目录中显示模型不代表账号已获得调用权益，真实成功请求会更新账号的验证状态。详见[多平台接入](docs/platforms.md)。
+
 | 功能 | 路径 |
 | --- | --- |
 | 对话、Responses、Messages | `POST /v1/chat/completions`、`POST /v1/responses`、`POST /v1/messages` |
+| Responses 续接／查询／删除 | 请求携带 `previous_response_id`；`GET /v1/responses/{id}`、`DELETE /v1/responses/{id}` |
 | 模型列表／详情 | `GET /v1/models`、`GET /v1/models/{id}` |
 | 渠道积分余额／Key 的 Token 消耗 | `GET /api/billing/balance`、`GET /api/billing/usage` |
 | DeepSeek 余额格式 | `GET /user/balance`、`GET /v1/user/balance` |
@@ -91,7 +98,7 @@ curl https://<公网IP>/v1/models \
   -H "Authorization: Bearer $WORKBODY_API_KEY"
 ```
 
-所有余额入口返回 Key 对应渠道内全部账号的 **WorkBuddy 积分总和**，包含停用账号，协议金额字段不代表现金。GLM、MiniMax 使用网关扩展入口；千问适配阿里云响应结构，OpenAI 为旧版账单兼容。完整别名、来源和返回示例见[API 说明](docs/api.md)。
+旧 Key 的余额入口继续返回对应渠道全部账号的 **WorkBuddy 积分总和**，包含停用账号，协议金额字段不代表现金。多平台 Key 使用 `upstream=workbuddy|cline|opencode_zen` 指定余额／用量范围；不同单位分别查询。Cline 使用积分，Zen 使用 USD，未提供的余额保持未知。`provider` 只选择返回格式。GLM、MiniMax 为网关扩展；千问适配阿里云结构，OpenAI 为旧版账单兼容。完整别名和返回示例见[API 说明](docs/api.md)。
 
 ## 优先级与并发均衡
 
@@ -103,13 +110,15 @@ curl https://<公网IP>/v1/models \
 
 数据库默认是 `accounts/workbody.sqlite3`；首次启动自动迁移旧文件，持续挂载原目录即可。请求用量先提交 SQLite，再经持久化队列后台导出 JSONL；统计不等待导出完成。SQLite 默认保留全部历史，`WB_SQLITE_RETENTION_DAYS` 可设置独立保留天数。价格政策历史仍在 `usage` 目录，应与数据库一起备份。
 
+Responses 保存的是会话正文、工具结果及可能包含的上游密文，保留策略独立于用量日志；可在 **平台与会话** 关闭保存或调整天数／容量。请求 `store:false` 不保存当前响应，不能用该响应 ID 续接。容量满会明确报错，不删除尚未过期的历史。
+
 **单实例无需 Redis。** SQLite 保存数据，进程内锁完成原子选号与结算。现有可选 Upstash Redis 配置仅镜像会话绑定；多副本部署还需要共享在途租约、计量与事件发布，当前不能靠打开该选项实现分布式公平调度。[存储与备份](docs/integration-plan.md#sqlite-迁移与备份)
 
 ## 开发与发布
 
 应用无额外 pip 依赖；Nginx 镜像额外包含 Certbot。发布工作流同时构建两个镜像的 `linux/amd64`、`linux/arm64` 版本，验证后更新稳定标签，并在 [Release](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) 附带源码、升级脚本、SHA-256 和镜像摘要。
 
-应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.1.3`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.1.3`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 98 个套件：80 个 Python + 18 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。测试默认最多 4 个套件并行、每套件使用独立临时目录；可传 `--jobs 1` 串行，`--logs <目录>` 保存完整输出。
+应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.2.0`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.0`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 103 个套件：84 个 Python + 19 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。测试默认最多 4 个套件并行、每套件使用独立临时目录；可传 `--jobs 1` 串行，`--logs <目录>` 保存完整输出。
 
 提示词重试、首字耗时、连接与统计优化见[性能与可靠性说明](docs/performance.md)。
 

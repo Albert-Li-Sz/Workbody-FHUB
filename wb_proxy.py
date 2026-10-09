@@ -14,6 +14,7 @@ Launchers: start-wb-proxy.bat / start-wb-proxy-lan.bat on Windows,
 start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
+import copy
 import hashlib
 import http.client
 from collections import deque
@@ -75,6 +76,10 @@ import wb_server
 import wb_dashboard
 import wb_metrics
 import wb_balance
+import wb_responses
+import wb_platforms
+import wb_platform_api
+import wb_protocol_bridge
 import wb_forward_proxy
 from wb_version import VERSION
 import wb_modelsdev
@@ -232,6 +237,8 @@ CLIENT_BILLING_PATHS = frozenset(CLIENT_BALANCE_ROUTES) | CLIENT_USAGE_ROUTES
 MESSAGES_PATHS = ("/v1/messages", "/messages", "/anthropic/v1/messages", "/anthropic/messages")
 MESSAGES_ROUTES = frozenset(MESSAGES_PATHS + tuple(p + "/count_tokens" for p in MESSAGES_PATHS))
 CLIENT_BALANCES = wb_balance.ChannelBalances()
+PLATFORMS = None
+RESPONSE_STORE = None
 
 def is_qwen_balance_request(request_path):
     parsed = urlparse(request_path or "")
@@ -384,6 +391,8 @@ def row_realm(row):
     order row_matches_realm used, so a filter and a per-realm breakdown can
     never disagree about the same row.
     """
+    if row.get("upstream", "workbuddy") != "workbuddy":
+        return ""
     r = row.get("realm")
     if r:
         return r
@@ -421,6 +430,8 @@ def usage_billing_mode(row, free_models=None):
     credit = _counted_credit(row)
     if credit is not None and credit > 0:
         return "paid"
+    if row.get("upstream", "workbuddy") != "workbuddy" and row.get("billing_mode") in ("free", "paid"):
+        return row["billing_mode"]
     if row.get("has_credit"):
         return "free" if credit == 0 else "unknown"
     mode = row.get("billing_mode")
@@ -585,6 +596,13 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         row["account"] = account
     acc = POOL.get(account) if (account and POOL) else None
     row["realm"] = realm or getattr(upstream, "_realm", None) or (acc.realm if acc else CURRENT_REALM)
+    row["upstream"] = getattr(upstream, "_upstream", "workbuddy")
+    if row["upstream"] != "workbuddy":
+        row["realm"] = ""
+        row["cost_unit"] = upstream.cost_unit
+        row["billing_mode"] = upstream.billing_mode
+        if getattr(upstream, "generation_id", None):
+            row["upstream_generation_id"] = upstream.generation_id
     row.update(_request_context_fields())
     if (outcome == "completed" and account and POOL and not usage_missing and fields.get("total_tokens")
             and fields.get("has_credit")):
@@ -636,7 +654,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
             if k in fields:
                 per[k] += fields[k]
     _persist_usage(row, "usage persist failed", upstream=upstream)
-    wb_fairness.observe(row)
+    if row["upstream"] == "workbuddy":
+        wb_fairness.observe(row)
     try:
         t_tokens = fields.get("total_tokens", 0)
         dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
@@ -721,6 +740,8 @@ def _persist_usage(row, fail_label, upstream=None):
             with _daily_usage_lock:
                 _daily_usage["at"] = 0.0
             if upstream is not None:
+                if hasattr(upstream, "settle"):
+                    upstream.settle(row)
                 upstream.release()
     if database_written and database:
         cfg = logging_config_cached()
@@ -826,6 +847,11 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         row["realm"] = getattr(upstream, "_realm", None) or (acc.realm if acc else CURRENT_REALM)
     if realm:
         row["realm"] = realm
+    row["upstream"] = getattr(upstream, "_upstream", "workbuddy")
+    if row["upstream"] != "workbuddy":
+        row["realm"] = ""
+        row["cost_unit"] = upstream.cost_unit
+        row["billing_mode"] = upstream.billing_mode
     row["billing_mode"] = usage_billing_mode(row)
     row.update(_request_context_fields())
     row["key"] = key or ""
@@ -1122,6 +1148,8 @@ def _daily_state_copy(source):
 
 
 def _fold_daily_row(row, state, free_models):
+    if row.get("upstream", "workbuddy") != "workbuddy":
+        return
     uid = row.get("account")
     if not uid:
         return
@@ -2503,6 +2531,7 @@ def runtime_settings_view():
             "id": entry.get("id") or "",
             "name": entry.get("name") or "",
             "realm": entry.get("realm") or "",
+            "allowed_upstreams": wb_settings.key_upstreams(entry),
             "models": list(entry.get("models") or []),
             "enabled": entry.get("enabled", True) is not False,
             "models": list(stored_models) if isinstance(stored_models, list) else [],
@@ -4825,6 +4854,8 @@ def no_usable_account_message(realm, accounts):
 def open_upstream(payload, session_key=None, target_realm=None,
                   session_meta=None, inbound_request_id="", trace_id="", deadline=None,
                   preferred_uid=None):
+    if str(payload.get("model") or "").startswith(tuple(wb_platforms.PREFIXES.values())):
+        return wb_platform_api.open_chat(sys.modules[__name__], payload, session_key, preferred_uid)
     # Refresh the daily token guard before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -4877,6 +4908,9 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 upstream_body, realm=realm, session_key=routing_key,
                 exclude=tried, model=model, estimate=reservation_estimate,
                 preferred_uid=preferred_uid) if POOL else (None, None)
+        if preferred_uid and getattr(_REQ_CONTEXT, "bound_account", None) == preferred_uid and account and account.uid != preferred_uid:
+            account.release(reservation_id)
+            raise wb_responses.ResponseError("the response history is bound to an unavailable account", 503, "account_unavailable")
         if account is None:
             if transient_hits and _attempt < max_attempts - 1:
                 tried.clear()
@@ -6091,6 +6125,18 @@ def responses_to_chat(payload):
     for key in ("temperature", "top_p", "seed"):
         if payload.get(key) is not None:
             chat[key] = payload[key]
+    for key in ("metadata", "service_tier", "safety_identifier", "user"):
+        if payload.get(key) is not None:
+            chat[key] = payload[key]
+    text_config = payload.get("text") or {}
+    fmt = text_config.get("format") if isinstance(text_config, dict) else None
+    if fmt and fmt.get("type") != "text":
+        chat["response_format"] = ({"type": "json_schema", "json_schema": {key: value for key, value in fmt.items() if key != "type"}}
+                                   if fmt.get("type") == "json_schema" else dict(fmt))
+    if isinstance(text_config, dict) and text_config.get("verbosity") is not None:
+        chat["verbosity"] = text_config["verbosity"]
+    if payload.get("top_logprobs") is not None:
+        chat.update(logprobs=True, top_logprobs=payload["top_logprobs"])
     if payload.get("max_output_tokens") is not None:
         chat["max_tokens"] = payload["max_output_tokens"]
     else:
@@ -6118,7 +6164,10 @@ def responses_to_chat(payload):
             chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
             chat["_web_tools"] = True
     if payload.get("tool_choice"):
-        chat["tool_choice"] = payload["tool_choice"]
+        choice = payload["tool_choice"]
+        if isinstance(choice, dict) and choice.get("type") in ("function", "custom") and choice.get("name"):
+            choice = {"type": "function", "function": {"name": choice["name"]}}
+        chat["tool_choice"] = choice
     if payload.get("parallel_tool_calls") is not None:
         chat["parallel_tool_calls"] = payload["parallel_tool_calls"]
     return chat
@@ -7624,6 +7673,7 @@ class Handler(BaseHTTPRequestHandler):
     # Which configured API key the caller used, set by _key_ok(). Its bound
     # realm decides the upstream exit for this request alone.
     key_entry = None
+    _response_context = None
     # The stdlib default caps the request line at 64KB and answers an opaque
     # bare "414 Request-URI Too Long" for anything longer. Raise it and reply in
     # the normal JSON error shape so an over-long URL is diagnosable.
@@ -7641,6 +7691,8 @@ class Handler(BaseHTTPRequestHandler):
         # it inherited the realm binding of whatever API key used the connection
         # before it - sending that request to the wrong upstream exit.
         self.key_entry = None
+        self._response_context = None
+        _REQ_CONTEXT.bound_account = None
         # A reused connection must not inherit the previous body's read state.
         self._body_consumed = False
         self._request_reader.start()
@@ -7998,6 +8050,8 @@ class Handler(BaseHTTPRequestHandler):
         global switch. Returning None lets open_upstream() fall back to
         model-based detection.
         """
+        if getattr(self, "_response_context", None) and self._response_context.get("realm"):
+            return self._response_context["realm"]
         if explicit:
             return explicit
         bound = self._key_realm()
@@ -8070,7 +8124,7 @@ class Handler(BaseHTTPRequestHandler):
         Model listings stay reachable with the API key alone so that plain
         OpenAI clients can keep discovering models.
         """
-        if path == "/api/events":
+        if path == "/api/events" or path.startswith("/platforms"):
             return True
         if path.startswith("/accounts"):
             return True
@@ -8101,6 +8155,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_client_balance(query, "qwen")
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
+        if path.startswith("/platforms"):
+            return self._platform_management(path, query=query)
+        for prefix in ("/v1/responses/", "/responses/"):
+            if path.startswith(prefix):
+                return self._stored_response(path[len(prefix):])
         if path.startswith("/assets/"):
             return self._dashboard_asset(path)
         if path in ("/", "/dashboard", "/ui"):
@@ -8174,6 +8233,86 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/settings/reveal":
             return self._get_settings_reveal(query)
         return self._error(404, "not found", "invalid_request_error")
+
+    def _stored_response(self, identifier, delete=False):
+        if not self._authorized():
+            return
+        if not RESPONSE_STORE:
+            return self._error(503, "Responses storage is unavailable")
+        try:
+            owner = self._key_id()
+            allowed = wb_settings.key_upstreams(self.key_entry)
+            result = (RESPONSE_STORE.delete(identifier, owner, allowed) if delete else
+                      RESPONSE_STORE.get(identifier, owner, allowed)["response"])
+            return self._json(200, result)
+        except wb_responses.ResponseError as exc:
+            return self._error(exc.status, str(exc), "invalid_request_error", exc.code)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        for prefix in ("/v1/responses/", "/responses/"):
+            if path.startswith(prefix):
+                return self._stored_response(path[len(prefix):], delete=True)
+        return self._error(404, "not found", "invalid_request_error")
+
+    def _platform_management(self, path, payload=None, query=None):
+        if not PLATFORMS:
+            return self._error(503, "platform manager is unavailable")
+        query = query or {}
+        try:
+            if payload is None:
+                if path == "/platforms":
+                    result = {**PLATFORMS.snapshot(),
+                        "proxy_slots": [{"id": entry["id"], "label": entry.get("label") or entry["id"]}
+                                        for entry in wb_settings.proxy_slots(ACCOUNTS_DIR)],
+                        "responses": RESPONSE_STORE.snapshot() if RESPONSE_STORE else None}
+                    if query.get("models", ["1"])[0] != "0":
+                        result["models"] = PLATFORMS.models(list(wb_platforms.BASES))
+                    return self._json(200, result)
+                if path == "/platforms/models":
+                    return self._json(200, {"models": PLATFORMS.models(list(wb_platforms.BASES))})
+                if path == "/platforms/login/poll":
+                    job = PLATFORMS.jobs.get(query.get("id", [""])[0])
+                    if not job:
+                        raise wb_platforms.PlatformError("login not found", 404)
+                    return self._json(200, dict(job))
+                if path == "/platforms/usage" and wb_database.DATABASE:
+                    upstream = query.get("upstream", [None])[0]
+                    if upstream not in (None, "workbuddy", "cline", "opencode_zen"):
+                        raise wb_platforms.PlatformError("invalid upstream")
+                    since = _local_midnight()
+                    return self._json(200, {"totals": wb_database.DATABASE.usage_totals(group_by=("upstream", "model"), since=since, upstream=upstream),
+                        "recent": list(wb_database.DATABASE.usage_rows(upstream=upstream, limit=100))})
+            else:
+                if path == "/platforms/accounts/import":
+                    return self._json(200, {"accounts": PLATFORMS.import_accounts(payload)})
+                if path == "/platforms/accounts/update":
+                    return self._json(200, PLATFORMS.update_account(payload.get("uid"), payload))
+                if path == "/platforms/refresh":
+                    upstream = payload.get("upstream")
+                    if upstream not in wb_platforms.BASES:
+                        raise wb_platforms.PlatformError("invalid upstream")
+                    PLATFORMS.refresh_async(upstream, force=True)
+                    return self._json(202, {"refreshing": True})
+                if path == "/platforms/login/start":
+                    return self._json(200, PLATFORMS.start_login())
+                if path == "/platforms/responses/settings":
+                    cfg = wb_responses.validate_config(payload)
+                    with wb_settings._lock:
+                        settings = wb_settings.load(ACCOUNTS_DIR)
+                        settings["responses"] = cfg
+                        wb_settings.save(ACCOUNTS_DIR, settings)
+                    return self._json(200, cfg)
+                if path == "/platforms/responses/delete":
+                    return self._json(200, RESPONSE_STORE.delete_conversation(payload.get("conversation")))
+            return self._error(404, "not found", "invalid_request_error")
+        except (wb_platforms.PlatformError, wb_responses.ResponseError) as exc:
+            return self._error(exc.status, str(exc), "invalid_request_error", exc.code)
+        except ValueError as exc:
+            return self._error(400, str(exc), "invalid_request_error")
+        except Exception as exc:
+            log("platform management failed: %s" % type(exc).__name__)
+            return self._error(502, "platform operation failed; check account and network status")
     def _get_dashboard(self):
         return self._dashboard()
 
@@ -8225,32 +8364,52 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         channel = (query.get("channel") or [None])[0]
         if channel not in (None, "workbuddy-cn", "workbuddy-intl"):
-            return self._error(400, "channel must be workbuddy-cn or workbuddy-intl",
-                               "invalid_request_error")
+            return self._error(400, "channel must be workbuddy-cn or workbuddy-intl", "invalid_request_error")
+        allowed = wb_settings.key_upstreams(getattr(self, "key_entry", None))
+        requested_upstream = query.get("upstream", [None])[0]
+        if requested_upstream:
+            if requested_upstream not in allowed:
+                return self._error(403, "API Key does not allow this platform", "invalid_request_error")
+            allowed = [requested_upstream]
         req_realm = ({"workbuddy-cn": "cn", "workbuddy-intl": "intl"}.get(channel)
                      or self._request_realm() or CURRENT_REALM)
-        try:
-            entries = fetch_models(realm=req_realm)
-        except Exception as exc:
-            return self._error(502, str(exc))
-        # Level 4 is best effort: warm the local cache in the background at
-        # most once per cooldown; offline deployments just keep the fallback.
-        try:
-            wb_modelsdev.refresh_async(ACCOUNTS_DIR, log=log)
-        except Exception:
-            pass
-        data = [model_entry(mid, meta) for mid, meta in entries]
-        selected = {"cn": "workbuddy-cn", "intl": "workbuddy-intl"}.get(req_realm)
-        if selected:
+        if channel and (getattr(self, "key_entry", None) or {}).get("realm") in ("cn", "intl") and self.key_entry["realm"] != req_realm:
+            return self._error(403, "API Key does not allow this channel", "invalid_request_error")
+        data = []
+        if "workbuddy" in allowed:
+            try:
+                entries = fetch_models(realm=req_realm)
+            except Exception as exc:
+                return self._error(502, str(exc))
+            data = [model_entry(mid, meta) for mid, meta in entries]
+            selected = {"cn": "workbuddy-cn", "intl": "workbuddy-intl"}.get(req_realm)
             for item in data:
-                item["channel"] = selected
+                item["upstream"] = "workbuddy"
+                if selected:
+                    item["channel"] = selected
+            try:
+                wb_modelsdev.refresh_async(ACCOUNTS_DIR, log=log)
+            except Exception:
+                pass
+        if PLATFORMS and not channel:
+            data.extend(PLATFORMS.models(allowed))
+        def permitted(item):
+            if wb_settings.key_allows_model(getattr(self, "key_entry", None), item["id"]):
+                return True
+            return (len(allowed) == 1 and item.get("upstream_model") and
+                    wb_settings.key_allows_model(getattr(self, "key_entry", None), item["upstream_model"]))
+        data = [item for item in data if permitted(item)]
         if model_id is not None:
+            try:
+                _, _, model_id = wb_platforms.route(model_id, getattr(self, "key_entry", None))
+            except wb_platforms.PlatformError:
+                return self._error(404, "model not found", "invalid_request_error")
             for item in data:
                 if item["id"] == model_id:
                     return self._json(200, item)
             return self._error(404, "model not found", "invalid_request_error")
-        return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM,
-                                "channel": selected, "source": "workbuddy"})
+        return self._json(200, {"object": "list", "data": data, "realm": req_realm,
+                                "channel": {"cn": "workbuddy-cn", "intl": "workbuddy-intl"}.get(req_realm), "source": "workbuddy" if allowed == ["workbuddy"] else "fhub", "upstreams": allowed})
 
     def _get_v1_usage(self, query):
         if not self._authorized():
@@ -8303,7 +8462,38 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return realm
 
+    def _billing_upstream(self, query):
+        self.key_entry = identify_key(self._supplied_key())
+        if not self.key_entry:
+            self._error(401, "a valid API key is required for billing queries", "invalid_request_error")
+            return None
+        allowed = wb_settings.key_upstreams(self.key_entry)
+        upstream = query.get("upstream", [None])[0]
+        if not upstream:
+            upstream = "workbuddy" if "workbuddy" in allowed else allowed[0] if len(allowed) == 1 else None
+        if upstream not in allowed:
+            self._error(403 if upstream else 400, "choose an upstream permitted by this API Key", "invalid_request_error")
+            return None
+        return upstream
+
     def _get_client_balance(self, query, kind):
+        upstream = self._billing_upstream(query)
+        if upstream is None:
+            return
+        if upstream != "workbuddy":
+            if not PLATFORMS:
+                return self._error(503, "platform manager is unavailable")
+            if kind == "billing_balance" and "provider" in query:
+                kind = wb_balance.PROVIDERS.get(query["provider"][0].strip().lower())
+                if kind is None:
+                    return self._error(400, "unsupported balance provider", "invalid_request_error")
+            summary = PLATFORMS.balance(upstream, query.get("refresh", ["0"])[0] in ("1", "true", "yes"))
+            if kind == "balance":
+                return self._json(200, summary)
+            response = wb_balance.billing_response(summary, kind)
+            if response is None:
+                return self._error(503, "platform balance is unknown; query /v1/balance for availability", "balance_unavailable")
+            return self._json(200, response)
         realm = self._client_billing_realm()
         if realm is None:
             return
@@ -8328,6 +8518,17 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, response)
 
     def _get_client_usage(self, query):
+        upstream = self._billing_upstream(query)
+        if upstream is None:
+            return
+        if upstream != "workbuddy":
+            if not wb_database.DATABASE:
+                return self._error(503, "usage storage is unavailable")
+            req_range, req_since, req_until = range_query(query)
+            lo, hi = range_window(req_range, req_since, req_until)
+            rows = wb_database.DATABASE.usage_totals(upstream=upstream, api_key=self._key_id(), since=lo, until=hi)
+            return self._json(200, {"ok": True, "object": "usage", "unit": "tokens", "upstream": upstream,
+                "window": {"since": lo, "until": hi}, **(rows[0] if rows else _new_analytics_stat())})
         realm = self._client_billing_realm()
         if realm is None:
             return
@@ -8840,12 +9041,17 @@ class Handler(BaseHTTPRequestHandler):
                     models = item.get("models")
                 else:
                     models = stored.get("models")
+                upstreams = item.get("allowed_upstreams", wb_settings.key_upstreams(stored))
+                if (not isinstance(upstreams, list) or not upstreams or
+                        any(value not in wb_settings.UPSTREAMS for value in upstreams)):
+                    return None, self._error(400, "allowed_upstreams must contain valid platforms", "invalid_request_error")
                 created_at = item.get("created_at") or stored.get("created_at") or time.strftime("%Y/%m/%d %H:%M")
                 cleaned.append({
                     "id": entry_id,
                     "name": str(item.get("name", stored.get("name")) or "").strip(),
                     "key": value,
                     "realm": realm,
+                    "allowed_upstreams": item.get("allowed_upstreams", wb_settings.key_upstreams(stored)),
                     "models": models,
                     "enabled": enabled,
                     "created_at": created_at,
@@ -10026,20 +10232,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_responses(self, payload):
         """Serve /v1/responses by translating to chat completions upstream."""
-        # The gateway is stateless: it keeps no store of previous responses,
-        # so it cannot replay a prior turn. Silently ignoring the field would
-        # answer a follow-up as if it were a fresh conversation - the client
-        # gets a normal-looking reply with the context missing. Say so instead.
-        # 拒絕 namespace 工具，逼 Codex fallback 成 flat 工具清單。
-        # 不這樣做的話，MCP／外掛工具全部會被 app 判定為不可執行。
-        if payload.get("previous_response_id"):
-            return self._error(
-                400,
-                "previous_response_id is not supported: this gateway does not "
-                "store response state. Send the full conversation in 'input' "
-                "instead, or use a stateless client.",
-                "invalid_request_error")
         session_key = extract_session_key(self.headers, payload)
+        if getattr(self, "_response_context", None):
+            session_key = self._response_context["conversation"]
         custom_names = custom_tool_names(payload.get("tools"))
         with wb_metrics.stage("normalize_ms"):
             chat_req = responses_to_chat(payload)
@@ -10079,9 +10274,16 @@ class Handler(BaseHTTPRequestHandler):
                 trace_id=(self.headers.get("X-Trace-ID") or ""))
             upstream_options = {"session_key": session_key, "target_realm": req_realm,
                                 "session_meta": session_meta}
+            if getattr(self, "_response_context", None) and self._response_context.get("bound"):
+                upstream_options["preferred_uid"] = self._response_context.get("account")
+                _REQ_CONTEXT.bound_account = self._response_context.get("account")
             if flow:
                 upstream_options["deadline"] = flow.deadline
             upstream, account, effort = open_upstream(chat_req, **upstream_options)
+            if (self._response_context and self._response_context.get("bound")
+                    and account.uid != self._response_context.get("account")):
+                upstream.close()
+                raise wb_responses.ResponseError("the response history is bound to an unavailable account", 503, "account_unavailable")
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -10116,6 +10318,7 @@ class Handler(BaseHTTPRequestHandler):
                 effort=effort, web_flow=flow)
 
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, session_meta=None, effort=None, web_flow=None):
+        platform = getattr(upstream, "_upstream", "workbuddy")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-transform")
@@ -10129,6 +10332,8 @@ class Handler(BaseHTTPRequestHandler):
             holder = {"custom_names": custom_names, "request_meta": request_meta,
                       "namespace_map": namespace_map, "base_body": base_body,
                       "realm": realm, "session_meta": session_meta, "web_flow": flow}
+            if getattr(self, "_response_context", None):
+                holder["response_id"] = self._response_context["id"]
             timing = wb_metrics.GenerationTiming(t_start)
             round_recorded = False
             try:
@@ -10144,7 +10349,8 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         for frame in stream_responses_events(
                                 timing.wrap(writer.iterate(raw)), model, holder):
-                            writer.write(clean_responses_frame(frame))
+                            Handler._response_replay(self, flow, holder.get("round_message"), model, custom_names, request_meta, namespace_map)
+                            writer.write(Handler._response_frame(self, frame, model, account.uid, platform, realm))
                             writer.flush()
                     finally:
                         if flow:
@@ -10165,11 +10371,14 @@ class Handler(BaseHTTPRequestHandler):
                     writer.check()
                     holder["web_sources"] = flow.sources
                     for frame in completed_web_call_frames(holder):
-                        writer.write(clean_responses_frame(frame))
+                        writer.write(Handler._response_frame(self, frame, model, account.uid, platform, realm))
                         writer.flush()
                     if holder.get("client_calls"):
+                        mixed_message = dict(holder["round_message"])
+                        mixed_message["content"] = (mixed_message.get("content") or "") + "\n\n" + flow.result_text()
+                        Handler._response_replay(self, flow, mixed_message, model, custom_names, request_meta, namespace_map)
                         for frame in mixed_web_result_frames(holder, flow):
-                            writer.write(clean_responses_frame(frame))
+                            writer.write(Handler._response_frame(self, frame, model, account.uid, platform, realm))
                             writer.flush()
                         break
                     round_started_at = time.time()
@@ -10185,7 +10394,7 @@ class Handler(BaseHTTPRequestHandler):
                                  account=account.uid, upstream=upstream, outcome="client_aborted", key=self._key_id(), effort=effort)
             except Exception as exc:
                 message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream stream aborted: %s" % exc
-                partial_usage = None if round_recorded else (holder.get("usage") or getattr(flow, "current_usage", None))
+                partial_usage = None if round_recorded else (holder.get("usage") or getattr(exc, "usage", None) or getattr(flow, "current_usage", None))
                 record_error(model, 502, message, account=account.uid, upstream=upstream, stream=True,
                              usage=partial_usage, fp=fp,
                              elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id())
@@ -10206,6 +10415,7 @@ class Handler(BaseHTTPRequestHandler):
                 upstream.close()
 
     def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, web_flow=None):
+        platform = getattr(upstream, "_upstream", "workbuddy")
         flow = web_flow or (wb_webflow.WebToolFlow(base_body) if web_tools_active(base_body) else None)
         holder = {"base_body": base_body, "realm": realm, "web_flow": flow}
         round_recorded = False
@@ -10218,12 +10428,12 @@ class Handler(BaseHTTPRequestHandler):
                 usage = chat_obj.get("usage")
                 if flow:
                     flow.usage = wb_webflow.add_usage(flow.usage, usage)
-                record_usage(model, usage, stream=False, elapsed_ms=int((time.time() - t_start) * 1000),
-                             **timing.fields(), fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
-                round_recorded = True
                 calls = internal_calls_from_chat(chat_obj, web_tools=flow is not None)
                 if not calls:
                     break
+                record_usage(model, usage, stream=False, elapsed_ms=int((time.time() - t_start) * 1000),
+                             **timing.fields(), fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
+                round_recorded = True
                 message = chat_obj["choices"][0]["message"]
                 holder["round_message"] = message
                 holder["preferred_uid"] = account.uid
@@ -10243,15 +10453,63 @@ class Handler(BaseHTTPRequestHandler):
                 chat_obj = dict(chat_obj, usage=flow.usage)
             result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
                                       sources=flow.sources if flow else None)
+            Handler._response_replay(self, flow, chat_obj["choices"][0]["message"], model, custom_names, request_meta, namespace_map)
+            result = Handler._finish_response(self, result, model, account.uid, platform, realm)
+            if not round_recorded:
+                record_usage(model, usage, stream=False, elapsed_ms=int((time.time() - t_start) * 1000),
+                             **timing.fields(), fp=fp, account=account.uid, upstream=upstream, key=self._key_id(), effort=effort)
+                round_recorded = True
             return self._json(200, result)
         except Exception as exc:
             message = str(exc) if isinstance(exc, wb_webflow.WebToolLimitError) else "upstream/web follow-up failed: %s" % exc
             record_error(model, 502, message, account=account.uid, upstream=upstream,
                          elapsed_ms=int((time.time() - t_start) * 1000), key=self._key_id(),
                          usage=None if round_recorded else (getattr(exc, "usage", None) or getattr(flow, "current_usage", None)))
-            return self._error(502, message)
+            return self._error(getattr(exc, "status", 502), str(exc) if isinstance(exc, wb_responses.ResponseError) else message)
         finally:
             upstream.close()
+
+    def _response_replay(self, flow, message, model, custom_names, request_meta, namespace_map):
+        """Save executed web calls/results as well as the final assistant turn."""
+        context = getattr(self, "_response_context", None)
+        if not context or not flow or not flow.rounds or not message:
+            return
+        tail = []
+        for item in flow.messages[len(flow.body.get("messages") or []):]:
+            item = copy.deepcopy(item)
+            if item.get("role") == "assistant":
+                item["tool_calls"] = [call for call in item.get("tool_calls") or []
+                    if wb_webtools.is_internal_tool((call.get("function") or {}).get("name"))]
+            tail.extend(wb_protocol_bridge.chat_to_responses({"messages": [item]})["input"])
+        final = copy.deepcopy(message)
+        final["tool_calls"] = [call for call in final.get("tool_calls") or []
+            if not wb_webtools.is_internal_tool((call.get("function") or {}).get("name"))]
+        tail.extend(chat_to_response({"choices": [{"message": final, "finish_reason": "stop"}]},
+            model, custom_names, request_meta, namespace_map).get("output") or [])
+        context["replay_tail"] = tail
+
+    def _finish_response(self, result, model, account, upstream, realm=""):
+        if RESPONSE_STORE and getattr(self, "_response_context", None):
+            return RESPONSE_STORE.finish(result, self._response_context, upstream, realm, model, account)
+        return result
+
+    def _response_frame(self, frame, model, account, upstream, realm=""):
+        if not getattr(self, "_response_context", None):
+            return clean_responses_frame(frame)
+        text = frame.decode("utf-8") if isinstance(frame, bytes) else frame
+        data = next((line[5:].strip() for line in text.splitlines() if line.startswith("data:")), "")
+        event = json.loads(data)
+        if isinstance(event.get("response"), dict):
+            response = event["response"]
+            if event.get("type") in ("response.completed", "response.incomplete"):
+                response = self._finish_response(response, model, account, upstream, realm)
+            else:
+                response.update(id=self._response_context["id"], model=model,
+                    store=self._response_context["store"], previous_response_id=self._response_context["previous"])
+            event["response"] = response
+        if "response_id" in event:
+            event["response_id"] = self._response_context["id"]
+        return ("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode()
 
     def _handle_messages_count_tokens(self, payload):
         """Best-effort Anthropic count_tokens endpoint.
@@ -10527,7 +10785,7 @@ class Handler(BaseHTTPRequestHandler):
                 wall = int((time.time() - t_start) * 1000)
                 record_error(model, 502, "messages stream aborted: %s" % exc,
                              elapsed_ms=wall, account=account.uid, upstream=upstream,
-                             usage=None if round_recorded else (holder.get("usage") or getattr(flow, "current_usage", None)), stream=True,
+                             usage=None if round_recorded else (holder.get("usage") or getattr(exc, "usage", None) or getattr(flow, "current_usage", None)), stream=True,
                              **timing.fields(), fp=fp, outcome="upstream_aborted",
                              key=self._key_id())
                 try:
@@ -10547,10 +10805,12 @@ class Handler(BaseHTTPRequestHandler):
     def _open_upstream_error(self, exc, model, t_start, key=None):
         """Record and answer an open_upstream failure with one status."""
         message = str(exc)
-        status = upstream_error_status(message)
+        status = getattr(exc, "status", upstream_error_status(message))
         record_error(model, status, message,
                      elapsed_ms=int((time.time() - t_start) * 1000),
                      account=getattr(exc, "account_uid", None), key=key)
+        if isinstance(exc, wb_responses.ResponseError):
+            return self._error(status, message, "invalid_request_error", exc.code)
         if status == 503:
             return self._error(503, message +
                                " - add or enable one at the dashboard (/)")
@@ -10589,6 +10849,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_panel(path)
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
+        if path.startswith("/platforms/"):
+            payload = self._payload_or_error(allow_list=(path == "/platforms/accounts/import"))
+            if payload is None:
+                return
+            return self._platform_management(path, payload=payload)
         is_messages_route = path in MESSAGES_ROUTES
         is_account_route = (
             path.startswith("/accounts/")
@@ -10654,6 +10919,35 @@ class Handler(BaseHTTPRequestHandler):
                         "responses" if path in ("/v1/responses", "/responses") else "chat")
             try:
                 wb_validation.validate_request(payload, protocol)
+                if payload.get("model"):
+                    _, _, canonical = wb_platforms.route(payload["model"], self.key_entry)
+                    payload["model"] = canonical
+                if protocol == "responses" and RESPONSE_STORE:
+                    payload, self._response_context = RESPONSE_STORE.prepare(payload, self._key_id(),
+                        wb_settings.key_upstreams(self.key_entry), MAX_PAYLOAD_BYTES)
+                    bound_realm = self._key_realm()
+                    if (self._response_context.get("realm") and bound_realm and
+                            self._response_context["realm"] != bound_realm):
+                        raise wb_responses.ResponseError("response not found", 404, "response_not_found")
+                wb_validation.validate_request(payload, protocol)
+                upstream, raw_model, public_model = wb_platforms.route(payload.get("model"), self.key_entry)
+                if upstream != "workbuddy":
+                    if not PLATFORMS:
+                        raise wb_platforms.PlatformError("platform manager is unavailable", 503)
+                    allowed_model = wb_settings.key_allows_model(self.key_entry, public_model)
+                    if len(wb_settings.key_upstreams(self.key_entry)) == 1:
+                        allowed_model = allowed_model or wb_settings.key_allows_model(self.key_entry, raw_model)
+                    if not allowed_model:
+                        raise wb_platforms.PlatformError("API Key does not allow this model", 403, "model_not_allowed")
+                    return wb_platform_api.handle(self, payload, protocol, upstream, raw_model, public_model)
+                if protocol == "responses":
+                    wb_protocol_bridge.validate_portable_responses(payload)
+            except (wb_responses.ResponseError, wb_platforms.PlatformError) as exc:
+                if exc.status == 429:
+                    return self._anthropic_rate_limited(exc) if is_messages_route else self._rate_limited(exc)
+                if is_messages_route:
+                    return self._anthropic_error(exc.status, str(exc))
+                return self._error(exc.status, str(exc), "server_error" if exc.status >= 500 else "invalid_request_error", exc.code)
             except wb_validation.RequestValidationError as exc:
                 if is_messages_route:
                     return self._anthropic_error(400, str(exc), "invalid_request_error")
@@ -10955,13 +11249,16 @@ def _probe_running_instance(args):
 
 def _bootstrap_runtime(args):
     global POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT
-    global API_KEY_FILE_SET, SCHEDULER
+    global API_KEY_FILE_SET, SCHEDULER, PLATFORMS, RESPONSE_STORE
     api_key_generated = False
     API_KEY = args.api_key
     SYSTEM_PROMPT = args.system_prompt
     if args.accounts_dir:
         ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
     database = wb_database.configure(ACCOUNTS_DIR, USAGE_DIR, log=log)
+    RESPONSE_STORE = wb_responses.ResponseStore(database, ACCOUNTS_DIR)
+    PLATFORMS = wb_platforms.Manager(ACCOUNTS_DIR, database)
+    PLATFORMS.start()
     history = list(database.usage_rows(limit=2000))
     for row in reversed(history):
         wb_fairness.observe(row)

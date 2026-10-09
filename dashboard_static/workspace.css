@@ -115,6 +115,7 @@ tbody tr:hover{background:var(--panel2)}
 .panel-login-card .login-heading{font-size:23px;letter-spacing:-.5px;font-weight:600;margin-bottom:6px}
 #panelPwdInput{margin-top:4px;min-height:40px}
 footer{font-size:11px;text-align:left;margin-top:28px;border-top:1px solid var(--line);padding-top:16px;color:var(--dim)}
+footer #logfile{overflow-wrap:anywhere;word-break:break-word}
 @media(min-width:1500px){main{padding:36px 44px 64px}header.workspace-header{padding-right:44px;padding-left:44px}}
 @media(max-width:1120px){:root{--sidebar-width:200px}header.workspace-header{padding:12px 24px}main{padding:25px 24px 48px}.meta{display:none}.page-hero{flex-direction:column;gap:14px}.page-actions{padding:0}td{padding:11px 10px}}
 @media(max-width:900px){

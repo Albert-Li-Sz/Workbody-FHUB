@@ -672,7 +672,7 @@ function renderKeyTable(data){
  * plus optional data-arg / data-uid / data-name payloads. */
 
 function updateWorkspace(tab){
-  const labels = {gateway:'总览',accounts:'账号池',tasks:'任务中心',analytics:'用量与成本',models:'模型库',logs:'请求与日志',settings:'设置'};
+  const labels = {gateway:'总览',accounts:'账号池',tasks:'任务中心',analytics:'用量与成本',models:'模型库',logs:'请求与日志',settings:'设置',platforms:'平台与会话'};
   const title = document.getElementById('workspaceCurrentPage');
   if(title) title.textContent = labels[tab] || labels.gateway;
   document.title = (labels[tab] || labels.gateway) + ' · Workbody-FHUB';
