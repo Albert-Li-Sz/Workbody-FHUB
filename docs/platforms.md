@@ -1,4 +1,4 @@
-# Cline、OpenCode Zen 与 Responses 会话（1.2.0）
+# Cline、OpenCode Zen 与 Responses 会话（1.2.1）
 
 ## 配置账号
 

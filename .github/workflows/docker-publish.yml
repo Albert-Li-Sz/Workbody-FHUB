@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Published release tag (e.g. v1.2.0)"
+        description: "Published release tag (e.g. v1.2.1)"
         required: true
         type: string
       reuse_images:

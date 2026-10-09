@@ -196,5 +196,21 @@ class PlatformsTests(unittest.TestCase):
         self.assertEqual(caught.exception.wait, 137)
         self.assertTrue(all(call.args[0]=='cline' for call in manager.open.call_args_list))
 
+    def test_reimport_preserves_omitted_account_settings(self):
+        account = self.cline[0]
+        account.document.update(priority=7, models=['allowed-*'], enabled=False,
+                                name='Keep name', refresh_token='keep-refresh', proxy_slot='saved-proxy')
+        token = account.document['access_token']
+        self.manager.import_accounts([{'upstream':'cline','access_token':token,'email':'updated-profile@example.invalid'}])
+        self.assertEqual(account.priority,7)
+        self.assertEqual(account.document['models'],['allowed-*'])
+        self.assertFalse(account.enabled)
+        self.assertEqual(account.document['name'],'Keep name')
+        self.assertEqual(account.document['proxy_slot'],'saved-proxy')
+        self.assertEqual(account.document['refresh_token'],'keep-refresh')
+        self.manager.import_accounts([{'upstream':'cline','access_token':token,'priority':20,'enabled':True}])
+        self.assertEqual(account.priority,20)
+        self.assertTrue(account.enabled)
+
 
 if __name__=='__main__':unittest.main()

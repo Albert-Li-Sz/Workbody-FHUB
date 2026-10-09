@@ -5422,8 +5422,8 @@ def _flatten_content(content):
         if not isinstance(piece, dict):
             continue
         ptype = piece.get("type") or ""
-        if ptype in ("input_text", "output_text", "text", "summary_text"):
-            t = piece.get("text") or ""
+        if ptype in ("input_text", "output_text", "text", "summary_text", "refusal"):
+            t = (piece.get("refusal") if ptype == "refusal" else piece.get("text")) or ""
             texts.append(t)
             parts.append({"type": "text", "text": t})
         elif ptype in ("input_image", "image_url", "image") or "image_url" in piece:

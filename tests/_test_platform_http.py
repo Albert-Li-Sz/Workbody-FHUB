@@ -191,6 +191,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotIn("account", raw.decode())
         self.assertEqual(self.request("/api/billing/usage?upstream=cline", key="synthetic-legacy")[0], 403)
 
+    def test_refusal_history_is_preserved_during_conversion(self):
+        body = {'model':self.models['chat'], 'input':[{'role':'assistant','content':[
+            {'type':'refusal','refusal':'cannot comply with that request'}]}, {'role':'user','content':'explain why'}]}
+        status, raw, _ = self.request('/v1/responses', body)
+        self.assertEqual(status,200,raw.decode())
+        self.assertIn('cannot comply with that request',json.dumps(self.upstream.calls[-1][1]))
+
     def test_interrupted_native_stream_counts_confirmed_usage_and_no_history(self):
         before = P.RESPONSE_STORE.snapshot()["count"]
         status, raw, _ = self.request("/v1/responses", self.body("responses", self.models["responses"], True, "abort_stream"))

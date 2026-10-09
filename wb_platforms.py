@@ -292,10 +292,10 @@ class Manager:
             document["access_token" if upstream == "cline" else "api_key"] = token
             if raw.get("user_id"):
                 document["user_id"] = str(raw["user_id"])
-            plan.append(document)
+            plan.append((document, set(raw)))
         saved = []
         with self.lock:
-            for document in plan:
+            for document, provided in plan:
                 uid = document["uid"]
                 existing = next((a for a in self.accounts.values() if document.get("user_id") and
                     a.upstream == document["upstream"] and a.document.get("user_id") == document["user_id"]), None)
@@ -303,13 +303,17 @@ class Manager:
                     uid = document["uid"] = existing.uid
                 account = self.accounts.get(uid)
                 if account:
+                    for field in ("priority", "models", "proxy_slot", "enabled", "name", "refresh_token"):
+                        aliases = {"refresh_token": ("refresh_token", "refreshToken")}.get(field, (field,))
+                        if not any(alias in provided for alias in aliases):
+                            document.pop(field, None)
                     account.document.update(document)
                 else:
                     account = Account(document, os.path.join(self.root, "account-" + uid + ".json"))
                     self.accounts[uid] = account
                 account.save()
                 saved.append(account.view())
-        for upstream in {doc["upstream"] for doc in plan}:
+        for upstream in {doc["upstream"] for doc, _ in plan}:
             self.refresh_async(upstream, force=True)
         return saved
 
@@ -860,7 +864,7 @@ class Manager:
                     result = _data(self.request_json("cline", "/auth/register", body={
                         "accessToken": tokens["access_token"], "refreshToken": tokens["refresh_token"]}))
                     info = result.get("userInfo") or {}
-                    imported = self.import_accounts(dict(result, upstream="cline", name=info.get("email"), user_id=info.get("clineUserId")))
+                    imported = self.import_accounts(dict(result, upstream="cline", email=info.get("email"), user_id=info.get("clineUserId")))
                     job.update(status="completed", account=imported[0]["uid"])
                     return
                 job["status"] = "expired"
