@@ -10,7 +10,7 @@
 Authorization: Bearer <WORKBODY_API_KEY>
 ```
 
-本文路径相对于服务根地址。WorkBuddy 通过 Chat Completions 转换；Cline 和 Zen 支持同协议原生转发与跨协议转换，详见[多平台接入](platforms.md)。兼容范围以本文为准；余额和用量接口始终要求有效、已启用的网关 Key，面板会话及关闭模型调用鉴权不能绕过这一要求。余额和用量返回使用 `Cache-Control: no-store`。
+本文路径相对于服务根地址。WorkBuddy 通过 Chat Completions 转换；Cline 和 Zen 支持同协议原生转发与跨协议转换；Command Code 的官方 CLI NDJSON 转成三种客户端协议，详见[多平台接入](platforms.md)。兼容范围以本文为准；余额和用量接口始终要求有效、已启用的网关 Key，面板会话及关闭模型调用鉴权不能绕过这一要求。余额和用量返回使用 `Cache-Control: no-store`。
 
 Key 的 `allowed_upstreams` 限定可用平台，旧 Key 默认只允许 WorkBuddy。WorkBuddy Key 固定绑定 `cn` 或 `intl` 时，查询只读取该渠道；未绑定时跟随当前默认出口。余额与客户端用量不接受 `X-Realm`、`realm` 或 `channel` 参数覆盖 Key 的渠道。
 
@@ -80,7 +80,7 @@ DSH 的辅助搜索入口独立配置，需将 `DEEPSEEK_SEARCH_BASE_URL` 或搜
 
 ## 余额来源与刷新
 
-WorkBuddy 余额入口汇总当前 Key 渠道内全部账号的剩余积分，包含停用账号。Cline 以积分汇总已配置的官方用户，Zen 以 USD 表示且未提供时保持未知。`upstream=workbuddy|cline|opencode_zen` 指定当前 Key 允许的平台；含 WorkBuddy 的 Key 默认查询 WorkBuddy，单个外部平台 Key 默认该平台，多个外部平台 Key 需指定。不同平台分别查询。币种名称及金额字段是响应协议标签，数值单位统一为积分，不做人民币、美元或 Token 的换算。
+WorkBuddy 余额入口汇总当前 Key 渠道内全部账号的剩余积分，包含停用账号。Cline 与 Command Code 各自以积分汇总已配置的官方用户，Zen 以 USD 表示且未提供时保持未知。`upstream=workbuddy|cline|opencode_zen|commandcode` 指定当前 Key 允许的平台；含 WorkBuddy 的 Key 默认查询 WorkBuddy，单个外部平台 Key 默认该平台，多个外部平台 Key 需指定。不同平台分别查询。币种名称及金额字段是响应协议标签，数值单位统一为积分，不做人民币、美元或 Token 的换算。
 
 | 参数 | 行为 |
 | --- | --- |
@@ -234,3 +234,25 @@ Messages 支持 Claude Code 在会话中插入的 `system`／`developer` 消息�
 ## Responses 持久化
 
 默认对已鉴权请求保存响应，支持 `previous_response_id` 续接、GET／DELETE 和并发分支。默认保留 7 天、1024 MiB 逻辑容量；`store:false` 不保存当前响应。指令不继承，完整历史按 Key 隔离；保存失败不会发出成功终止事件。详见[续接、分支与删除](platforms.md#responses-续接分支与删除)。
+
+
+## 新增账号来源的管理接口
+
+这些接口要求面板会话；原 WorkBuddy `/accounts/*`、导入导出及 OAuth 接口继续保持原行为。
+
+| 路径（根 `/accounts/upstreams`） | 方法 | 用途 |
+| --- | --- | --- |
+| 根路径、`/models`、`/usage?upstream=...` | GET | 来源账号、模型、用量 |
+| `/accounts/import` | POST | 外部来源 JSON、数组或导出文件的 accounts 数组 |
+| `/accounts/export?upstream=...&uid=...` | GET | 导出外部账号，可设置 includeSecrets=0 脱敏 |
+| `/accounts/update`、`/accounts/batch` | POST | 保存优先级、凭据、代理、启停或删除；批量启停／代理 |
+| `/accounts/cli-import` | POST | 明确导入服务器的 Command Code CLI 登录文件 |
+| `/accounts/org` | POST | 切换 OpenCode OAuth 组织；在途请求或绑定的 Responses 历史阻止切换 |
+| `/routing` | POST | mode=fair/roundrobin/manual，manual 时指定 uid |
+| `/cline-route` | POST | Cline 模型的渠道偏好、限定及排除 |
+| `/accounts/test` | POST | 真实短调用（消耗用量），成功后更新验证状态 |
+| `/refresh` | POST | 后台刷新指定来源 |
+| `/login/start`、`/login/cancel`、`/login/complete` | POST | Cline／OpenCode OAuth；complete 选择组织 |
+| `/login/poll?id=...` | GET | 只返回公开授权状态、跳转链接与设备码 |
+
+旧 `/platforms/*` 管理 API 保留兼容，独立页面已移除。Responses 设置在 GET/POST `/settings/responses`，整会话删除在 POST `/settings/responses/delete`。

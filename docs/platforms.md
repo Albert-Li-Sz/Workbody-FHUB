@@ -1,29 +1,47 @@
-# Cline、OpenCode Zen 与 Responses 会话（1.2.1）
+# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.1 基线后的开发分支）
 
 ## 配置账号
 
-在 **平台与会话** 添加账号。Cline 可选择设备登录，在官方页面授权后由面板轮询完成导入；也可导入 access token 与 refresh token。网关沿用官方 WorkOS 授权格式，刷新凭证走该账号绑定的代理。Zen 填写从官方控制台取得的 API Key。
+账号池默认保留 WorkBuddy 的原有国内／国际页：OAuth 弹窗与跳转链接、客户端扫描、导入导出、积分、代理、身份、任务和其他按钮继续使用原代码。账号页顶部新增 Cline、OpenCode、Command Code 来源按钮；独立的「平台与会话」导航和页面已移除，Responses 配置迁至 **设置 → Responses 会话**。
 
-账号支持名称、启用状态、非负整数优先级、代理槽及模型通配白名单。优先级默认 `100`，数字越小越早调用。编辑时凭据留空保留现有值。批量导入可上传 JSON 数组：
+### Cline
 
-```json
-[
-  {"upstream":"cline", "access_token":"<token>", "refresh_token":"<refresh>", "priority":100},
-  {"upstream":"opencode_zen", "api_key":"<key>", "priority":100, "models":["*"]}
-]
-```
+选择 **账号池 → Cline → 添加账号 (OAuth)**，弹出与 WorkBuddy 相同样式的三步登录窗口。点击其中完整的 HTTPS 授权链接，在官方页面登录并输入设备码（页面未自动带入时）；面板自动轮询、保存账号与刷新凭据。关闭或重新生成链接会取消旧请求，迟到的响应不能导入账号。
 
-凭据保存在私有 `accounts/upstreams` 和 SQLite 文档中，面板返回账号状态和脱敏元数据。模型目录、余额与 Cline 已付积分定期后台刷新；手动「刷新」可立即触发。目录失败时保留缓存并显示错误，不把目录同步视为真实调用成功。
+也可导入原始 Cline API Key，或带 refresh token 的 OAuth 凭据。API Key 使用普通 Bearer，OAuth 使用 WorkOS 前缀。账号可以限制为全部可用模型、仅 ClinePass 订阅或仅积分模型。模型目录的「配置渠道」同时适配 direct 和 planner，支持自动选择、限定渠道、偏好顺序、排除与排序；实际使用的渠道单独记录。
+
+### OpenCode
+
+选择 **账号池 → OpenCode → 添加账号 (OAuth)**，通过官方 console 设备授权登录。有多个组织时需在弹窗明确选择；使用该组织下发的 provider 配置、模型 ID、协议和网关凭据，console OAuth token 不会被拿去充当旧 Zen API Key。没有可用组织网关时显示待配置状态，刷新组织配置后才能调用。有在途请求或绑定的 Responses 历史时，组织切换会被拒绝，其他组织可以另加账号。
+
+「导入账号凭据」还支持官方 Zen API Key，以及明确选择的 **公开免费模型（客户端模式）**。三种模式都使用参考客户端的 User-Agent、`x-opencode-client`、会话／请求／项目标识：会话稳定、请求唯一、账号与网关 Key 隔离。所选账号的 Authorization 保留；公开模式仅使用上游明确标为免费的模型。TLS 验证和绑定代理保持正常，不导入参考仓库中的随机代理、IP 扫描或关闭证书校验。
+
+参考的 opencode2api-free 自身没有 OAuth；设备 OAuth 实现依据官方 OpenCode 客户端。上游地区、套餐或公开模型权限错误保留原状态。
+
+### Command Code
+
+先使用官方 CLI 登录，再把 `~/.commandcode/auth.json` 上传到 **账号池 → Command Code → 导入账号文件**；文件的 `apiKey` 为 `user_*` 凭据，账号名称和用户 ID 一同导入。也可手填，或明确点击「导入服务器 CLI 登录」读取运行 FHUB 的服务器上的该文件（不会读取远端浏览器所在机器）。
+
+请求转换成官方 CLI 的 `/alpha/generate` envelope，NDJSON 增量转换成 Chat、Messages、Responses／SSE。保留完整历史、系统指令、图片、推理和工具调用；只有正式 finish 事件才作为完成，断流保留确认的部分用量。默认不注入额外 CLI 提示词。
+
+显示官方余额、套餐和 5 小时／每周窗口。`used/cap` 是请求条数，不是 Token。402 积分耗尽后不再分配付费请求，确认余额恢复才解锁；429 使用上游重置时间冷却全账号。账号切换始终在 Command Code 内进行。
+
+### 通用操作
+
+各来源均支持启停、删除、导入导出、持久化名称／优先级／代理／模型白名单、调用测试、目录和用量。凭据编辑留空保留旧值。可选择自动均衡、轮询或指定优先账号；指定账号不可用时在同来源内切换，恢复后重新优先使用。
+
+凭据保存在私有 `accounts/upstreams` 和 SQLite 文档中。普通面板只返回脱敏元数据，显式导出账号才包含凭据。手动刷新后台执行，失败保留缓存；目录同步不等于调用成功。
 
 ## 网关 Key 与模型 ID
 
-在 **设置 → API Key** 勾选 `allowed_upstreams`。合法值为 `workbuddy`、`cline`、`opencode_zen`。旧 Key 缺少字段时默认仅允许 WorkBuddy；旧页面保存也保留已设置的平台权限。WorkBuddy 的 `realm=cn|intl` 独立于平台权限。
+在 **设置 → API Key** 勾选 `allowed_upstreams`。合法值为 `workbuddy`、`cline`、`opencode_zen`、`commandcode`。旧 Key 缺少字段时默认仅允许 WorkBuddy；旧页面保存也保留已设置的平台权限。WorkBuddy 的 `realm=cn|intl` 独立于平台权限。
 
 | Key 范围 | 模型 ID |
 | --- | --- |
 | WorkBuddy | 原来的模型 ID |
 | Cline | `cline/<原始ID>`；仅允许 Cline 的 Key 也接受原始 ID |
 | Zen | `opencode/<原始ID>`；仅允许 Zen 的 Key 也接受原始 ID |
+| Command Code | `commandcode/<原始ID>`；仅允许 Command Code 的 Key 也接受原始 ID |
 | 多个外部平台 | 使用平台前缀，避免同名歧义 |
 
 ```bash
@@ -51,7 +69,7 @@ Zen 目录取自官方 `/zen/v1/models`。协议优先读取上游元数据，�
 
 ## 调度与实际消费
 
-同平台、同优先级的免费账号比较当天免费 Token 加在途预估；付费账号比较当天实际积分／USD 加在途预估。预估只用于选择，实际用量入库后移除预估。免费会话默认 262144 Token 换号窗口，减少小幅增长引起的频繁切换。已确认的取消／失败用量也计入；未知消费保持未知。
+同平台、同优先级的免费账号比较当天免费 Token 加在途预估；付费账号比较当天实际积分／USD 加在途预估。预估只用于选择，实际用量入库后移除预估。自动模式默认使用 262144 Token 换号窗口，付费窗口按已确认消费折算，减少小幅增长引起的频繁切换。已确认的取消／失败用量也计入；未知消费保持未知。
 
 Cline 同步官方当天积分明细，并按 generation ID 与本机请求去重；订阅模型的零积分调用仍归入订阅／付费路径。Zen 官方未提供的消费或余额不推算为实际账单。连接按账号及代理身份隔离，代理不可用会报错。
 
@@ -69,6 +87,7 @@ curl 'https://<公网IP>/api/billing/usage?upstream=opencode_zen' \
 | WorkBuddy | 积分 | Key 绑定的国内／国际渠道，包含停用账号 |
 | Cline | 积分 | 本机配置账号，按官方用户 ID 去重，包含停用账号 |
 | OpenCode Zen | USD | 无公开余额接口时返回未知／不完整，不伪造余额 |
+| Command Code | 积分 | 官方 credits 的月度、购买、免费余额；未知字段不填零 |
 
 多平台通过 `upstream` 分别查询，不能把积分和 USD 相加。含 WorkBuddy 的 Key 未指定平台时默认查询 WorkBuddy；只允许一个外部平台时默认该平台；允许多个外部平台时必须指定。`provider=deepseek|kimi|…` 仅控制兼容响应格式。Token 查询只统计当前网关 Key 发起的请求；平台每日调度统计可包含 Cline 同步到的其他实际积分消费。
 
@@ -101,3 +120,15 @@ curl 'https://<公网IP>/api/billing/usage?upstream=opencode_zen' \
 实现独立编写，参考 [Cline-proxy](https://github.com/YuJunZhiXue/Cline-proxy/tree/b07b46ef2da3b2126514270b7b88675398e7e810) 的功能范围，并核对 [Cline 官方源码](https://github.com/cline/cline/tree/fa840c741c3fc2eb49e7e0a4484895a99dae5cc5)、[Zen 官方文档](https://opencode.ai/docs/zen/) 和 [OpenRouter 模型目录文档](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties)。
 
 自动回归使用本地模拟上游，覆盖三种原生协议 × 三种客户端协议 × 流式／非流式、工具续接、部分消费、权限、分支、容量和 schema 2→3 原子迁移。真实上游验证需要配置合法凭据；面板仅在生成成功后标记「真实调用已验证」，该标记对应该账号曾完成调用，不代表目录中全部模型都已验证。
+
+真实设备授权入口检查已返回成功：Cline 返回 `authkit.cline.bot` 跳转链接，OpenCode 返回 `opencode.ai` 跳转链接。检查作业在未登录账号时取消；这证明入口与链接可用，完整授权后的实际生成仍待配置真实账号。
+
+
+参考固定版本：
+
+- [ClinePass switcher 02538a3](https://github.com/munmunjaklin458-afk/cline-pass-switcher/tree/02538a3137a08948a94f26f17dd4aeff8c029ed1)：账号切换与 direct/planner 渠道策略。
+- [OpenCode 客户端代理 656b088](https://github.com/spfnas/opencode2api-free/tree/656b088a042f01d07b47aa5edbead3460376e198)：客户端请求头与稳定会话标识。
+- [OpenCode 官方客户端 3884062](https://github.com/anomalyco/opencode/blob/388406238bd5ca15564a762840a2362c3a45bd9c/packages/opencode/src/account/account.ts)：设备 OAuth、刷新与组织配置。
+- [CommandCodeGo-manager 856430b](https://github.com/learningdog1/CommandCodeGo-manager/tree/856430ba9e10f78c15c80d7f4d1370864b80cd57)：CLI 凭据导入、额度与切换；wire 格式另核对官方 `command-code@1.79.2`。
+
+新增内容尚未包含在已发布的 1.2.1 镜像中。测试分为本地协议回归、浏览器界面检查和真实上游：前两类使用独立模拟数据，真实账号授权／生成需要合法凭据，不能用模拟通过代替真实联调。

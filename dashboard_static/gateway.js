@@ -231,7 +231,7 @@ function generatePageList(current, total){
 
 // Tab ids in nav order. One list so the restore path and the nav cannot
 // drift apart.
-const MAIN_TABS = ['gateway', 'accounts', 'tasks', 'analytics', 'models', 'logs', 'settings', 'platforms'];
+const MAIN_TABS = ['gateway', 'accounts', 'tasks', 'analytics', 'models', 'logs', 'settings'];
 const MAIN_TAB_STORE = 'wb-proxy-main-tab';
 let currentMainTab = 'gateway';
 let analyticsRange = 'today';
@@ -391,7 +391,8 @@ async function flushPanelRefresh(){
     if(currentMainTab === 'analytics') jobs.push(loadAnalytics(), loadAnalyticsMatrix());
     if(currentMainTab === 'logs') jobs.push(loadRequestArchive());
   }
-  if(currentMainTab === 'platforms' && ['platforms','accounts','models','usage'].some(topic => topics.has(topic))) jobs.push(loadPlatforms());
+  if(currentMainTab === 'accounts' && ['platforms','accounts','models','usage'].some(topic => topics.has(topic))) jobs.push(loadSourceAccounts());
+  if(currentMainTab === 'settings' && topics.has('settings')) jobs.push(loadResponseStorage());
   if(topics.has('accounts') && ['gateway','accounts','tasks'].includes(currentMainTab)) jobs.push(loadAccounts());
   if(topics.has('tasks') && currentMainTab === 'tasks') jobs.push(loadGrowthTasks());
   if(topics.has('scheduler') && ['gateway','tasks'].includes(currentMainTab)) jobs.push(loadSchedulerStatus());

@@ -684,7 +684,7 @@ function renderKeyRows(){
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
         +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">模型限制 <span style="color:var(--dim-light)">(选填，留空 = 不限制)</span></div>'
-        +     '<div style="margin-bottom:8px">允许平台：' + [['workbuddy','WorkBuddy'],['cline','Cline'],['opencode_zen','OpenCode Zen']].map(([name,label]) => '<label style="margin-right:12px"><input type="checkbox" id="editKeyUpstream_' + i + '_' + name + '"' + ((row.allowed_upstreams || ['workbuddy']).includes(name) ? ' checked' : '') + '> ' + label + '</label>').join('') + '</div>'
+        +     '<div style="margin-bottom:8px">允许平台：' + [['workbuddy','WorkBuddy'],['cline','Cline'],['opencode_zen','OpenCode Zen'],['commandcode','Command Code']].map(([name,label]) => '<label style="margin-right:12px"><input type="checkbox" id="editKeyUpstream_' + i + '_' + name + '"' + ((row.allowed_upstreams || ['workbuddy']).includes(name) ? ' checked' : '') + '> ' + label + '</label>').join('') + '</div>'
           +     '<input type="text" id="editKeyModels_' + i + '" value="' + esc(modelPatternsText(row.models)) + '" placeholder="如 deepseek* 或 gpt-6-astra；多个用逗号分隔，支持 * 通配" '
         +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
         +   '</div>'
@@ -730,7 +730,7 @@ function renderKeyRows(){
       +       '<span style="font-size:15px;font-weight:700;color:var(--fg)">' + esc(row.name || '未命名') + '</span>'
       +       statusBadge
       +       realmBadge
-      +       '<span class="badge s">' + esc((row.allowed_upstreams || ['workbuddy']).map(name => ({workbuddy:'WorkBuddy',cline:'Cline',opencode_zen:'Zen'}[name] || name)).join(' · ')) + '</span>'
+      +       '<span class="badge s">' + esc((row.allowed_upstreams || ['workbuddy']).map(name => ({workbuddy:'WorkBuddy',cline:'Cline',opencode_zen:'Zen',commandcode:'Command Code'}[name] || name)).join(' · ')) + '</span>'
       +       modelBadge
       +     '</div>'
       +     '<div style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
@@ -791,7 +791,7 @@ async function saveSingleKey(index, btn){
 
   row.name = name || '未命名';
   row.realm = realm;
-  const upstreamInputs = ['workbuddy','cline','opencode_zen'].map(name => [name, document.getElementById('editKeyUpstream_' + index + '_' + name)]);
+  const upstreamInputs = ['workbuddy','cline','opencode_zen','commandcode'].map(name => [name, document.getElementById('editKeyUpstream_' + index + '_' + name)]);
   if(upstreamInputs.some(([name,el]) => el)){
     const allowed = upstreamInputs.filter(([name,el]) => el && el.checked).map(([name]) => name);
     if(!allowed.length){ toast('请选择至少一个平台', 'warn'); return; }

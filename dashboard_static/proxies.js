@@ -300,6 +300,7 @@ async function autoAssignSlots(){
 }
 
 function switchMainTab(tab){
+  if(tab === 'platforms') tab = 'accounts';
   currentMainTab = tab;
   updateWorkspace(tab);
   closeSidebar();
@@ -316,8 +317,7 @@ function switchMainTab(tab){
     ['analytics', 'btnNavAnalytics', 'pageAnalytics'],
     ['models', 'btnNavModels', 'pageModels'],
     ['logs', 'btnNavLogs', 'pageLogs'],
-    ['settings', 'btnNavSettings', 'pageSettings'],
-    ['platforms', 'btnNavPlatforms', 'pagePlatforms']
+    ['settings', 'btnNavSettings', 'pageSettings']
   ];
   tabs.forEach(([name, btnId, pageId]) => {
     const btn = document.getElementById(btnId);
@@ -328,12 +328,11 @@ function switchMainTab(tab){
     if(on) btn.setAttribute('aria-current', 'page'); else btn.removeAttribute('aria-current');
     page.classList.toggle('active', on);
   });
-  if(tab === 'platforms') loadPlatforms();
-  if(tab === 'accounts'){ loadAccounts(); loadProxySlots(); }
+  if(tab === 'accounts'){ loadAccounts(); loadProxySlots(); loadSourceAccounts(); }
   if(tab === 'tasks'){ loadGrowthTasks(); loadSchedulerStatus(); }
   if(tab === 'models'){ loadModels(); }
   if(tab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
-  if(tab === 'settings'){ loadSettings(); loadProxySlots(); }
+  if(tab === 'settings'){ loadSettings(); loadProxySlots(); loadResponseStorage(); }
   if(tab === 'logs'){
     startLogPolling();
     fetchNewLogs(true);

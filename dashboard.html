@@ -23,7 +23,6 @@
       <button class="main-nav-btn" id="btnNavModels" data-action="switchMainTab" data-on="click" data-arg="models" title="模型与档位"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><span>模型库</span></button>
       <button class="main-nav-btn" id="btnNavLogs" data-action="switchMainTab" data-on="click" data-arg="logs" title="运行日志"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg><span>请求与日志</span></button>
       <button class="main-nav-btn" id="btnNavSettings" data-action="switchMainTab" data-on="click" data-arg="settings" title="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>设置</span></button>
-      <button class="main-nav-btn" id="btnNavPlatforms" data-action="switchMainTab" data-on="click" data-arg="platforms" title="Cline 与 OpenCode Zen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><path d="M10 6h8v8M6 10v8h8"/></svg><span>平台与会话</span></button>
     </nav>
  <div class="workspace-sidebar-footer">
   <div class="sidebar-status"><span class="dot" id="statusDot"></span>网关服务</div>
@@ -219,19 +218,6 @@
     </div>
   </section>
   </div><!-- /pageGateway -->
-  <div id="pagePlatforms" class="main-page">
-    <div class="page-hero"><div><div class="eyebrow">多平台接入</div><h2>Cline · OpenCode Zen</h2><p>独立平台路由、账号优先级与用量统计。模型和 API Key 权限共同控制可调用范围。</p></div><div class="page-actions"><button class="sec" data-action="loadPlatforms" data-on="click">刷新视图</button><button class="sec" data-action="switchMainTab" data-on="click" data-arg="settings">配置 API Key 平台权限</button></div></div>
-    <section><div id="platformStatus" class="infrastructure-grid"></div></section>
-    <section><h2 id="platformFormTitle">添加账号</h2><div class="toolbar"><label>平台 <select id="platformKind"><option value="cline">Cline</option><option value="opencode_zen">OpenCode Zen</option></select></label><label>名称 <input id="platformName" placeholder="账号备注"></label><label>优先级 <input id="platformPriority" type="number" min="0" value="100" style="width:90px"></label><label>代理出口 <select id="platformProxySlot"><option value="">直接连接</option></select></label></div>
-    <div class="toolbar"><label>Access Token / API Key <input id="platformToken" type="password" autocomplete="off" placeholder="凭据仅保存到本机私有目录"></label><label>Cline Refresh Token（选填） <input id="platformRefreshToken" type="password" autocomplete="off"></label></div><label>账号允许模型（选填，逗号分隔，可使用 *） <input id="platformAllowModels" placeholder="留空按账号实际权益开放"></label>
-    <div class="toolbar"><button data-action="importPlatformAccount" data-on="click">保存账号</button><button class="sec" data-action="resetPlatformForm" data-on="click">清空 / 添加新账号</button><button class="sec" data-action="startClineLogin" data-on="click">Cline 设备授权登录</button><label class="sec">批量导入 JSON <input type="file" accept="application/json,.json" data-action="importPlatformFile" data-on="change"></label></div><div id="platformLogin" class="hint"></div>
-    <p class="hint">Zen 使用官方 API Key。上游限制外部调用的模型会返回权限错误。公开兼容模式需通过 JSON 显式导入并启用，默认关闭。</p></section>
-    <section><div class="toolbar"><h2>平台账号</h2><select id="platformFilter" aria-label="平台筛选" data-action="loadPlatforms" data-on="change"><option value="">全部平台</option><option value="cline">Cline</option><option value="opencode_zen">OpenCode Zen</option></select><button class="sec" data-action="refreshPlatform" data-on="click" data-arg="cline">同步 Cline</button><button class="sec" data-action="refreshPlatform" data-on="click" data-arg="opencode_zen">同步 Zen</button></div><div id="platformAccounts" class="table-wrap"></div></section>
-    <section><div class="toolbar"><h2>模型目录</h2><input id="platformModelFilter" aria-label="搜索平台模型" placeholder="搜索模型 ID 或名称" data-action="filterPlatformModels" data-on="input"></div><p class="hint">目录包含免费、付费和订阅模型，实际调用由上游账号权益决定。</p><div id="platformModels" class="table-wrap"></div><div class="toolbar"><button class="sec mini" data-action="changePlatformModelsPage" data-on="click" data-arg="-1">上一页</button><span id="platformModelsPager"></span><button class="sec mini" data-action="changePlatformModelsPage" data-on="click" data-arg="1">下一页</button></div></section>
-    <section><h2>今日用量</h2><div id="platformUsage" class="table-wrap"></div></section>
-    <section><h2>最近请求</h2><div id="platformRecent" class="table-wrap"></div></section>
-    <section><h2>Responses 会话</h2><p id="responseStorageSummary"></p><div class="toolbar"><label><input id="responseStorage_enabled" type="checkbox"> 保存会话</label><label>保留天数 <input id="responseStorage_retention_days" type="number" min="1" max="365" style="width:90px"></label><label>容量 MiB <input id="responseStorage_max_mb" type="number" min="1" style="width:110px"></label><button data-action="saveResponseStorage" data-on="click">保存</button></div><p class="hint">默认保存 7 天，按 API Key 隔离。客户端 store=false 禁止保存当前响应。删除单条响应保留其后续分支；整会话删除覆盖所有分支。</p><div id="responseConversations"></div></section>
-  </div>
   <div id="pageAccounts" class="main-page">
     <div class="page-hero">
       <div>
@@ -244,6 +230,13 @@
         <button class="sec" data-action="switchMainTab" data-on="click" data-arg="settings">代理出口设置</button>
       </div>
     </div>
+  <div class="toolbar account-source-nav" role="group" aria-label="账号来源">
+    <button class="range-btn active" id="sourceTabWorkbuddy" aria-pressed="true" data-action="switchAccountSource" data-on="click" data-arg="workbuddy">WorkBuddy</button>
+    <button class="range-btn" id="sourceTabCline" aria-pressed="false" data-action="switchAccountSource" data-on="click" data-arg="cline">Cline</button>
+    <button class="range-btn" id="sourceTabOpencode" aria-pressed="false" data-action="switchAccountSource" data-on="click" data-arg="opencode_zen">OpenCode</button>
+    <button class="range-btn" id="sourceTabCommandcode" aria-pressed="false" data-action="switchAccountSource" data-on="click" data-arg="commandcode">Command Code</button>
+  </div>
+  <div id="workbuddyAccountsPanel">
   <section>
     <div class="toolbar" style="justify-content:space-between">
       <h2 style="margin:0">WorkBuddy 账号<em id="acctCount"></em></h2>
@@ -276,6 +269,34 @@
   </div>
     <div id="accounts"></div>
   </section>
+
+  </div><!-- /workbuddyAccountsPanel -->
+  <div id="sourceAccountsPanel" class="source-panel" hidden>
+    <section>
+      <div class="toolbar" style="justify-content:space-between"><h2 id="sourceAccountsTitle">Cline 账号</h2><span id="sourceAccountSummary" class="hint"></span></div>
+      <div class="toolbar">
+        <button id="sourceLoginButton" data-action="openSourceOAuth" data-on="click">+ 添加账号 (OAuth)</button>
+        <button class="sec" data-action="openSourceEditor" data-on="click">导入账号凭据</button>
+        <button class="sec" data-action="openSourceFile" data-on="click">导入账号文件</button>
+        <button class="sec" data-action="exportSourceAccounts" data-on="click">导出账号</button>
+        <button class="sec" data-action="refreshAccountSource" data-on="click">刷新凭证、余额与模型</button>
+        <button class="sec" data-action="batchSourceAccounts" data-on="click" data-arg="1">启用此来源全部账号</button>
+        <button class="sec" data-action="batchSourceAccounts" data-on="click" data-arg="0">停用此来源全部账号</button>
+        <button class="sec" id="sourceCliImport" data-action="importCommandCli" data-on="click" hidden>导入服务器 CLI 登录</button>
+      </div>
+      <input id="sourceImportFile" type="file" accept="application/json,.json" data-action="importSourceFile" data-on="change" hidden>
+      <p class="section-note" id="sourceAccountHint"></p>
+      <div class="toolbar source-routing"><label>账号调度 <select id="sourceRoutingMode" data-action="sourceRoutingModeChanged" data-on="change"><option value="fair">自动均衡（保留会话）</option><option value="roundrobin">按账号轮询</option><option value="manual">指定优先账号</option></select></label><label id="sourcePreferredLabel" hidden>优先账号 <select id="sourcePreferredAccount" data-action="sourceRoutingModeChanged" data-on="change"></select></label><button class="sec" data-action="saveSourceRouting" data-on="click">保存调度方式</button><span class="hint">限流、失效或额度耗尽时在同一来源内切换，恢复后可继续使用优先账号。</span></div>
+      <div id="sourceAccountsTable"></div>
+    </section>
+    <section>
+      <div class="toolbar"><h2>模型目录</h2><input id="sourceModelSearch" aria-label="搜索此来源模型" placeholder="搜索模型 ID 或名称" data-action="filterSourceModels" data-on="input"></div>
+      <p class="hint" id="sourceCatalogStatus"></p><div id="sourceModels" class="table-wrap"></div>
+      <div class="toolbar"><button class="sec mini" data-action="pageSourceModels" data-on="click" data-arg="-1">上一页</button><span id="sourceModelsPager" class="hint"></span><button class="sec mini" data-action="pageSourceModels" data-on="click" data-arg="1">下一页</button></div>
+    </section>
+    <section><h2>今日用量</h2><div id="sourceUsage" class="table-wrap"></div></section>
+    <section><h2>最近请求</h2><div id="sourceRecent" class="table-wrap"></div></section>
+  </div><!-- /sourceAccountsPanel -->
 
   </div>
 
@@ -594,6 +615,7 @@
       <a href="#settings-slots">代理槽</a>
       <a href="#settings-quota">额度治理</a>
       <a href="#settings-pricing">计价</a>
+      <a href="#settings-responses">Responses 会话</a>
       <a href="#settings-infrastructure">存储与连接</a>
       <a href="#settings-behavior">行为与工具</a>
       <a href="#settings-advanced">进阶</a>
@@ -711,6 +733,7 @@
       </section>
 
 
+    <section id="settings-responses"><h2>Responses 会话</h2><p id="responseStorageSummary"></p><div class="toolbar"><label><input id="responseStorage_enabled" type="checkbox"> 保存会话</label><label>保留天数 <input id="responseStorage_retention_days" type="number" min="1" max="365" style="width:90px"></label><label>容量 MiB <input id="responseStorage_max_mb" type="number" min="1" style="width:110px"></label><button data-action="saveResponseStorage" data-on="click">保存</button></div><p class="hint">默认保存 7 天，按 API Key 隔离。客户端 store=false 禁止保存当前响应。删除单条响应保留其后续分支；整会话删除覆盖所有分支。</p><div id="responseConversations"></div></section>
       <section id="settings-infrastructure">
         <h2>存储与连接</h2>
         <div class="infrastructure-grid" id="infrastructureStats"><div class="empty">读取运行状态…</div></div>
@@ -961,6 +984,54 @@
       <button  data-action="restartLogin" data-on="click">重新生成链接</button>
     </div>
   </div>
+</div>
+
+
+<div class="modal-mask source-modal" id="sourceOAuthModal">
+ <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sourceOAuthTitle">
+  <div class="modal-hd"><h2 id="sourceOAuthTitle">添加账号 (OAuth 授权)</h2><button class="modal-x" data-action="closeSourceOAuth" data-on="click" aria-label="关闭">×</button></div>
+  <div class="modal-bd">
+   <div class="step active" id="sourceStep1"><div class="n">1</div><div class="t" id="sourceStep1Text">正在申请授权登录链接…</div></div>
+   <div class="step" id="sourceStep2"><div class="n">2</div><div class="t">在浏览器里打开下方链接并完成登录授权</div></div>
+   <div id="sourceLoginLinkBox"></div>
+   <div class="step" id="sourceStep3"><div class="n">3</div><div class="t">等待授权完成（自动检测）</div></div>
+   <div id="sourceOrgChoice" hidden><label>选择组织 <select id="sourceLoginOrg"></select></label><button data-action="completeSourceOAuth" data-on="click">确认组织并加入账号池</button></div>
+   <p class="hint" id="sourceLoginStatus" role="status"></p>
+  </div>
+  <div class="modal-ft"><button class="sec" data-action="closeSourceOAuth" data-on="click">关闭</button><button data-action="restartSourceOAuth" data-on="click">重新生成链接</button></div>
+ </div>
+</div>
+<div class="modal-mask source-modal" id="sourceEditorModal">
+ <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sourceEditorTitle">
+  <div class="modal-hd"><h2 id="sourceEditorTitle">导入账号凭据</h2><button class="modal-x" data-action="closeSourceEditor" data-on="click" aria-label="关闭">×</button></div>
+  <div class="modal-bd source-form">
+   <label>账号备注 <input id="sourceName" autocomplete="off" placeholder="可选"></label>
+   <label>调度优先级 <input id="sourcePriority" type="number" min="0" max="2147483647" value="100"></label>
+   <label>代理出口 <select id="sourceProxy"></select></label>
+   <label id="sourceAuthLabel">凭据类型 <select id="sourceAuth" data-action="sourceAuthChanged" data-on="change"></select></label>
+   <label class="source-wide" id="sourceTokenLabel">Access Token / API Key <input id="sourceToken" type="password" autocomplete="new-password" placeholder="仅保存到私有账号目录"></label>
+   <label class="source-wide" id="sourceRefreshLabel">Refresh Token（选填） <input id="sourceRefresh" type="password" autocomplete="new-password"></label>
+   <label id="sourceScopeLabel">Cline 调用范围 <select id="sourceScope"><option value="all">账号全部可用模型</option><option value="subscription">仅 ClinePass 订阅</option><option value="credits">仅积分模型</option></select></label>
+   <label id="sourceOrgLabel" hidden>OpenCode 组织 <select id="sourceAccountOrg"></select></label>
+   <label class="source-wide">允许模型（选填，可使用 *） <textarea id="sourceModelsAllow" rows="2" placeholder="留空按账号实际权益开放；多个模型用逗号或换行分隔"></textarea></label>
+   <p class="hint source-wide" id="sourceEditorHint"></p><p class="hint source-wide" id="sourceEditorStatus" role="status"></p>
+  </div>
+  <div class="modal-ft"><button class="sec" data-action="closeSourceEditor" data-on="click">取消</button><button data-action="saveSourceAccount" data-on="click">保存账号</button></div>
+ </div>
+</div>
+<div class="modal-mask source-modal" id="sourceTestModal">
+ <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sourceTestTitle">
+  <div class="modal-hd"><h2 id="sourceTestTitle">测试账号调用</h2><button class="modal-x" data-action="closeSourceTest" data-on="click" aria-label="关闭">×</button></div>
+  <div class="modal-bd source-form"><label class="source-wide">模型 <select id="sourceTestModel"></select></label><p class="hint source-wide">会真实调用一次短回复，并计入用量；可能消耗订阅额度或积分。</p><p id="sourceTestStatus" class="hint source-wide" role="status"></p></div>
+  <div class="modal-ft"><button class="sec" data-action="closeSourceTest" data-on="click">关闭</button><button data-action="runSourceTest" data-on="click">开始测试</button></div>
+ </div>
+</div>
+<div class="modal-mask source-modal" id="sourceRouteModal">
+ <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sourceRouteTitle">
+  <div class="modal-hd"><h2 id="sourceRouteTitle">Cline 上游渠道</h2><button class="modal-x" data-action="closeSourceRoute" data-on="click" aria-label="关闭">×</button></div>
+  <div class="modal-bd source-form"><label>渠道选择 <select id="sourceRouteMode"><option value="auto">上游自动选择</option><option value="preferred">按偏好依次尝试</option><option value="strict">只使用指定渠道</option></select></label><label>排序方式 <select id="sourceRouteSort"><option value="">上游默认</option><option value="cost">价格</option><option value="throughput">吞吐</option><option value="latency">延迟</option></select></label><label class="source-wide">允许／偏好渠道（逗号分隔） <input id="sourceRouteProviders" placeholder="使用上游渠道标识"></label><label class="source-wide">排除渠道（逗号分隔） <input id="sourceRouteIgnore"></label><label class="source-wide">已知完整渠道清单（排除 planner 渠道时使用） <input id="sourceRouteKnown"></label><p class="hint source-wide">同时适配直连与 planner 调度。实际使用的渠道显示在账号状态和请求记录中。</p><p class="hint source-wide" id="sourceRouteStatus" role="status"></p></div>
+  <div class="modal-ft"><button class="sec" data-action="closeSourceRoute" data-on="click">取消</button><button data-action="saveSourceRoute" data-on="click">保存渠道设置</button></div>
+ </div>
 </div>
 
 <div class="modal-mask" id="desktopScanModal">

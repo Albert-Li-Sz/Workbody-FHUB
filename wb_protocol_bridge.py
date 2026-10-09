@@ -55,7 +55,7 @@ def usage(value, protocol, upstream):
                    prompt_tokens_details={"cached_tokens": cached})
         if protocol == "responses":
             out["completion_tokens_details"] = copy.deepcopy(value.get("output_tokens_details") or {})
-    credit = value.get("creditsUsed", value.get("credits_used")) if upstream == "cline" else value.get("costUsd", value.get("cost_usd", value.get("cost")))
+    credit = value.get("creditsUsed", value.get("credits_used", value.get("credit"))) if upstream in ("cline", "commandcode") else value.get("costUsd", value.get("cost_usd", value.get("cost")))
     if type(credit) in (int, float):
         out["credit"] = credit
     return out
@@ -246,6 +246,8 @@ def chat_lines(response, native, upstream):
                 elif not isinstance(data, dict) or data.get("error") or event == "error" or data.get("type") == "error":
                     raise PlatformError("upstream generation failed", 502, "upstream_stream_error")
                 else:
+                    if hasattr(response, "observe"):
+                        response.observe(data)
                     if data.get("id"):
                         response.generation_id = data["id"]
                     if data.get("usage"):

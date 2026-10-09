@@ -19,6 +19,35 @@
 }
 body{font-size:13px;line-height:1.6;letter-spacing:0;background:var(--bg)}
 button,input,select,textarea{font-family:inherit}
+.account-source-nav{margin-bottom:18px;gap:6px}
+.source-panel[hidden],.source-modal [hidden],.source-panel [hidden]{display:none!important}
+.source-form{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.source-form label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--dim)}
+.source-form input,.source-form select,.source-form textarea,.source-panel input,.source-panel select{border:1px solid var(--line);padding:8px 10px;color:var(--fg);font:inherit;background:var(--panel2)}
+.source-wide{grid-column:1/-1}
+.source-form .hint{margin:0}
+.source-routing label{display:flex;align-items:center;gap:8px}
+.source-account-actions{display:flex;flex-wrap:wrap;gap:5px}
+.source-balance-value,.source-account-cards td[data-label="余额 / 额度"] .hint{white-space:nowrap}
+@media(min-width:641px){
+ .source-account-cards{table-layout:fixed;width:100%}
+ .source-account-cards th:nth-child(1){width:22%}
+ .source-account-cards th:nth-child(2){width:11%}
+ .source-account-cards th:nth-child(3){width:9%}
+ .source-account-cards th:nth-child(4){width:13%}
+ .source-account-cards th:nth-child(5){width:16%}
+ .source-account-cards th:nth-child(6){width:12%}
+ .source-account-cards th:nth-child(7){width:17%}
+ .source-account-cards td{overflow-wrap:anywhere}
+}
+.source-login-code{margin:12px 0;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+@media(max-width:640px){
+ .source-account-cards td{grid-column:span 6!important;flex-direction:column;align-items:flex-start;gap:3px}
+ .source-account-cards td:nth-child(1)::before{content:none}
+ .source-account-cards td:nth-child(7){flex-direction:column!important;align-items:flex-start!important}
+ .source-account-cards td:nth-child(7)::before{content:none}
+}
+@media(max-width:650px){.source-form{grid-template-columns:1fr}.source-routing label{flex-wrap:wrap}.account-source-nav{gap:4px}}
 button{min-height:34px;background:var(--accent);border-color:var(--accent);color:var(--on-accent);border-radius:6px;font-weight:550;box-shadow:none;padding:7px 13px;transition:background .15s,border-color .15s}
 button.sec{background:var(--panel);color:var(--fg)}
 button.mini{min-height:27px;border-radius:5px;padding:3px 8px}

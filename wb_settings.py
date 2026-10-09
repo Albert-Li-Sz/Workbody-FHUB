@@ -305,7 +305,7 @@ def ensure_launcher_key(accounts_dir):
 # different exits at the same time instead of sharing the global switch.
 
 REALMS = ("", "intl", "cn")
-UPSTREAMS = ("workbuddy", "cline", "opencode_zen")
+UPSTREAMS = ("workbuddy", "cline", "opencode_zen", "commandcode")
 
 
 def key_upstreams(entry):

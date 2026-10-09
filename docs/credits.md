@@ -37,3 +37,5 @@ PR 贡献者（v1.4.5 之前的改动未进上方更新记录，这里一并列�
 
 1. 本项目为非官方自托管网关，仅供技术研究、逆向协议学习与个人合法授权账号在私有环境测试使用。
 2. 本项目不提供任何账号及额度。请严格遵守官方服务条款，禁止用于任何商业转售、恶意并发或违规滥用。
+
+新增账号来源依据 ClinePass switcher、OpenCode 官方客户端与参考客户端代理、CommandCodeGo-manager 及官方 command-code CLI 协议独立实现，固定版本、接入边界与验证方式见[多平台说明](platforms.md)。ClinePass switcher 和 CommandCodeGo-manager 采用 MIT；本项目保留原有 WorkBuddy 来源与许可证。

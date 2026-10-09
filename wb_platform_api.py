@@ -61,14 +61,14 @@ def _open(manager, upstream, raw_model, body, meta, session, owner, bound=None):
         except wb_platforms.PlatformError as exc:
             if exc.code == "account_unavailable" and previous_error is not None:
                 raise previous_error from exc
-            if attempt == attempts-1 or exc.status not in (401, 403, 429, 502, 503, 504):
+            if attempt == attempts-1 or exc.status not in (401, 402, 403, 429, 502, 503, 504):
                 raise
             previous_error = exc
 
 
 def open_chat(proxy, payload, session_key=None, preferred_uid=None):
     upstream, raw_model, public_model = wb_platforms.route(payload.get("model"),
-        {"allowed_upstreams": ["cline", "opencode_zen"]})
+        {"allowed_upstreams": list(wb_platforms.BASES)})
     manager = proxy.PLATFORMS
     meta = manager.model(upstream, raw_model)
     body = _native_body(payload, meta["native_protocol"], meta)
@@ -88,7 +88,7 @@ def handle(handler, payload, protocol, upstream, raw_model, public_model):
         if not getattr(exc, "recorded", False):
             meta = proxy.PLATFORMS.catalogues.get(upstream, {}).get("models", {}).get(raw_model, {})
             error_context = SimpleNamespace(_upstream=upstream, _realm="", billing_mode=meta.get("billing_mode", "paid"),
-                cost_unit="credits" if upstream == "cline" else "USD", release=lambda: None)
+                cost_unit="credits" if upstream in ("cline", "commandcode") else "USD", release=lambda: None)
             proxy.record_error(public_model, exc.status, str(exc), account=getattr(exc, "account_uid", None),
                 stream=payload.get("stream", False), upstream=error_context, key=handler._key_id())
         raise
@@ -187,6 +187,7 @@ def _native(handler, payload, protocol, upstream, raw_model, public_model, meta,
             if not valid:
                 raise wb_platforms.PlatformError("upstream response does not match its protocol", 502)
             lease.generation_id = result.get("id")
+            lease.observe(result)
             tokens = bridge.usage(result.get("usage"), protocol, upstream)
             result["model"] = public_model
             if protocol == "responses":
@@ -197,12 +198,12 @@ def _native(handler, payload, protocol, upstream, raw_model, public_model, meta,
             return handler._json(200, result)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             if not recorded:
-                proxy.record_usage(public_model, tokens, stream=False, account=account.uid, upstream=lease,
+                proxy.record_usage(public_model, tokens or getattr(lease, "current_usage", None), stream=False, account=account.uid, upstream=lease,
                     key=handler._key_id(), outcome="client_aborted")
         except Exception as exc:
             error = exc if isinstance(exc, (wb_platforms.PlatformError, wb_responses.ResponseError)) else wb_platforms.PlatformError("upstream response failed", 502)
             if not recorded:
-                proxy.record_error(public_model, error.status, str(error), usage=tokens, account=account.uid, upstream=lease, key=handler._key_id())
+                proxy.record_error(public_model, error.status, str(error), usage=tokens or getattr(lease, "current_usage", None), account=account.uid, upstream=lease, key=handler._key_id())
             error.recorded = True
             raise error from (exc if error is not exc else None)
         finally:
@@ -231,6 +232,7 @@ def _native(handler, payload, protocol, upstream, raw_model, public_model, meta,
                 if not isinstance(data, dict):
                     raise wb_platforms.PlatformError("invalid upstream SSE event", 502)
                 kind = data.get("type") or event
+                lease.observe(data)
                 generation_id = ((data.get("response") or data.get("message") or {}).get("id")
                                  if protocol != "chat" else data.get("id"))
                 if generation_id:

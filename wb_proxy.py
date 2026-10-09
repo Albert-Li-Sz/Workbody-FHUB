@@ -574,6 +574,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     without reasoning controls has nothing to report, and rows written before
     this field existed cannot be told apart from it anyway.
     """
+    if not usage and upstream is not None:
+        usage = getattr(upstream, "current_usage", None)
     fields = _extract_usage(usage) or {}
     usage_missing = not fields
     row = {
@@ -601,6 +603,9 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         row["realm"] = ""
         row["cost_unit"] = upstream.cost_unit
         row["billing_mode"] = upstream.billing_mode
+        if getattr(upstream, "observed_provider", None):
+            row["actual_provider"] = upstream.observed_provider["provider"]
+            row["provider_pipeline"] = upstream.observed_provider["pipeline"]
         if getattr(upstream, "generation_id", None):
             row["upstream_generation_id"] = upstream.generation_id
     row.update(_request_context_fields())
@@ -8157,6 +8162,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(401, "panel password required", "invalid_request_error")
         if path.startswith("/platforms"):
             return self._platform_management(path, query=query)
+        if path.startswith("/accounts/upstreams"):
+            return self._platform_management("/platforms" + path[len("/accounts/upstreams"):], query=query)
+        if path == "/settings/responses":
+            return self._platform_management("/platforms", query={"models": ["0"]})
         for prefix in ("/v1/responses/", "/responses/"):
             if path.startswith(prefix):
                 return self._stored_response(path[len(prefix):])
@@ -8271,23 +8280,93 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, result)
                 if path == "/platforms/models":
                     return self._json(200, {"models": PLATFORMS.models(list(wb_platforms.BASES))})
+                if path == "/platforms/accounts/export":
+                    scope = query.get("upstream", [None])[0]
+                    if scope not in (None, *wb_platforms.BASES):
+                        raise wb_platforms.PlatformError("invalid upstream")
+                    uids = query.get("uid") or []
+                    if any(uid not in PLATFORMS.accounts for uid in uids):
+                        raise wb_platforms.PlatformError("account not found", 404)
+                    secrets = query.get("includeSecrets", ["1"])[0] not in ("0", "false")
+                    accounts = PLATFORMS.export_accounts(uids, scope, secrets)
+                    document = {"format": "fhub-source-accounts", "accounts": accounts, "count": len(accounts)}
+                    if query.get("download", ["0"])[0] in ("1", "true"):
+                        return self._download("fhub-%s-accounts-%s.json" % (scope or "sources", time.strftime("%Y%m%d-%H%M%S")), document)
+                    return self._json(200, document)
                 if path == "/platforms/login/poll":
-                    job = PLATFORMS.jobs.get(query.get("id", [""])[0])
-                    if not job:
-                        raise wb_platforms.PlatformError("login not found", 404)
-                    return self._json(200, dict(job))
+                    return self._json(200, PLATFORMS.poll_login(query.get("id", [""])[0]))
                 if path == "/platforms/usage" and wb_database.DATABASE:
                     upstream = query.get("upstream", [None])[0]
-                    if upstream not in (None, "workbuddy", "cline", "opencode_zen"):
+                    if upstream not in (None, "workbuddy", *wb_platforms.BASES):
                         raise wb_platforms.PlatformError("invalid upstream")
                     since = _local_midnight()
                     return self._json(200, {"totals": wb_database.DATABASE.usage_totals(group_by=("upstream", "model"), since=since, upstream=upstream),
                         "recent": list(wb_database.DATABASE.usage_rows(upstream=upstream, limit=100))})
             else:
                 if path == "/platforms/accounts/import":
-                    return self._json(200, {"accounts": PLATFORMS.import_accounts(payload)})
+                    rows = payload.get("accounts", payload) if isinstance(payload, dict) else payload
+                    return self._json(200, {"accounts": PLATFORMS.import_accounts(rows)})
+                if not isinstance(payload, dict):
+                    raise wb_platforms.PlatformError("expected a JSON object")
                 if path == "/platforms/accounts/update":
                     return self._json(200, PLATFORMS.update_account(payload.get("uid"), payload))
+                if path == "/platforms/accounts/batch":
+                    uids = payload.get("uids")
+                    if not isinstance(uids, list) or not uids or len(uids) > 500 or any(uid not in PLATFORMS.accounts for uid in uids):
+                        raise wb_platforms.PlatformError("select between 1 and 500 existing accounts")
+                    patch = {key: payload[key] for key in ("enabled", "proxy_slot") if key in payload}
+                    PLATFORMS.validate_options(patch)
+                    if "enabled" in patch and type(patch["enabled"]) is not bool:
+                        raise wb_platforms.PlatformError("enabled must be a boolean")
+                    return self._json(200, {"accounts": [PLATFORMS.update_account(uid, patch) for uid in dict.fromkeys(uids)]})
+                if path == "/platforms/accounts/cli-import":
+                    import wb_commandcode
+                    return self._json(200, {"accounts": PLATFORMS.import_accounts(wb_commandcode.cli_credentials())})
+                if path == "/platforms/accounts/org":
+                    account = PLATFORMS.accounts.get(payload.get("uid"))
+                    if not account or account.upstream != "opencode_zen" or account.document.get("auth_type") != "oauth":
+                        raise wb_platforms.PlatformError("OpenCode OAuth account not found", 404)
+                    if any(ticket["uid"] == account.uid for ticket in PLATFORMS.reservations.values()):
+                        raise wb_platforms.PlatformError("account has requests in flight", 409)
+                    result = PLATFORMS.refresh_console(account, payload.get("org_id"))
+                    PLATFORMS.publish()
+                    return self._json(200, result)
+                if path == "/platforms/routing":
+                    return self._json(200, PLATFORMS.set_routing(payload.get("upstream"), payload.get("mode", "fair"), payload.get("uid")))
+                if path == "/platforms/cline-route":
+                    return self._json(200, PLATFORMS.set_cline_route(payload.get("model"), payload.get("policy") or {}))
+                if path == "/platforms/accounts/test":
+                    account = PLATFORMS.accounts.get(payload.get("uid"))
+                    if not account:
+                        raise wb_platforms.PlatformError("account not found", 404)
+                    model = str(payload.get("model") or "")
+                    prefix = wb_platforms.PREFIXES[account.upstream]
+                    if model.startswith(prefix):
+                        model = model[len(prefix):]
+                    meta = PLATFORMS.model(account.upstream, model)
+                    body = {"model": model, "messages": [{"role": "user", "content": "Reply only OK."}], "max_tokens": 32, "stream": False}
+                    if meta["native_protocol"] == "responses":
+                        body = wb_platform_api.bridge.chat_to_responses(body)
+                    elif meta["native_protocol"] == "messages":
+                        body = wb_platform_api.bridge.chat_to_messages(body, meta)
+                    with PLATFORMS.open(account.upstream, model, body, meta, bound_uid=account.uid) as lease:
+                        raw = lease.read(MAX_PAYLOAD_BYTES + 1)
+                        if len(raw) > MAX_PAYLOAD_BYTES:
+                            raise wb_platforms.PlatformError("upstream response exceeds the size limit", 502)
+                        value = json.loads(raw)
+                        if isinstance(value, dict):
+                            value = value.get("data", value)
+                        if not isinstance(value, dict) or value.get("error"):
+                            raise wb_platforms.PlatformError("upstream test failed", 502)
+                        if meta["native_protocol"] == "chat":
+                            valid = bool(value.get("choices") and isinstance(value["choices"][0], dict) and value["choices"][0].get("message"))
+                        else:
+                            valid = isinstance(value.get("output" if meta["native_protocol"] == "responses" else "content"), list)
+                        if not valid:
+                            raise wb_platforms.PlatformError("upstream returned an invalid test response", 502)
+                        tokens = wb_platform_api.bridge.usage(value.get("usage"), meta["native_protocol"], account.upstream)
+                        record_usage(prefix + model, tokens, account=account.uid, upstream=lease)
+                    return self._json(200, {"ok": True, "model": prefix + model, "usage": tokens})
                 if path == "/platforms/refresh":
                     upstream = payload.get("upstream")
                     if upstream not in wb_platforms.BASES:
@@ -8295,7 +8374,11 @@ class Handler(BaseHTTPRequestHandler):
                     PLATFORMS.refresh_async(upstream, force=True)
                     return self._json(202, {"refreshing": True})
                 if path == "/platforms/login/start":
-                    return self._json(200, PLATFORMS.start_login())
+                    return self._json(200, PLATFORMS.start_login(payload.get("upstream", "cline"), payload))
+                if path == "/platforms/login/cancel":
+                    return self._json(200, PLATFORMS.cancel_login(payload.get("id")))
+                if path == "/platforms/login/complete":
+                    return self._json(200, PLATFORMS.complete_login(payload.get("id"), payload.get("org_id")))
                 if path == "/platforms/responses/settings":
                     cfg = wb_responses.validate_config(payload)
                     with wb_settings._lock:
@@ -10854,6 +10937,13 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._platform_management(path, payload=payload)
+        if path.startswith("/accounts/upstreams/") or path in ("/settings/responses", "/settings/responses/delete"):
+            payload = self._payload_or_error(allow_list=(path == "/accounts/upstreams/accounts/import"))
+            if payload is None:
+                return
+            translated = ("/platforms" + path[len("/accounts/upstreams"):] if path.startswith("/accounts/upstreams/") else
+                          "/platforms/responses/delete" if path.endswith("/delete") else "/platforms/responses/settings")
+            return self._platform_management(translated, payload=payload)
         is_messages_route = path in MESSAGES_ROUTES
         is_account_route = (
             path.startswith("/accounts/")

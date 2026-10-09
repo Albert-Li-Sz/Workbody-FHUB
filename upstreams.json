@@ -103,6 +103,30 @@
       "reviewed_on": "2026-10-09",
       "integration": "official-protocol-reference",
       "details": "docs/platforms.md"
+    },
+    {
+      "url": "https://github.com/munmunjaklin458-afk/cline-pass-switcher.git",
+      "reviewed_commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
+      "integration": "independent-implementation-reference",
+      "details": "docs/platforms.md"
+    },
+    {
+      "url": "https://github.com/spfnas/opencode2api-free.git",
+      "reviewed_commit": "656b088a042f01d07b47aa5edbead3460376e198",
+      "integration": "client-protocol-reference",
+      "details": "docs/platforms.md"
+    },
+    {
+      "url": "https://github.com/learningdog1/CommandCodeGo-manager.git",
+      "reviewed_commit": "856430ba9e10f78c15c80d7f4d1370864b80cd57",
+      "integration": "independent-implementation-reference",
+      "details": "docs/platforms.md"
+    },
+    {
+      "url": "https://github.com/anomalyco/opencode.git",
+      "reviewed_commit": "388406238bd5ca15564a762840a2362c3a45bd9c",
+      "integration": "official-protocol-reference",
+      "details": "docs/platforms.md"
     }
   ]
 }
