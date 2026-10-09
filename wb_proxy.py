@@ -8279,7 +8279,27 @@ class Handler(BaseHTTPRequestHandler):
                         result["models"] = PLATFORMS.models(list(wb_platforms.BASES))
                     return self._json(200, result)
                 if path == "/platforms/models":
-                    return self._json(200, {"models": PLATFORMS.models(list(wb_platforms.BASES))})
+                    upstream = query.get("upstream", [None])[0]
+                    if upstream not in (None, *wb_platforms.BASES):
+                        raise wb_platforms.PlatformError("invalid upstream")
+                    models = PLATFORMS.models([upstream] if upstream else list(wb_platforms.BASES))
+                    group = query.get("group", [None])[0]
+                    if group:
+                        if group not in ("subscription", "free", "paid", "recommended", "account", "clineCloud"):
+                            raise wb_platforms.PlatformError("invalid model group")
+                        models = [model for model in models if model.get("entitlement") == group or
+                            model.get("billing_mode") == group and (group != "paid" or model.get("entitlement") != "subscription")]
+                    return self._json(200, {"models": models})
+                if path == "/platforms/billing":
+                    uid = query.get("uid", [None])[0]
+                    account = PLATFORMS.accounts.get(uid) if uid else None
+                    if uid and not account:
+                        raise wb_platforms.PlatformError("account not found", 404)
+                    upstream = query.get("upstream", [account.upstream if account else None])[0]
+                    refresh = query.get("refresh", ["0"])[0]
+                    if refresh not in ("0", "1", "false", "true"):
+                        raise wb_platforms.PlatformError("refresh must be 1 or 0")
+                    return self._json(200, PLATFORMS.billing(upstream, uid, refresh in ("1", "true")))
                 if path == "/platforms/accounts/export":
                     scope = query.get("upstream", [None])[0]
                     if scope not in (None, *wb_platforms.BASES):

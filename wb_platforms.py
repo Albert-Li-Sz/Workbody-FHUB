@@ -27,6 +27,7 @@ import wb_opencode_client
 import wb_device_auth
 import wb_commandcode
 import wb_cline_routes
+import wb_platform_metadata
 from wb_version import VERSION
 
 BASES = {"cline": "https://api.cline.bot/api/v1", "opencode_zen": "https://opencode.ai/zen/v1",
@@ -143,8 +144,9 @@ def parse_catalog(upstream, document):
             continue
         meta["native_protocol"] = protocol
         prices = meta.get("pricing") or meta.get("cost") or {}
-        values = [_number(prices.get(field)) for field in ("input", "output", "prompt", "completion")]
-        if meta.get("free") is True or any(value is not None for value in values) and all(value in (0, None) for value in values):
+        input_price = _number(prices.get("input", prices.get("prompt")))
+        output_price = _number(prices.get("output", prices.get("completion")))
+        if meta.get("free") is True or input_price == 0 and output_price == 0:
             meta["billing_mode"] = "free"
         else:
             meta.setdefault("billing_mode", "paid")
@@ -187,7 +189,7 @@ class Account:
             return False
         if self.upstream == "cline":
             scope = self.document.get("access_scope", "all")
-            if scope == "subscription" and not model.startswith("cline-pass/"):
+            if scope == "subscription" and not model.startswith(("cline-pass/", "cline-free/")):
                 return False
             if scope == "credits" and model.startswith("cline-pass/"):
                 return False
@@ -220,6 +222,10 @@ class Account:
                 "auth_type": self.document.get("auth_type"), "access_scope": self.document.get("access_scope", "all"),
                 "org_id": self.document.get("org_id", ""), "orgs": copy.deepcopy(self.document.get("orgs") or []),
                 "plan": self.document.get("plan"), "quota": copy.deepcopy(self.document.get("quota")),
+                "subscription": copy.deepcopy(self.document.get("subscription")),
+                "billing_errors": copy.deepcopy(self.document.get("billing_errors") or {}),
+                "billing_status": copy.deepcopy(self.document.get("billing_status") or {}),
+                "console_config_error": self.document.get("console_config_error", ""),
                 "last_provider": copy.deepcopy(self.document.get("last_provider")),
                 "credit_exhausted": bool(self.document.get("credit_exhausted")),
                 "credential_ready": self.document.get("auth_type") != "oauth" or self.upstream != "opencode_zen" or bool(self.document.get("console_gateway")),
@@ -297,6 +303,14 @@ class Manager:
         self.refreshing, self.jobs, self.reservations = set(), {}, {}
         self.last_picks = {}
         self.refresh_attempts = {}
+        self.metadata_lock = threading.RLock()
+        self.metadata_cache = {}
+        try:
+            cached = wb_storage.read_private_json(os.path.join(self.root, "client-model-metadata.json"))
+            if isinstance(cached, dict) and isinstance(cached.get("providers"), dict):
+                self.metadata_cache = cached
+        except (OSError, ValueError):
+            pass
         self.daily, self.day = {}, ""
         self.load()
         for upstream in BASES:
@@ -366,6 +380,8 @@ class Manager:
         entries = [{"npm": gateway.get("npm"), **metadata, "id": identifier}
                    for identifier, metadata in (gateway.get("models") or {}).items() if isinstance(metadata, dict)]
         parsed = parse_catalog("opencode_zen", {"models": entries})
+        if not parsed:
+            return
         # A model may exist in more than one org. Per-account eligibility is
         # checked separately; this catalogue is a display/routing union.
         with self.lock:
@@ -388,7 +404,7 @@ class Manager:
         if org_id not in [org.get("id") for org in orgs if isinstance(org, dict)]:
             raise PlatformError("select an available OpenCode organization")
         config = self.logins._request(wb_device_auth.OPENCODE_CONSOLE + "/api/config", org=org_id, **options)
-        gateway = wb_device_auth.console_gateway(config)
+        gateway = self.console_gateway(config, account)
         with self.lock:
             if org_id != account.document.get("org_id"):
                 if any(ticket["uid"] == account.uid for ticket in self.reservations.values()):
@@ -397,7 +413,8 @@ class Manager:
                     if self.database.connection().execute("SELECT 1 FROM responses WHERE account=? AND bound=1 AND expires_at>? LIMIT 1", (account.uid, time.time())).fetchone():
                         raise PlatformError("this organization has a bound Responses history; add another OAuth account for the other organization", 409)
             account.document.update(org_id=org_id, orgs=[{"id": org["id"], "name": org.get("name") or org["id"]}
-                for org in orgs if isinstance(org, dict) and org.get("id")], console_gateway=gateway)
+                for org in orgs if isinstance(org, dict) and org.get("id")], console_gateway=gateway,
+                console_config_error="" if gateway else "组织未提供可用的网关配置；请在 OpenCode 控制台配置 Zen／Go，或导入 Zen API Key。")
             account.save()
             self._cache_console_models(account)
         return account.view()
@@ -632,6 +649,62 @@ class Manager:
                 raise PlatformError("upstream metadata exceeds the size limit", 502)
             return json.loads(raw)
 
+    def public_json(self, url, account=None, opencode=False, proxy=None):
+        headers = {"User-Agent": "Workbody-FHUB/" + VERSION, "Accept": "application/json"}
+        if opencode:
+            headers.update(wb_opencode_client.headers(account.uid if account else "catalog"))
+        request = urllib.request.Request(url, headers=headers)
+        with self.transport(request, timeout=15, proxy=proxy if proxy is not None else self.proxy(account) if account else "") as response:
+            raw = response.read(8 * 1024 * 1024 + 1)
+        if len(raw) > 8 * 1024 * 1024:
+            raise PlatformError("upstream metadata exceeds the size limit", 502)
+        return json.loads(raw)
+
+    def registry_metadata(self, account=None, proxy=None):
+        with self.metadata_lock:
+            if 0 <= time.time() - (_number(self.metadata_cache.get("updated_at")) or 0) < 600:
+                return self.metadata_cache.get("providers", {}), False
+            try:
+                document = self.public_json(wb_platform_metadata.REGISTRY_URL, account, proxy=proxy)
+                providers = {name: wb_platform_metadata.provider(document, name) for name in ("opencode", "opencode-go", "cline-pass")}
+                if not providers["opencode"].get("models"):
+                    raise PlatformError("client model registry returned no OpenCode metadata", 502)
+                self.metadata_cache = {"providers": providers, "updated_at": time.time()}
+                wb_storage.write_private_json(os.path.join(self.root, "client-model-metadata.json"), _public_metadata(self.metadata_cache))
+                return providers, False
+            except Exception as exc:
+                if isinstance(exc, urllib.error.HTTPError):
+                    exc.close()
+                return self.metadata_cache.get("providers", {}), True
+
+    def console_gateway(self, config, account=None, proxy=None):
+        gateway = wb_device_auth.console_gateway(config)
+        if gateway:
+            return gateway
+        configuration = config.get("config", config) if isinstance(config, dict) else {}
+        providers = (configuration.get("provider") or configuration.get("providers") or {}) if isinstance(configuration, dict) else {}
+        if not isinstance(providers, dict):
+            return None
+        if not any(name in providers for name in ("opencode", "opencode_zen", "opencode-zen", "opencode-go")):
+            return None
+        registry, stale = self.registry_metadata(account, proxy=proxy)
+        defaults = {}
+        for name in ("opencode", "opencode_zen", "opencode-zen", "opencode-go"):
+            if name not in providers:
+                continue
+            provider_name = "opencode-go" if name == "opencode-go" else "opencode"
+            reference = wb_platform_metadata.provider(registry, provider_name)
+            url = "https://opencode.ai/zen/go/v1" if name == "opencode-go" else wb_platform_metadata.ZEN_URL
+            live = self.public_json(url + "/models", account, opencode=True, proxy=proxy)
+            models = parse_catalog("opencode_zen", live)
+            wb_platform_metadata.enrich("opencode_zen", models, {"opencode": reference}, stale)
+            # Reparse enriched provider metadata to choose the native protocol.
+            for meta in models.values():
+                meta.pop("native_protocol", None)
+            models = parse_catalog("opencode_zen", {"models": models})
+            defaults[name] = {"api": url, "npm": reference.get("npm", ""), "models": models}
+        return wb_device_auth.console_gateway(config, defaults)
+
     def ensure_token(self, account, force=False, failed_token=None):
         if account.document.get("auth_type") != "oauth" or not account.document.get("refresh_token"):
             return
@@ -689,8 +762,6 @@ class Manager:
     def refresh_catalog(self, upstream):
         candidates = [account for account in list(self.accounts.values()) if account.upstream == upstream and account.enabled]
         account = candidates[0] if candidates else None
-        if account:
-            self.ensure_token(account)
         if upstream == "commandcode":
             models = wb_commandcode.builtin_models()
             # Go accounts can use the generate protocol without permission
@@ -701,19 +772,52 @@ class Manager:
             wb_storage.write_private_json(os.path.join(self.root, upstream + "-catalog.json"), cache)
             return cache
         if upstream == "opencode_zen" and any(item.document.get("auth_type") == "oauth" for item in candidates):
+            failures = []
+            refreshed = False
+            combined = {}
             for item in candidates:
                 if item.document.get("auth_type") == "oauth":
-                    self.refresh_console(item)
+                    try:
+                        self.refresh_console(item)
+                        refreshed = refreshed or bool(item.document.get("console_gateway"))
+                    except Exception as exc:
+                        failures.append(type(exc).__name__ + (" HTTP %s" % exc.code if isinstance(exc, urllib.error.HTTPError) else ""))
+                        item.last_error = "OpenCode organization refresh failed (" + failures[-1] + ")"
+                        if isinstance(exc, urllib.error.HTTPError):
+                            exc.close()
+                    gateway = item.document.get("console_gateway") or {}
+                    entries = [{"npm": gateway.get("npm"), **meta, "id": identifier}
+                        for identifier, meta in (gateway.get("models") or {}).items() if isinstance(meta, dict)]
+                    combined.update(parse_catalog(upstream, {"models": entries}))
             legacy = next((item for item in candidates if item.document.get("auth_type") != "oauth"), None)
             if legacy:
-                models = parse_catalog(upstream, self.request_json(upstream, "/models", legacy))
-                with self.lock:
-                    self.catalogues[upstream]["models"].update(models)
-                    wb_storage.write_private_json(os.path.join(self.root, upstream + "-catalog.json"), self.catalogues[upstream])
-            self.catalog_errors[upstream] = ""
-            return self.catalogues[upstream]
-        document = self.request_json(upstream, "/ai/cline/recommended-models" if upstream == "cline" else "/models", account)
+                try:
+                    models = self.opencode_catalog(legacy)
+                    combined.update(models)
+                    refreshed = True
+                except Exception as exc:
+                    failures.append(type(exc).__name__)
+                    if isinstance(exc, urllib.error.HTTPError):
+                        exc.close()
+            self.catalog_errors[upstream] = ("部分 OpenCode 账号同步失败 (" + ", ".join(failures) + ")") if failures else ""
+            if not refreshed:
+                raise PlatformError("OpenCode 组织未提供可用模型或网关凭据；请检查组织配置。", 502)
+            registry, stale = self.registry_metadata(account)
+            wb_platform_metadata.enrich(upstream, combined, registry, stale)
+            cache = {"models": combined, "updated_at": time.time(), "metadata_stale": stale}
+            with self.lock:
+                self.catalogues[upstream] = cache
+            wb_storage.write_private_json(os.path.join(self.root, upstream + "-catalog.json"), cache)
+            return cache
+        document = self.public_json(self.bases[upstream].rstrip("/") +
+            ("/ai/cline/recommended-models" if upstream == "cline" else "/models"), account, opencode=upstream == "opencode_zen")
         models = parse_catalog(upstream, document)
+        registry, metadata_stale = self.registry_metadata(account)
+        wb_platform_metadata.enrich(upstream, models, registry, metadata_stale)
+        if upstream == "opencode_zen":
+            for meta in models.values():
+                meta.pop("native_protocol", None)
+            models = parse_catalog(upstream, {"models": models})
         supplemental_error = ""
         if upstream == "cline":
             # Official Cline's broader selector uses OpenRouter catalogue IDs.
@@ -747,11 +851,43 @@ class Manager:
                         models[identifier] = dict(old, stale=True)
         if not models:
             raise PlatformError("upstream returned no supported models", 502)
-        cache = {"models": models, "updated_at": time.time()}
+        groups = {}
+        for meta in models.values():
+            group = meta.get("entitlement") or meta.get("billing_mode", "paid")
+            groups[group] = groups.get(group, 0) + 1
+        cache = {"models": models, "updated_at": time.time(), "groups": groups,
+                 "metadata_stale": metadata_stale}
         wb_storage.write_private_json(os.path.join(self.root, upstream + "-catalog.json"), cache)
         with self.lock:
             self.catalogues[upstream], self.catalog_errors[upstream] = cache, supplemental_error
         return cache
+
+    def opencode_catalog(self, account=None):
+        document = self.public_json(self.bases["opencode_zen"].rstrip("/") + "/models", account, opencode=True)
+        models = parse_catalog("opencode_zen", document)
+        registry, stale = self.registry_metadata(account)
+        wb_platform_metadata.enrich("opencode_zen", models, registry, stale)
+        for meta in models.values():
+            meta.pop("native_protocol", None)
+        models = parse_catalog("opencode_zen", {"models": models})
+        if not models:
+            raise PlatformError("OpenCode returned no supported models", 502)
+        return models
+
+    def _store_billing(self, account, component, value=None, error=None):
+        with self.lock:
+            status = account.document.setdefault("billing_status", {}).setdefault(component, {})
+            errors = account.document.setdefault("billing_errors", {})
+            if error:
+                status["stale"] = True
+                errors[component] = error
+            else:
+                account.document[component] = value
+                status.update(updated_at=time.time(), stale=False)
+                errors.pop(component, None)
+                if component == "subscription":
+                    account.document["plan"] = value.get("name") or value.get("id")
+            account.save()
 
     def refresh_balance(self, account):
         if account.upstream == "commandcode":
@@ -787,17 +923,61 @@ class Manager:
         if account.upstream != "cline":
             # Zen does not document a public balance endpoint. Unknown remains
             # unknown; per-request billing is independent of wallet balance.
+            with self.lock:
+                account.document["balance"] = {"remain": None, "unit": "USD", "updated_at": time.time(),
+                    "note": "公开免费客户端没有钱包余额" if account.document.get("public") else
+                            "OpenCode Zen 未公开钱包余额查询 API，请在官方控制台查看。"}
+                account.save()
+            if not account.document.get("public") and (account.document.get("auth_type") != "oauth" or account.document.get("console_gateway")):
+                try:
+                    request = urllib.request.Request("https://opencode.ai/zen/go/v1/usage", headers=self.headers(account))
+                    with self.transport(request, timeout=15, proxy=self.proxy(account)) as response:
+                        raw = response.read(1024 * 1024 + 1)
+                    if len(raw) > 1024 * 1024:
+                        raise PlatformError("subscription usage exceeds the size limit", 502)
+                    usage = json.loads(raw).get("usage")
+                    if not isinstance(usage, dict):
+                        raise PlatformError("invalid OpenCode Go usage response", 502)
+                    quota = wb_platform_metadata.quota({"limits": [{"type": key, "percentUsed": value.get("percent"),
+                        "resetsAt": value.get("resetsAt")} for key, value in usage.items() if isinstance(value, dict)]})
+                    self._store_billing(account, "quota", quota)
+                    self._store_billing(account, "subscription", {"name": "OpenCode Go", "price": None})
+                except Exception as exc:
+                    code = " HTTP %s" % exc.code if isinstance(exc, urllib.error.HTTPError) else ""
+                    error = "OpenCode Go 额度查询不可用 (%s%s)" % (type(exc).__name__, code)
+                    self._store_billing(account, "quota", error=error)
+                    self._store_billing(account, "subscription", error=error)
+                    if isinstance(exc, urllib.error.HTTPError):
+                        exc.close()
             return
         self.ensure_token(account)
-        user = _data(self.request_json("cline", "/users/me", account))
-        uid = (user or {}).get("id") or (user or {}).get("clineUserId") or account.document.get("user_id")
-        if not uid:
-            raise PlatformError("Cline user ID is missing", 502)
-        balance = _data(self.request_json("cline", "/users/" + urllib.parse.quote(str(uid), safe="") + "/balance", account))
-        amount = _number((balance or {}).get("balance"))
-        with self.lock:
-            account.document.update(user_id=str(uid), balance={"remain": amount, "unit": "credits", "updated_at": time.time()})
-            account.save()
+        try:
+            user = _data(self.request_json("cline", "/users/me", account))
+            uid = (user or {}).get("id") or (user or {}).get("clineUserId") or account.document.get("user_id")
+            if not uid:
+                raise PlatformError("Cline user ID is missing", 502)
+            balance = _data(self.request_json("cline", "/users/" + urllib.parse.quote(str(uid), safe="") + "/balance", account))
+            amount = _number((balance or {}).get("balance"))
+            if amount is None:
+                raise PlatformError("invalid Cline balance response", 502)
+            with self.lock:
+                account.document["user_id"] = str(uid)
+            self._store_billing(account, "balance", {"remain": amount, "unit": "credits", "updated_at": time.time()})
+        except Exception as exc:
+            self._store_billing(account, "balance", error="积分查询失败 (%s%s)" % (type(exc).__name__,
+                " HTTP %s" % exc.code if isinstance(exc, urllib.error.HTTPError) else ""))
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+        for component, path in (("subscription", "/users/me/plan"), ("quota", "/users/me/plan/usage-limits")):
+            try:
+                document = _data(self.request_json("cline", path, account))
+                value = wb_platform_metadata.subscription(document) if component == "subscription" else wb_platform_metadata.quota(document)
+                self._store_billing(account, component, value)
+            except Exception as exc:
+                self._store_billing(account, component, error="查询失败 (%s%s)" % (type(exc).__name__,
+                    " HTTP %s" % exc.code if isinstance(exc, urllib.error.HTTPError) else ""))
+                if isinstance(exc, urllib.error.HTTPError):
+                    exc.close()
 
     def refresh_paid_usage(self, account):
         """Reconcile official Cline credit transactions without counting them twice."""
@@ -865,14 +1045,19 @@ class Manager:
     def balance(self, upstream, refresh=False):
         if refresh:
             self.refresh_async(upstream, force=True)
-        amounts, owners, unknown = [], set(), 0
+        amounts, owners, unknown, stale, quotas = [], set(), 0, 0, {}
         for account in list(self.accounts.values()):
             if account.upstream != upstream:
                 continue
-            owner = account.document.get("user_id") or account.uid
+            owner = (account.document.get("org_id") if upstream == "opencode_zen" else None) or account.document.get("user_id") or account.uid
             if owner in owners:
                 continue
             owners.add(owner)
+            status = account.document.get("billing_status") or {}
+            stale += bool((status.get("balance") or {}).get("stale"))
+            for window, item in (account.document.get("quota") or {}).items():
+                if not (status.get("quota") or {}).get("stale") and isinstance(item, dict) and _number(item.get("remaining_percent")) is not None:
+                    quotas.setdefault(window, []).append(item["remaining_percent"])
             cached = account.document.get("balance") or {}
             value = _number(cached.get("remain"))
             if value is None:
@@ -883,7 +1068,25 @@ class Manager:
         return {"ok": True, "object": "balance", "upstream": upstream, "currency": unit, "unit": unit,
                 "total_remain": round(sum(amounts), 6) if amounts else None, "total_used": None, "total_granted": None,
                 "account_count": len(owners), "known_count": len(amounts), "unknown_count": unknown,
-                "complete": bool(owners) and unknown == 0, "refreshed": False,
+                "complete": bool(owners) and unknown == 0 and stale == 0, "stale_count": stale, "refreshed": False,
+                "refreshing": upstream in self.refreshing, "queried_at": time.time(),
+                "quota_windows": {window: {"known_accounts": len(values), "remaining_percent_min": min(values),
+                    "remaining_percent_max": max(values)} for window, values in quotas.items()}}
+
+    def billing(self, upstream, uid=None, refresh=False):
+        if upstream not in BASES:
+            raise PlatformError("invalid upstream")
+        if uid and (uid not in self.accounts or self.accounts[uid].upstream != upstream):
+            raise PlatformError("account not found", 404)
+        if refresh:
+            self.refresh_async(upstream, force=True)
+        rows = []
+        for account in list(self.accounts.values()):
+            if account.upstream != upstream or uid and account.uid != uid:
+                continue
+            view = account.view()
+            rows.append({key: view.get(key) for key in ("uid", "nickname", "balance", "quota", "subscription", "billing_errors", "billing_status")})
+        return {"upstream": upstream, "accounts": rows, "balance": self.balance(upstream),
                 "refreshing": upstream in self.refreshing, "queried_at": time.time()}
 
     def start(self):
@@ -1196,12 +1399,14 @@ class Manager:
                 accounts.append(view)
             model_revision = hashlib.sha256(json.dumps([
                 [(upstream, cache.get("updated_at", 0)) for upstream, cache in self.catalogues.items()],
-                [(a.uid, a.enabled, a.document.get("models")) for a in self.accounts.values()]], sort_keys=True).encode()).hexdigest()
+                [(a.uid, a.enabled, a.document.get("models"), a.document.get("access_scope"), a.document.get("public"),
+                  (a.document.get("console_gateway") or {}).get("models")) for a in self.accounts.values()]], sort_keys=True).encode()).hexdigest()
             return {"accounts": accounts, "routing": self.routing(),
                     "cline_routes": copy.deepcopy(wb_settings.load(self.directory).get("cline_routes") or {}),
                     "models_revision": model_revision, "catalogues": {upstream: {
                 "updated_at": cache.get("updated_at", 0), "stale": time.time() - cache.get("updated_at", 0) > 600,
                 "count": len(cache.get("models", {})), "error": self.catalog_errors.get(upstream, ""),
+                "groups": copy.deepcopy(cache.get("groups") or {}), "metadata_stale": cache.get("metadata_stale", False),
                 "refreshing": upstream in self.refreshing} for upstream, cache in self.catalogues.items()}}
 
     def start_login(self, upstream="cline", options=None):

@@ -161,6 +161,34 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.management("/accounts/upstreams/accounts/batch",{"uids":["missing"],"enabled":False})[0],400)
         self.assertEqual(self.management("/settings/responses")[0],200)
 
+    def test_billing_queries_require_panel_auth_and_return_no_credentials(self):
+        uid=self.command_uids[0]
+        account=self.manager.accounts[uid]
+        account.document.update(balance={'remain':12,'unit':'credits'},quota={'monthly':{'percent_used':25,'remaining_percent':75}})
+        self.assertEqual(self.request('/accounts/upstreams/billing?uid='+uid)[0],401)
+        status,value=self.management('/accounts/upstreams/billing?uid='+uid)
+        self.assertEqual(status,200)
+        self.assertEqual(value['accounts'][0]['balance']['remain'],12)
+        self.assertEqual(value['accounts'][0]['quota']['monthly']['remaining_percent'],75)
+        self.assertNotIn('user_first_fixture',json.dumps(value))
+        status,raw,_=self.request('/v1/balance?upstream=commandcode')
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(raw)['quota_windows']['monthly']['remaining_percent_min'],75)
+        self.assertEqual(self.management('/accounts/upstreams/billing?uid=missing')[0],404)
+        self.assertEqual(self.management('/accounts/upstreams/billing?uid='+uid+'&refresh=invalid')[0],400)
+
+    def test_model_price_details_and_subscription_filter(self):
+        self.manager.catalogues['cline']['models']['cline-pass/fixture']={'native_protocol':'chat','billing_mode':'paid',
+            'entitlement':'subscription','reference_pricing':{'input':0.3,'output':1.2,'unit':'USD/1M tokens'}}
+        status,value=self.management('/accounts/upstreams/models?upstream=cline&group=subscription')
+        self.assertEqual(status,200)
+        self.assertEqual([model['id'] for model in value['models']],['cline/cline-pass/fixture'])
+        status,raw,_=self.request('/v1/models/cline/cline-pass/fixture')
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(raw)['reference_pricing']['output'],1.2)
+        self.assertEqual(self.management('/accounts/upstreams/models?upstream=invalid')[0],400)
+        self.assertEqual(self.management('/accounts/upstreams/models?group=invalid')[0],400)
+
     def test_source_import_export_leaves_workbuddy_transfer_unchanged(self):
         row={"upstream":"commandcode","api_key":"user_import_fixture","priority":3}
         status,value=self.management("/accounts/upstreams/accounts/import",[row])

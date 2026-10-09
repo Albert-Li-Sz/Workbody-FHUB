@@ -30,13 +30,15 @@ def official_url(value):
         return False
 
 
-def console_gateway(document):
+def console_gateway(document, defaults=None):
     """Read provider configuration issued by the official console.
 
     A console access token is not a Zen API Key. Keep its tenant gateway and
     model list instead of silently substituting the legacy Zen endpoint.
     """
     config = document.get("config", document) if isinstance(document, dict) else {}
+    if not isinstance(config, dict):
+        return None
     providers = config.get("provider") or config.get("providers") or {}
     ordered = list(providers.items()) if isinstance(providers, dict) else []
     ordered.sort(key=lambda item: item[0] not in ("opencode", "opencode_zen", "opencode-zen"))
@@ -44,10 +46,13 @@ def console_gateway(document):
         if not isinstance(provider, dict):
             continue
         options = provider.get("options") or {}
-        url = options.get("baseURL") or provider.get("baseURL")
+        if not isinstance(options, dict):
+            continue
+        inherited = (defaults or {}).get(name) or {}
+        url = options.get("baseURL") or provider.get("baseURL") or inherited.get("api")
         if not official_url(url):
             continue
-        models = provider.get("models")
+        models = provider.get("models") or inherited.get("models")
         if not isinstance(models, dict) or not models:
             continue
         # Restrict headers to protocol/tenant metadata. Secrets supplied in
@@ -68,7 +73,7 @@ def console_gateway(document):
             continue
         return {"url": str(url).rstrip("/"), "provider": name,
                 "api_key": api_key,
-                "headers": safe_headers, "models": copy.deepcopy(clean_models), "npm": provider.get("npm", "")}
+                "headers": safe_headers, "models": copy.deepcopy(clean_models), "npm": provider.get("npm") or inherited.get("npm", "")}
     return None
 
 
@@ -254,7 +259,7 @@ class DeviceLogins:
                 raise self.error("organization is not available for this account")
             token = job["tokens"]["access_token"]
         config = self._request(OPENCODE_CONSOLE + "/api/config", proxy=job["proxy"], token=token, org=org_id)
-        gateway = console_gateway(config)
+        gateway = self.manager.console_gateway(config, proxy=job["proxy"])
         with self.lock:
             if not self._active(job):
                 raise self.error("authorization was cancelled or expired", 409)

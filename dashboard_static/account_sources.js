@@ -7,6 +7,7 @@ let accountSource = 'workbuddy', sourceData = null, sourceLoading = null;
 let sourceModelPage = 1, sourceEditUid = null, sourceTestUid = null, sourceRouteModel = null;
 const SOURCE_PRIORITY_DRAFTS = new Map();
 const SOURCE_ROUTING_DRAFTS = new Map();
+const SOURCE_MODEL_GROUPS = new Map();
 const sourceEl = id => document.getElementById(id);
 const sourceList = () => ((sourceData || {}).accounts || []).filter(a => a.upstream === accountSource);
 
@@ -21,6 +22,7 @@ async function switchAccountSource(source){
     sourceEl(id).setAttribute('aria-pressed', String(kind === source));
   }
   if(source === 'workbuddy') return;
+  sourceEl('sourceModelGroup').value = SOURCE_MODEL_GROUPS.get(source) || 'all';
   sourceEl('sourceAccountsTitle').textContent = ACCOUNT_SOURCE_LABELS[source] + ' 账号';
   sourceEl('sourceLoginButton').hidden = source === 'commandcode';
   sourceEl('sourceCliImport').hidden = source !== 'commandcode';
@@ -75,17 +77,28 @@ function renderSourceAccounts(){
     const cooldown = Math.max(0, ...Object.values(a.cooldowns || {}));
     const state = !a.enabled ? '停用' : a.credit_exhausted ? '积分耗尽' : cooldown ? '冷却 '+fmt(cooldown)+' 秒' : a.credential_ready === false ? '等待组织配置' : '启用';
     const unit = a.upstream === 'opencode_zen' ? 'USD' : '积分';
-    const windows = a.quota || {};
-    const quota = ['fiveHour','weekly'].map(key => windows[key] && windows[key].cap != null
-      ? '<div class="hint">'+(key==='fiveHour'?'5 小时':'每周')+' '+fmt(windows[key].used || 0)+' / '+fmt(windows[key].cap)+' 条</div>' : '').join('');
+    const windows = a.quota || {}, billingStatus=a.billing_status || {};
+    const quota = Object.entries(windows).map(([key,value]) => {
+      if(!value || typeof value!=='object') return '';
+      const label={fiveHour:'5 小时',weekly:'每周',monthly:'每月'}[key] || key;
+      const usage=value.percent_used != null ? '剩余 '+fmt(value.remaining_percent)+'%（已用 '+fmt(value.percent_used)+'%）'
+        : value.cap != null ? fmt(value.used || 0)+' / '+fmt(value.cap)+' 条' : '未知';
+      const reset=value.reset_at || value.resetAt;
+      return '<div class="hint">'+esc(label)+' '+esc(usage)+((billingStatus.quota || {}).stale?'（缓存）':'')+(reset?' · '+esc(new Date(reset).toLocaleString())+' 重置':'')+'</div>';
+    }).join('');
+    const subscription=a.subscription || {};
+    const planPrice=subscription.price==null?'':'<div class="hint">订阅 $'+sourcePriceNumber(subscription.price)+(subscription.interval?' / '+esc({month:'月',monthly:'月',year:'年'}[subscription.interval] || subscription.interval):'')+'</div>';
+    const billingErrors=[...new Set(Object.values(a.billing_errors || {}))].map(value=>'<div class="hint">'+esc(value)+'</div>').join('');
+    const queriedAt=Math.max(0,...Object.values(billingStatus).map(value=>Number(value.updated_at) || 0),Number(balance.updated_at) || 0);
+    const queried=queriedAt?'<div class="hint">更新于 '+esc(new Date(queriedAt*1000).toLocaleString())+'</div>':'';
     const action = (name,label) => '<button class="sec mini" data-action="'+name+'" data-on="click" data-uid="'+uid+'">'+label+'</button>';
     return '<tr data-source-uid="'+uid+'"><td data-label="账号"><b>'+esc(a.nickname)+'</b><div class="hint">'+esc(a.public?'公开模型客户端':a.auth_type==='oauth'?'OAuth 登录':'API Key / CLI 凭据')+(a.plan?' · '+esc(a.plan):'')+'</div><div class="hint">'+esc(a.org_id || a.uid)+'</div></td>'+
-      '<td data-label="状态">'+esc(state)+'<div class="hint">在途 '+fmt(a.in_flight || 0)+'</div><div class="hint">'+(a.verified_at?'调用已验证':'调用未验证')+'</div><div class="hint">'+esc(a.last_provider && a.last_provider.provider || a.last_error || '')+'</div></td>'+
+      '<td data-label="状态">'+esc(state)+'<div class="hint">在途 '+fmt(a.in_flight || 0)+'</div><div class="hint">'+(a.verified_at?'调用已验证':'调用未验证')+'</div><div class="hint">'+esc(a.console_config_error || a.last_provider && a.last_provider.provider || a.last_error || '')+'</div></td>'+
       '<td data-label="出口">'+esc(slot && slot.label || a.proxy_slot || '直接连接')+'</td>'+
       '<td data-label="调度优先级"><input id="sourcePriority_'+uid+'" aria-label="'+esc(a.nickname)+' 调度优先级" type="number" min="0" max="2147483647" value="'+esc(SOURCE_PRIORITY_DRAFTS.has(a.uid)?SOURCE_PRIORITY_DRAFTS.get(a.uid):a.priority)+'" data-action="editSourcePriority" data-on="input" data-uid="'+uid+'" style="width:92px"> '+action('saveSourcePriority','保存优先级')+'</td>'+
-      '<td data-label="余额 / 额度"><span class="source-balance-value">'+(balance.remain == null?'未知':fmt(balance.remain)+' '+esc(balance.unit==='credits'?'积分':balance.unit || unit))+'</span>'+quota+'</td>'+
+      '<td data-label="余额 / 额度"><span class="source-balance-value">'+(balance.remain == null?'未知':fmt(balance.remain)+' '+esc(balance.unit==='credits'?'积分':balance.unit || unit))+((billingStatus.balance || {}).stale?'（缓存）':'')+'</span>'+planPrice+quota+queried+(balance.note?'<div class="hint">'+esc(balance.note)+'</div>':'')+billingErrors+'</td>'+
       '<td data-label="今日用量">'+fmtTokens(today.tokens || 0)+' Token<div class="hint">免费 '+fmtTokens(today.free_tokens || 0)+'</div><div class="hint">消费 '+fmt(today.paid_cost || 0)+' '+unit+'</div></td>'+
-      '<td data-label="操作"><div class="source-account-actions">'+action('openSourceEditor','编辑')+action('toggleSourceAccount',a.enabled?'停用':'启用')+action('preferSourceAccount','优先使用')+action('openSourceTest','测试调用')+action('exportSourceAccount','导出')+action('deleteSourceAccount','删除')+'</div></td></tr>';
+      '<td data-label="操作"><div class="source-account-actions">'+action('openSourceEditor','编辑')+action('toggleSourceAccount',a.enabled?'停用':'启用')+action('preferSourceAccount','优先使用')+action('refreshSourceBilling','查询余额／额度')+action('openSourceTest','测试调用')+action('exportSourceAccount','导出')+action('deleteSourceAccount','删除')+'</div></td></tr>';
   }).join('') + '</tbody></table></div><p class="hint">优先级越小越早调用；保存后重启保留。同优先级下，免费模型均衡 Token，付费模型均衡实际消费，并计入在途请求。自动模式使用较大窗口保留会话账号。</p>';
 }
 
@@ -280,16 +293,40 @@ async function completeSourceOAuth(){
   catch(e){ if(generation===sourceOAuthGeneration) sourceEl('sourceLoginStatus').textContent='接入组织失败：'+e.message; }
 }
 
+function sourcePriceNumber(value){ return Number(value).toLocaleString('en-US',{maximumFractionDigits:8}); }
+function sourceModelPrice(model){
+  const price=model.pricing || model.reference_pricing;
+  if(!price || price.input==null && price.prompt==null && price.output==null && price.completion==null) return '上游未提供';
+  if(price.unit && !['USD/token','USD/1M tokens'].includes(price.unit)) return '价格单位：'+esc(price.unit);
+  const multiplier=price.unit==='USD/token'?1000000:1;
+  const rate=keys=>{ const key=keys.find(k=>price[k]!=null && typeof price[k]!=='boolean' && String(price[k]).trim() && Number.isFinite(Number(price[k])) && Number(price[k])>=0); return key?'$'+sourcePriceNumber(Number(price[key])*multiplier):'未知'; };
+  return '输入 '+rate(['input','prompt'])+' · 输出 '+rate(['output','completion'])+'<div class="hint">缓存读 '+rate(['cache_read','input_cache_read'])+' · 写 '+rate(['cache_write','input_cache_write'])+'</div><div class="hint">USD / 1M Token'+(model.entitlement==='subscription'?' · Pass 配额参考价':model.reference_pricing && !model.pricing?' · 参考价':'')+(price.stale?' · 缓存价格':'')+'</div>';
+}
+function sourceModelEntitlement(model){
+  return {subscription:'ClinePass 订阅',free:'免费',recommended:'积分模型',account:'积分模型',clineCloud:'Cline Cloud'}[model.entitlement]
+    || model.min_plan || (model.billing_mode==='free'?'免费':'付费');
+}
 function renderSourceModels(){
   const query=sourceEl('sourceModelSearch').value.toLowerCase();
-  const list=((sourceData || {}).models || []).filter(m=>m.upstream===accountSource && (m.id+' '+(m.name || '')).toLowerCase().includes(query));
+  const group=sourceEl('sourceModelGroup').value || 'all';
+  const list=((sourceData || {}).models || []).filter(m=>m.upstream===accountSource && (m.id+' '+(m.name || '')).toLowerCase().includes(query)
+    && (group==='all' || group==='subscription' && m.entitlement==='subscription' || group==='free' && m.billing_mode==='free'
+      || group==='paid' && m.billing_mode!=='free' && m.entitlement!=='subscription'))
+    .sort((a,b)=>(a.entitlement==='subscription'?0:a.billing_mode==='free'?1:2)-(b.entitlement==='subscription'?0:b.billing_mode==='free'?1:2) || a.id.localeCompare(b.id));
   const pages=Math.max(1,Math.ceil(list.length/50)); sourceModelPage=Math.min(sourceModelPage,pages);
   sourceEl('sourceModelsPager').textContent=sourceModelPage+' / '+pages+' 页 · '+list.length+' 个模型';
   const catalog=((sourceData || {}).catalogues || {})[accountSource] || {};
-  sourceEl('sourceCatalogStatus').textContent=catalog.error || (catalog.refreshing?'正在同步模型…':catalog.updated_at?(catalog.stale?'缓存目录已过期，正在刷新。':'目录已同步；仅显示已启用账号允许调用的模型。'):'等待模型同步；请先添加账号。');
-  sourceEl('sourceModels').innerHTML='<table class="data-cards"><thead><tr><th>模型 ID</th><th>协议</th><th>计费 / 权益</th><th>上下文</th>'+(accountSource==='cline'?'<th>上游渠道</th>':'')+'</tr></thead><tbody>'+list.slice((sourceModelPage-1)*50,sourceModelPage*50).map(m=>'<tr><td data-label="模型 ID"><code>'+esc(m.id)+'</code></td><td data-label="协议">'+esc(m.native_protocol)+'</td><td data-label="计费">'+esc(m.min_plan || m.entitlement || m.billing_mode || '未知')+'</td><td data-label="上下文">'+(m.context_length?fmtTokens(m.context_length):'上游未提供')+'</td>'+(accountSource==='cline'?'<td data-label="上游渠道"><button class="sec mini" data-action="openSourceRoute" data-on="click" data-arg="'+esc(m.upstream_model || m.id.slice(6))+'">配置渠道</button></td>':'')+'</tr>').join('')+'</tbody></table>';
+  const passCount=(catalog.groups || {}).subscription;
+  sourceEl('sourceCatalogStatus').textContent=catalog.error || (catalog.refreshing?'正在同步模型…':catalog.updated_at?(catalog.stale?'模型缓存已过期，请刷新目录。':'目录已同步；仅显示已启用账号允许调用的模型。'):'等待模型同步；请先添加账号。');
+  if(accountSource==='cline' && passCount!=null) sourceEl('sourceCatalogStatus').textContent+=' ClinePass 已采集 '+passCount+' 个模型。';
+  if(catalog.metadata_stale) sourceEl('sourceCatalogStatus').textContent+=' 价格与客户端元数据暂未同步。';
+  sourceEl('sourceModels').innerHTML='<table class="data-cards"><thead><tr><th>模型 ID</th><th>协议</th><th>计费 / 权益</th><th>价格</th><th>上下文</th>'+(accountSource==='cline'?'<th>上游渠道</th>':'')+'</tr></thead><tbody>'+list.slice((sourceModelPage-1)*50,sourceModelPage*50).map(m=>'<tr><td data-label="模型 ID"><code>'+esc(m.id)+'</code></td><td data-label="协议">'+esc(m.native_protocol)+'</td><td data-label="计费">'+esc(sourceModelEntitlement(m))+'</td><td data-label="价格">'+sourceModelPrice(m)+'</td><td data-label="上下文">'+(m.context_length?fmtTokens(m.context_length):'上游未提供')+'</td>'+(accountSource==='cline'?'<td data-label="上游渠道"><button class="sec mini" data-action="openSourceRoute" data-on="click" data-arg="'+esc(m.upstream_model || m.id.slice(6))+'">配置渠道</button></td>':'')+'</tr>').join('')+'</tbody></table>';
 }
-function filterSourceModels(){ sourceModelPage=1; renderSourceModels(); }
+function filterSourceModels(){ SOURCE_MODEL_GROUPS.set(accountSource,sourceEl('sourceModelGroup').value || 'all'); sourceModelPage=1; renderSourceModels(); }
+async function refreshSourceBilling(uid){
+  try { await getJSON(SOURCE_ROOT+'/billing?uid='+encodeURIComponent(uid)+'&refresh=1'); toast('正在查询余额与订阅额度'); await loadSourceAccounts(); }
+  catch(error){ toast('查询失败：'+error.message,'bad'); }
+}
 function pageSourceModels(step){ sourceModelPage=Math.max(1,sourceModelPage+Number(step)); renderSourceModels(); }
 function openSourceTest(uid){
   sourceTestUid=uid; sourceEl('sourceTestTitle').textContent='测试 '+((sourceList().find(a=>a.uid===uid) || {}).nickname || '账号');

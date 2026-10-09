@@ -1,4 +1,4 @@
-# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.2）
+# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.3）
 
 ## 配置账号
 
@@ -10,6 +10,8 @@
 
 也可导入原始 Cline API Key，或带 refresh token 的 OAuth 凭据。API Key 使用普通 Bearer，OAuth 使用 WorkOS 前缀。账号可以限制为全部可用模型、仅 ClinePass 订阅或仅积分模型。模型目录的「配置渠道」同时适配 direct 和 planner，支持自动选择、限定渠道、偏好顺序、排除与排序；实际使用的渠道单独记录。
 
+模型目录将官方 `clinePass` 分组置顶，可选择「ClinePass 订阅」单独查看完整模型 ID。仅订阅账号也可调用官方 `cline-free/` 模型；积分模型与 Pass 模型分别标注。公共模型采集不依赖第一个账号的登录凭据，单个账号过期不会阻断目录。
+
 ### OpenCode
 
 选择 **账号池 → OpenCode → 添加账号 (OAuth)**，通过官方 console 设备授权登录。有多个组织时需在弹窗明确选择；使用该组织下发的 provider 配置、模型 ID、协议和网关凭据，console OAuth token 不会被拿去充当旧 Zen API Key。没有可用组织网关时显示待配置状态，刷新组织配置后才能调用。有在途请求或绑定的 Responses 历史时，组织切换会被拒绝，其他组织可以另加账号。
@@ -17,6 +19,8 @@
 「导入账号凭据」还支持官方 Zen API Key，以及明确选择的 **公开免费模型（客户端模式）**。三种模式都使用参考客户端的 User-Agent、`x-opencode-client`、会话／请求／项目标识：会话稳定、请求唯一、账号与网关 Key 隔离。所选账号的 Authorization 保留；公开模式仅使用上游明确标为免费的模型。TLS 验证和绑定代理保持正常，不导入参考仓库中的随机代理、IP 扫描或关闭证书校验。
 
 参考的 opencode2api-free 自身没有 OAuth；设备 OAuth 实现依据官方 OpenCode 客户端。上游地区、套餐或公开模型权限错误保留原状态。
+
+官方组织配置可省略内置 provider 的地址与模型表，仅下发网关 API Key。FHUB 按官方客户端方式继承已知 Zen／Go 地址，结合实时模型列表和客户端元数据解析模型协议；仍使用该组织自己的网关凭据。上游没有下发可用凭据时显示具体配置问题，不将空目录标记成同步成功。
 
 ### Command Code
 
@@ -51,7 +55,9 @@ curl 'https://<公网IP>/v1/models?upstream=cline' \
 
 `GET /v1/models/{id}` 支持包含斜线的 ID。Cline 目录合并官方推荐、免费、Pass／Cloud 分组与官方客户端使用的 OpenRouter 文本输出目录；OpenRouter 价格标记为参考 USD／Token，不用于推算 Cline 实际积分。能否调用取决于账号订阅、地区和实际权益。
 
-Zen 目录取自官方 `/zen/v1/models`。协议优先读取上游元数据，缺少时采用官方 Zen 模型表：GPT、Grok、Muse 使用 Responses；Claude、部分 Qwen 系列使用 Messages；其他受支持模型使用 Chat。需要原生 Gemini 协议的模型当前不纳入目录。官方目录变化后需刷新，具体协议以模型详情为准。
+Zen 目录取自官方 `/zen/v1/models`，该接口仅返回模型 ID。FHUB 用官方客户端采用的 [models.dev](https://models.dev/) 元数据补齐价格、上下文和协议，只保留实时列表中的模型；输入与输出价格都为零时才将其作为公开免费模型。单凭 `-free` 名称不推断免费权益。协议优先读取上游元数据，缺少时采用官方 Zen 模型表；需要原生 Gemini 协议的模型当前不纳入目录。官方目录变化后需刷新，具体协议以模型详情为准。
+
+`GET /v1/models` 与 `GET /v1/models/{id}` 返回对应模型的价格与元数据。Zen 的 `pricing` 与 ClinePass 的 `reference_pricing` 使用 `unit: USD/1M tokens`；原 OpenRouter 参考价保留 `USD/token`，面板统一换算显示每百万 Token。价格缺失显示「上游未提供」。Pass 价格是参考价，不能与钱包积分混为实际扣费。元数据缓存持久化，采集失败保留已知数据并标明过期状态。
 
 ## 三种生成协议
 
@@ -90,6 +96,16 @@ curl 'https://<公网IP>/api/billing/usage?upstream=opencode_zen' \
 | Command Code | 积分 | 官方 credits 的月度、购买、免费余额；未知字段不填零 |
 
 多平台通过 `upstream` 分别查询，不能把积分和 USD 相加。含 WorkBuddy 的 Key 未指定平台时默认查询 WorkBuddy；只允许一个外部平台时默认该平台；允许多个外部平台时必须指定。`provider=deepseek|kimi|…` 仅控制兼容响应格式。Token 查询只统计当前网关 Key 发起的请求；平台每日调度统计可包含 Cline 同步到的其他实际积分消费。
+
+**账号池 → 对应来源 → 查询余额／额度** 后台刷新该来源账号：
+
+- Cline 分别查询积分、订阅套餐及官方 5 小时／每周／每月额度，显示已用百分比、剩余百分比和重置时间。一个查询失败不会覆盖其他已知结果。
+- OpenCode Go 使用官方 `/zen/go/v1/usage` 查询组织网关 Key 对应的订阅额度；Zen 钱包余额仍需在官方控制台查看。没有订阅权益时显示查询错误，旧额度标记为缓存。
+- Command Code 保留官方积分、套餐及请求条数窗口，WorkBuddy 保留原积分查询。
+
+面板鉴权的 `GET /accounts/upstreams/billing?uid=<账号ID>` 或 `?upstream=cline` 返回账号的 `balance`、`subscription`、`quota`、`billing_status` 和查询错误。加 `refresh=1` 后异步刷新，`refreshing` 表示进度，账号 SSE 会推送结果；该接口需要 `X-Panel-Token`，不返回凭据。`GET /accounts/upstreams/models?upstream=cline&group=subscription` 可单独查询 Pass 目录与参考价格。
+
+公共 `GET /v1/balance?upstream=cline` 继续返回去重的积分总额，并提供 `quota_windows` 中各窗口已知账号的剩余百分比范围；不将百分比相加。失败的缓存额度不参与范围统计，缓存余额使 `complete=false`，`stale_count` 表示缓存余额数量。
 
 ## Responses 续接、分支与删除
 

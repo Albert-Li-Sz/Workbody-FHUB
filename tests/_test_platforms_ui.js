@@ -50,5 +50,25 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,'../dashboard_static/account
  await context.saveSourceAccount();assert(!('enabled' in posts.at(-1).body),'editing a disabled public account cannot enable it implicitly');
  await context.switchAccountSource('workbuddy');assert(!element('workbuddyAccountsPanel').hidden);assert(element('sourceAccountsPanel').hidden);
  assert(posts.every(p=>!p.url.startsWith('/accounts/login')),'source actions never touch WorkBuddy login');
+ context.getJSON=getJSON;
+ data.models=[{upstream:'cline',id:'cline/vendor/paid',billing_mode:'paid',native_protocol:'chat'},
+   {upstream:'cline',id:'cline/cline-pass/fixture',entitlement:'subscription',billing_mode:'paid',native_protocol:'chat',reference_pricing:{input:0.3,output:1.2,cache_read:0.006,unit:'USD/1M tokens'}},
+   {upstream:'cline',id:'cline/cline-free/fixture',entitlement:'free',billing_mode:'free',native_protocol:'chat'}];
+ data.models_revision='2';data.catalogues.cline={groups:{subscription:1},updated_at:1,stale:true};
+ account.quota={fiveHour:{percent_used:25,remaining_percent:75},monthly:{percent_used:10,remaining_percent:90}};
+ await context.switchAccountSource('cline');
+ assert(element('sourceModels').innerHTML.indexOf('cline/cline-pass/fixture')<element('sourceModels').innerHTML.indexOf('cline/vendor/paid'));
+ assert(element('sourceModels').innerHTML.includes('$0.006'),'small cache prices must retain precision');
+ assert(element('sourceCatalogStatus').textContent.includes('ClinePass 已采集 1'));
+ assert(!element('sourceCatalogStatus').textContent.includes('正在刷新'),'expired cache alone is not an active refresh');
+ assert(element('sourceAccountsTable').innerHTML.includes('剩余 90%'));
+ account.billing_status={quota:{stale:true,updated_at:1}};
+ context.renderSourceAccounts();
+ assert(element('sourceAccountsTable').innerHTML.includes('剩余 90%（已用 10%）（缓存）'));
+ assert(context.sourceModelPrice({pricing:{input:-1,output:true,unit:'USD/1M tokens'}}).includes('输入 未知 · 输出 未知'));
+ element('sourceModelGroup').value='subscription';context.filterSourceModels();
+ assert(element('sourceModels').innerHTML.includes('cline/cline-pass/fixture'));
+ assert(!element('sourceModels').innerHTML.includes('cline/vendor/paid'));
+ assert(!element('sourceModels').innerHTML.includes('cline/cline-free/fixture'));
  console.log('additional account sources: isolation, drafts, editing, batch, routes and persistence passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

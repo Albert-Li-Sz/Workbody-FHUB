@@ -2,7 +2,7 @@ ARG NGINX_IMAGE=public.ecr.aws/docker/library/nginx:1.28-alpine
 FROM ${NGINX_IMAGE}
 
 LABEL org.opencontainers.image.title="Workbody-FHUB Nginx" \
-      org.opencontainers.image.version="1.2.2" \
+      org.opencontainers.image.version="1.2.3" \
       org.opencontainers.image.source="https://github.com/Albert-Li-Sz/Workbody-FHUB" \
       org.opencontainers.image.description="Nginx frontend with automatic IP/domain ACME renewal"
 

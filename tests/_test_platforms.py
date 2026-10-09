@@ -60,6 +60,151 @@ class PlatformsTests(unittest.TestCase):
         self.assertNotIn('gemini-fixture',zen)
         self.assertEqual(zen['named-free']['billing_mode'],'paid')
         self.assertEqual(zen['observed-free']['billing_mode'],'free')
+        partial=U.parse_catalog('opencode_zen',{'models':[{'id':'partial','pricing':{'input':0}}]})
+        self.assertEqual(partial['partial']['billing_mode'],'paid')
+
+    def test_opencode_live_ids_use_registry_prices_without_adding_removed_models(self):
+        live = {'object':'list', 'data':[{'id':'big-pickle','object':'model','owned_by':'opencode'},
+            {'id':'mimo-v2.6-flash-free'}, {'id':'paid-model'}, {'id':'unpriced-free'}]}
+        registry = {'opencode':{'models':{
+            'big-pickle':{'name':'Big Pickle','cost':{'input':0,'output':0},'limit':{'context':200000}},
+            'mimo-v2.6-flash-free':{'cost':{'input':0,'output':0}},
+            'paid-model':{'cost':{'input':1,'output':2}},
+            'removed-free':{'cost':{'input':0,'output':0}}}}}
+        calls=[]
+        def transport(request, **kwargs):
+            calls.append(request)
+            return io.BytesIO(json.dumps(registry if request.full_url == 'https://models.dev/api.json' else live).encode())
+        self.manager.transport=transport
+        self.manager.import_accounts({'upstream':'opencode_zen','public':True,'enabled':True})
+        cache=self.manager.refresh_catalog('opencode_zen')
+        public=next(a for a in self.manager.accounts.values() if a.document.get('public'))
+        for account in self.manager.accounts.values():
+            if account.upstream=='opencode_zen' and account is not public: account.document['enabled']=False
+        visible={item['upstream_model'] for item in self.manager.models(['opencode_zen'])}
+        self.assertEqual(visible,{'big-pickle','mimo-v2.6-flash-free'})
+        self.assertNotIn('removed-free',cache['models'])
+        self.assertEqual(cache['models']['paid-model']['pricing']['unit'],'USD/1M tokens')
+        self.assertFalse(next(r for r in calls if r.full_url=='https://models.dev/api.json').has_header('Authorization'))
+
+    def test_cline_pass_feed_does_not_depend_on_first_accounts_token(self):
+        feed={'recommended':[{'id':'vendor/paid'}], 'free':[{'id':'cline-free/fixture'}],
+              'clinePass':[{'id':'cline-pass/fixture','name':'Pass Fixture'}]}
+        self.manager.ensure_token=mock.Mock(side_effect=U.PlatformError('expired token',401))
+        def transport(request, **kwargs):
+            if request.full_url.endswith('/recommended-models'):
+                self.assertFalse(request.has_header('Authorization'))
+                return io.BytesIO(json.dumps(feed).encode())
+            raise OSError('optional metadata unavailable')
+        self.manager.transport=transport
+        cache=self.manager.refresh_catalog('cline')
+        self.assertEqual(cache['models']['cline-pass/fixture']['entitlement'],'subscription')
+        self.assertEqual(cache['groups']['subscription'],1)
+        self.manager.ensure_token.assert_not_called()
+
+    def test_console_defaults_resolve_official_config_with_only_a_key(self):
+        registry={'opencode':{'api':'https://opencode.ai/zen/v1','npm':'@ai-sdk/openai-compatible',
+            'models':{'big-pickle':{'cost':{'input':0,'output':0}},'claude-fixture':{'provider':{'npm':'@ai-sdk/anthropic'}}}}}
+        self.manager.transport=lambda request,**kwargs:io.BytesIO(json.dumps(
+            registry if request.full_url=='https://models.dev/api.json' else {'data':[{'id':'big-pickle'},{'id':'claude-fixture'}]}).encode())
+        account_uid=self.manager.import_accounts({'upstream':'opencode_zen','auth_type':'oauth',
+            'access_token':'console-token','org_id':'org-one'})[0]['uid']
+        account=self.manager.accounts[account_uid]
+        self.manager.logins._request=lambda url,**kwargs:([{'id':'org-one'}] if url.endswith('/orgs') else
+            {'config':{'provider':{'opencode':{'options':{'apiKey':'organization-gateway-key'}}}}})
+        self.manager.refresh_console(account)
+        self.assertTrue(account.view()['credential_ready'])
+        self.assertTrue(account.allows('big-pickle'))
+        self.assertEqual(self.manager.model('opencode_zen','claude-fixture')['native_protocol'],'messages')
+        self.assertNotIn('organization-gateway-key',json.dumps(self.manager.snapshot()))
+
+    def test_cline_balance_queries_plan_and_all_quota_windows(self):
+        account=self.cline[0]
+        documents={'/users/me':{'data':{'id':'user-one'}}, '/users/user-one/balance':{'data':{'balance':7.5}},
+            '/users/me/plan':{'data':{'plan':{'id':'pass','displayName':'ClinePass','pricePerSeatCents':999},
+                'currentPeriodEnd':'2026-11-01T00:00:00Z'}},
+            '/users/me/plan/usage-limits':{'data':{'limits':[{'type':kind,'percentUsed':used,'resetsAt':'2026-11-01T00:00:00Z'}
+                for kind,used in [('five_hour',25),('weekly',50),('monthly',10)]]}}}
+        self.manager.request_json=lambda upstream,path,*args,**kwargs:documents[path]
+        self.manager.refresh_balance(account)
+        view=account.view()
+        self.assertEqual(view['balance']['remain'],7.5)
+        self.assertEqual(view['subscription']['name'],'ClinePass')
+        self.assertEqual(view['quota']['monthly']['remaining_percent'],90)
+        self.assertEqual(view['quota']['fiveHour']['percent_used'],25)
+
+    def test_opencode_one_broken_oauth_does_not_block_an_api_key(self):
+        self.manager.import_accounts({'upstream':'opencode_zen','auth_type':'oauth','access_token':'expired-console','org_id':'org'})
+        self.manager.refresh_console=mock.Mock(side_effect=U.PlatformError('expired console',401))
+        self.manager.opencode_catalog=lambda account:{'big-pickle':{'id':'big-pickle','native_protocol':'chat','billing_mode':'free'}}
+        self.manager.registry_metadata=lambda account=None:({},True)
+        cache=self.manager.refresh_catalog('opencode_zen')
+        self.assertIn('big-pickle',cache['models'])
+        self.assertIn('部分',self.manager.catalog_errors['opencode_zen'])
+
+    def test_failed_optional_quota_query_retains_known_balance(self):
+        def request(upstream,path,*args,**kwargs):
+            if path=='/users/me':return {'id':'user-one'}
+            if path.endswith('/balance'):return {'balance':0}
+            raise U.PlatformError('not entitled',403)
+        self.manager.request_json=request
+        self.manager.refresh_balance(self.cline[0])
+        self.assertEqual(self.cline[0].view()['balance']['remain'],0)
+        self.assertIn('quota',self.cline[0].view()['billing_errors'])
+
+    def test_opencode_go_usage_does_not_invent_a_wallet_balance(self):
+        account=next(a for a in self.manager.accounts.values() if a.upstream=='opencode_zen')
+        def transport(request,**kwargs):
+            self.assertEqual(request.full_url,'https://opencode.ai/zen/go/v1/usage')
+            self.assertEqual(request.get_header('Authorization'),'Bearer zen')
+            return io.BytesIO(json.dumps({'usage':{'rolling':{'percent':20,'resetsAt':'2026-11-01T00:00:00Z'},
+                'monthly':{'percent':100,'resetsAt':'2026-11-01T00:00:00Z'}}}).encode())
+        self.manager.transport=transport
+        self.manager.refresh_balance(account)
+        self.assertIsNone(account.view()['balance']['remain'])
+        self.assertEqual(account.view()['quota']['fiveHour']['remaining_percent'],80)
+        self.assertEqual(account.view()['quota']['monthly']['remaining_percent'],0)
+        self.manager.transport=mock.Mock(side_effect=U.PlatformError('no longer entitled',403))
+        self.manager.refresh_balance(account)
+        self.assertTrue(account.view()['billing_status']['quota']['stale'])
+        self.assertTrue(account.view()['billing_status']['subscription']['stale'])
+        self.assertNotIn('monthly',self.manager.balance('opencode_zen')['quota_windows'])
+
+    def test_billing_failure_marks_cached_quota_stale_without_blocking_other_queries(self):
+        account=self.cline[0]
+        account.document.update(balance={'remain':5,'unit':'credits'}, quota={'monthly':{'remaining_percent':90}},
+            billing_status={'balance':{'updated_at':1},'quota':{'updated_at':1}})
+        def request(upstream,path,*args,**kwargs):
+            if path=='/users/me/plan':return {'plan':{'id':'pass','displayName':'ClinePass'}}
+            raise U.PlatformError('unavailable',403)
+        self.manager.request_json=request
+        self.manager.refresh_balance(account)
+        view=account.view()
+        self.assertEqual(view['subscription']['name'],'ClinePass')
+        self.assertEqual(view['balance']['remain'],5)
+        self.assertTrue(view['billing_status']['balance']['stale'])
+        self.assertTrue(view['billing_status']['quota']['stale'])
+        self.assertFalse(self.manager.balance('cline')['complete'])
+        self.assertNotIn('monthly',self.manager.balance('cline')['quota_windows'])
+
+    def test_registry_cache_survives_restart_and_invalid_timestamp(self):
+        registry={'opencode':{'models':{'big-pickle':{'cost':{'input':0,'output':0}}}}}
+        self.manager.transport=lambda *args,**kwargs:io.BytesIO(json.dumps(registry).encode())
+        self.assertFalse(self.manager.registry_metadata()[1])
+        cache_path=os.path.join(self.manager.root,'client-model-metadata.json')
+        with open(cache_path) as file:cached=json.load(file)
+        cached['updated_at']='invalid'
+        with open(cache_path,'w') as file:json.dump(cached,file)
+        manager=U.Manager(self.accounts,self.db,transport=mock.Mock(side_effect=OSError('offline')))
+        providers,stale=manager.registry_metadata()
+        self.assertTrue(stale)
+        self.assertEqual(providers['opencode']['models']['big-pickle']['cost']['output'],0)
+
+    def test_model_revision_changes_when_scope_changes(self):
+        previous=self.manager.snapshot()['models_revision']
+        self.manager.update_account(self.cline[0].uid,{'access_scope':'subscription'})
+        self.assertNotEqual(previous,self.manager.snapshot()['models_revision'])
+        self.assertTrue(self.cline[0].allows('cline-free/fixture'))
 
     def test_priority_persistence_and_platform_local_selection(self):
         self.manager.update_account(self.cline[1].uid, {'priority':1,'models':['allowed-*']})

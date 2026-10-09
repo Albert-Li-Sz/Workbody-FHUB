@@ -290,7 +290,7 @@
       <div id="sourceAccountsTable"></div>
     </section>
     <section>
-      <div class="toolbar"><h2>模型目录</h2><input id="sourceModelSearch" aria-label="搜索此来源模型" placeholder="搜索模型 ID 或名称" data-action="filterSourceModels" data-on="input"></div>
+      <div class="toolbar"><h2>模型目录</h2><select id="sourceModelGroup" aria-label="模型权益筛选" data-action="filterSourceModels" data-on="change"><option value="all">全部权益</option><option value="subscription">ClinePass 订阅</option><option value="free">免费模型</option><option value="paid">积分／付费模型</option></select><input id="sourceModelSearch" aria-label="搜索此来源模型" placeholder="搜索模型 ID 或名称" data-action="filterSourceModels" data-on="input"></div>
       <p class="hint" id="sourceCatalogStatus"></p><div id="sourceModels" class="table-wrap"></div>
       <div class="toolbar"><button class="sec mini" data-action="pageSourceModels" data-on="click" data-arg="-1">上一页</button><span id="sourceModelsPager" class="hint"></span><button class="sec mini" data-action="pageSourceModels" data-on="click" data-arg="1">下一页</button></div>
     </section>
