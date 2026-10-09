@@ -1,4 +1,4 @@
-# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.3）
+# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.4）
 
 ## 配置账号
 
@@ -14,9 +14,15 @@
 
 ### OpenCode
 
-选择 **账号池 → OpenCode → 添加账号 (OAuth)**，通过官方 console 设备授权登录。有多个组织时需在弹窗明确选择；使用该组织下发的 provider 配置、模型 ID、协议和网关凭据，console OAuth token 不会被拿去充当旧 Zen API Key。没有可用组织网关时显示待配置状态，刷新组织配置后才能调用。有在途请求或绑定的 Responses 历史时，组织切换会被拒绝，其他组织可以另加账号。
+选择 **账号池 → OpenCode → 添加账号 (OAuth)**，通过官方 console 设备授权登录。有多个组织时需在弹窗明确选择；使用该组织下发的 provider 配置、模型 ID、协议和网关凭据，官方 `{env:OPENCODE_CONSOLE_TOKEN}` 占位符仅解析为所选账号当前的 OAuth token；不读取进程环境或文件引用，不把它发送到旧版 Zen Key 网关。没有可用组织网关时显示待配置状态，刷新组织配置后才能调用。有在途请求或绑定的 Responses 历史时，组织切换会被拒绝，其他组织可以另加账号。
 
 「导入账号凭据」还支持官方 Zen API Key，以及明确选择的 **公开免费模型（客户端模式）**。三种模式都使用参考客户端的 User-Agent、`x-opencode-client`、会话／请求／项目标识：会话稳定、请求唯一、账号与网关 Key 隔离。所选账号的 Authorization 保留；公开模式仅使用上游明确标为免费的模型。TLS 验证和绑定代理保持正常，不导入参考仓库中的随机代理、IP 扫描或关闭证书校验。
+
+OAuth 组织配置同时包含 Zen 和 Go 时，两组网关、请求头和模型协议独立保存。Go 模型使用 **`opencode/go/<模型ID>`**，原 **`opencode/<模型ID>`** 继续使用 Zen；同名模型不能串用凭据、地址或计费。导入／导出、重启与 token 刷新保留此关联，旧版 OAuth 账号会自动重新同步组织配置，无需删除重加。仅导入 Zen API Key 不会自动获得 Go 路由。
+
+官方 `cost` 显示为 USD／百万 Token；Go 显示订阅配额参考价，促销零价模型继续使用免费 Token 公平调度。Go 已确认额度耗尽和套餐限流只影响 Go，仍可使用同账号的 Zen 模型。钱包余额没有公开接口时显示未知，不以订阅剩余百分比冒充余额。
+
+上游 `FreeTierError` 会返回 `opencode_free_tier_restricted`，`ModelDeprecated` 会返回 `model_deprecated`，并保留原生成 HTTP 状态。普通文本请求可能不符合某些免费模型的客户端要求；FHUB 保留客户端提交的工具与历史，不伪造工具或改投其他模型。模型目录可用和 OAuth 有效不保证所有免费模型允许任意请求。面板测试中的上游 401／403 返回 502 并保留具体原因，不再误退出面板会话。
 
 参考的 opencode2api-free 自身没有 OAuth；设备 OAuth 实现依据官方 OpenCode 客户端。上游地区、套餐或公开模型权限错误保留原状态。
 
@@ -148,3 +154,13 @@ curl 'https://<公网IP>/api/billing/usage?upstream=opencode_zen' \
 - [CommandCodeGo-manager 856430b](https://github.com/learningdog1/CommandCodeGo-manager/tree/856430ba9e10f78c15c80d7f4d1370864b80cd57)：CLI 凭据导入、额度与切换；wire 格式另核对官方 `command-code@1.79.2`。
 
 这些新增内容从正式 1.2.2 源码与镜像提供。测试分为本地协议回归、浏览器界面检查和真实上游：前两类使用独立模拟数据，真实账号授权／生成需要合法凭据，不能用模拟通过代替真实联调。
+
+## 1.2.4 联调与来源
+
+已用合法 OAuth 账号完成 Zen `space-bunny-free` 的三协议流式／非流式请求，以及 Go 的 DeepSeek Chat、Claude Messages、GPT Responses；Responses 续接保留上一轮内容。该结果仅覆盖测试账号和模型，其他账号按其实际套餐与上游权限使用。
+
+- [OpenCode Go 官方说明与网关](https://opencode.ai/docs/go/)
+- [OpenCode Zen 官方说明](https://opencode.ai/docs/zen/)
+- [官方客户端凭据变量解析](https://github.com/anomalyco/opencode/blob/388406238bd5ca15564a762840a2362c3a45bd9c/packages/opencode/src/config/variable.ts)
+- [官方客户端模型与协议选择](https://github.com/anomalyco/opencode/blob/388406238bd5ca15564a762840a2362c3a45bd9c/packages/opencode/src/provider/provider.ts)
+- [Anthropic 缓存 Token 计数规则](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)

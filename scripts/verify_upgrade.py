@@ -29,7 +29,7 @@ from scripts.package_release import package
 
 PASSWORD = "synthetic-upgrade-password"
 KEY = "synthetic-upgrade-api-key"
-COMPOSE_VERSIONS = ("1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.2.1", "1.2.2")
+COMPOSE_VERSIONS = ("1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.2.1", "1.2.2", "1.2.3")
 
 
 def extract_source(archive, directory):
@@ -107,9 +107,24 @@ def seed_new_platform_and_history(directory, existing=None):
         if existing is None:
             manager.import_accounts([{"upstream":"cline", "access_token":"synthetic-upgrade-cline",
                                       "enabled":False, "priority":4}])
-        account = next(iter(manager.accounts.values()))
+            import wb_device_auth
+            gateway = wb_device_auth.console_gateway({"provider": {name: {
+                "api": "https://opencode.ai/inference/"+path+"/v1", "npm":"@ai-sdk/openai-compatible",
+                "options":{"apiKey":"{env:OPENCODE_CONSOLE_TOKEN}","headers":{"x-opencode-org-id":"fixture-org"}},
+                "models":{"fixture-model":{"cost":{"input":1,"output":2}}}}
+                for name,path in (("opencode","openai"),("opencode-go","go/openai"))}})
+            manager.import_accounts({"upstream":"opencode_zen","auth_type":"oauth",
+                "access_token":"synthetic-upgrade-console","org_id":"fixture-org", "priority":8,
+                "enabled":False,"console_gateway":gateway})
+        account = next(a for a in manager.accounts.values() if a.upstream=="cline")
         assert account.priority == 4 and account.enabled is False
         assert account.document["access_token"] == "synthetic-upgrade-cline"
+        console = next(a for a in manager.accounts.values() if a.upstream=="opencode_zen")
+        assert console.priority==8 and console.enabled is False
+        assert console.document["access_token"]=="synthetic-upgrade-console"
+        assert console.document["org_id"]=="fixture-org"
+        assert console.allows("fixture-model") and console.allows("go/fixture-model")
+        assert manager.headers(console, model="go/fixture-model")["Authorization"]=="Bearer synthetic-upgrade-console"
         store = wb_responses.ResponseStore(database, str(accounts))
         if existing is None:
             _, context = store.prepare({"model":"fixture-model", "input":"synthetic history"},
@@ -151,7 +166,7 @@ def compose_case(old_version, new_image, old_image, root):
     try:
         update.run(command+["up","-d","--pull","never"],directory)
         update.wait_application(command,"workbody-fhub",directory,old_version,60)
-        old_schema = 3 if old_version in ("1.2.1", "1.2.2") else (2 if old_version in ("1.1.2", "1.1.3") else 1)
+        old_schema = 3 if old_version in ("1.2.1", "1.2.2", "1.2.3") else (2 if old_version in ("1.1.2", "1.1.3") else 1)
         assert_data(directory,old_schema)
         old_history = seed_new_platform_and_history(directory) if old_schema == 3 else None
         update.upgrade(arguments(directory,compose_file=[str(compose)]))

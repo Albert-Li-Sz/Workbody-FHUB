@@ -11,6 +11,7 @@ os.environ["WB_PROXY_USAGE_DIR"] = _startup_dir.name
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_proxy as P
+import wb_protocol_bridge as B
 
 PASS = FAIL = 0
 
@@ -139,8 +140,20 @@ check("tool_use block is present",
       msg["content"][1]["type"] == "tool_use" and msg["content"][1]["input"] == {"cmd": "ls"}, msg["content"])
 check("stop_reason maps tool_calls -> tool_use", msg["stop_reason"] == "tool_use", msg["stop_reason"])
 check("usage maps cache fields",
-      msg["usage"] == {"input_tokens": 10, "output_tokens": 5,
+      msg["usage"] == {"input_tokens": 4, "output_tokens": 5,
                        "cache_read_input_tokens": 4, "cache_creation_input_tokens": 2}, msg["usage"])
+check("cache buckets plus uncached input equal the upstream prompt total",
+      sum(msg["usage"][name] for name in ("input_tokens","cache_read_input_tokens","cache_creation_input_tokens")) == 10,
+      msg["usage"])
+native_usage = {"input_tokens": 3,"output_tokens": 5,"cache_read_input_tokens": 4,"cache_creation_input_tokens": 2}
+check("native Messages cache writes survive protocol round trip",
+      P._anthropic_usage(B.usage(native_usage,"messages","opencode_zen")) == native_usage)
+for bad in (-1, float("inf"), float("nan"), "invalid"):
+    try:
+        cleaned = P._anthropic_usage({"prompt_tokens":bad,"completion_tokens":bad,"prompt_cache_hit_tokens":bad,"prompt_cache_write_tokens":bad})
+        check("malformed cache usage stays finite and nonnegative " + str(bad), all(value == 0 for value in cleaned.values()), cleaned)
+    except (ValueError, TypeError, OverflowError) as exc:
+        check("malformed cache usage does not raise " + str(bad), False, str(exc))
 check("no unsigned thinking is replayed", "secret" not in json.dumps(msg, ensure_ascii=False), msg)
 
 print()

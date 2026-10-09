@@ -70,5 +70,33 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,'../dashboard_static/account
  assert(element('sourceModels').innerHTML.includes('cline/cline-pass/fixture'));
  assert(!element('sourceModels').innerHTML.includes('cline/vendor/paid'));
  assert(!element('sourceModels').innerHTML.includes('cline/cline-free/fixture'));
+ assert.equal(element('sourceAccountsPanel').dataset.source,'cline');
+ assert.equal(element('sourceCatalogStatus').dataset.tone,'warn');
+ assert.equal(context.sourceModelEntitlement({upstream:'opencode_zen',entitlement:'subscription'}),'OpenCode Go 订阅');
+ const zen=data.accounts.find(a=>a.uid==='zen-fixture');zen.enabled=true;zen.cooldowns={'paid-model':300};
+ zen.verified_at=1;zen.billing_errors={quota:'<unsafe>'};
+ data.models.push({upstream:'opencode_zen',id:'opencode/go/fixture',entitlement:'subscription',billing_mode:'paid',native_protocol:'chat'});
+ data.models_revision='3';data.catalogues.opencode_zen={updated_at:Date.now()/1000};
+ await context.switchAccountSource('opencode_zen');
+ assert.equal(element('sourceAccountsPanel').dataset.source,'opencode_zen');
+ assert.equal(element('sourceSubscriptionOption').textContent,'OpenCode Go 订阅');
+ assert(element('sourceAccountsTable').innerHTML.includes('部分模型冷却'),'one failed model must not mark the entire account unavailable');
+ assert(element('sourceAccountsTable').innerHTML.includes('badge ok'),'confirmed calls have a success badge');
+ assert(element('sourceAccountsTable').innerHTML.includes('hint source-notice') && element('sourceAccountsTable').innerHTML.includes('data-tone="bad"'));
+ assert(!element('sourceAccountsTable').innerHTML.includes('<unsafe>'),'error content remains escaped');
+ assert(element('sourceModels').innerHTML.includes('badge subscription'),'subscription models have distinct labels');
+ const css=fs.readFileSync(path.join(__dirname,'../dashboard_static/workspace.css'),'utf8');
+ const blocks=[...css.matchAll(/(?:^:root|^\[data-theme="dark"\])\{([^}]+)/gm)];
+ assert.equal(blocks.length,2);
+ const luminance=hex=>{let text=hex.slice(1);if(text.length===3)text=[...text].map(c=>c+c).join('');
+   return [0.2126,0.7152,0.0722].reduce((total,weight,i)=>{const v=parseInt(text.slice(i*2,i*2+2),16)/255;
+     return total+weight*(v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4);},0);};
+ for(const block of blocks){
+   const colors=Object.fromEntries([...block[1].matchAll(/--([a-z0-9-]+):\s*(#[0-9a-fA-F]+)/g)].map(m=>[m[1],m[2]]));
+   for(const key of ['accent','accent2','warn','bad','info','think','source-wb','source-cline','source-opencode','source-commandcode']){
+     const fg=luminance(colors[key]),bg=luminance(colors[key+'-soft']);
+     assert((Math.max(fg,bg)+0.05)/(Math.min(fg,bg)+0.05)>=4.5,key+' label contrast must be at least 4.5 in both themes');
+   }
+ }
  console.log('additional account sources: isolation, drafts, editing, batch, routes and persistence passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

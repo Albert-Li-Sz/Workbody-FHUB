@@ -319,9 +319,9 @@ def _best_cached_tokens(usage):
     """
     if not isinstance(usage, dict):
         return 0
-    prompt_details = usage.get("prompt_tokens_details") or {}
-    input_details = usage.get("input_tokens_details") or {}
-    details = usage.get("completion_tokens_details") or {}
+    prompt_details = usage.get("prompt_tokens_details") if isinstance(usage.get("prompt_tokens_details"), dict) else {}
+    input_details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
+    details = usage.get("completion_tokens_details") if isinstance(usage.get("completion_tokens_details"), dict) else {}
     for value in (prompt_details.get("cached_tokens"),
                   usage.get("prompt_cache_hit_tokens"),
                   usage.get("cache_read_input_tokens"),
@@ -330,9 +330,9 @@ def _best_cached_tokens(usage):
                   details.get("cached_tokens")):
         try:
             number = float(value or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
-        if number > 0:
+        if math.isfinite(number) and number > 0:
             # Token counts must stay integers: the Codex client parses
             # response.completed strictly and rejects 123.0 (invalid number).
             return int(number)
@@ -355,7 +355,7 @@ def normalize_usage_cache_aliases(usage):
     usage["cache_read_input_tokens"] = best
     usage["cached_tokens"] = best
     usage["prompt_cache_hit_tokens"] = best
-    prompt_details = dict(usage.get("prompt_tokens_details") or {})
+    prompt_details = dict(usage["prompt_tokens_details"]) if isinstance(usage.get("prompt_tokens_details"), dict) else {}
     prompt_details["cached_tokens"] = best
     usage["prompt_tokens_details"] = prompt_details
     if isinstance(usage.get("input_tokens_details"), dict):
@@ -6613,25 +6613,22 @@ def _anthropic_usage(usage):
     }
     if not isinstance(usage, dict):
         return out
-    try:
-        out["input_tokens"] = int(usage.get("prompt_tokens") or 0)
-    except (TypeError, ValueError):
-        pass
-    try:
-        out["output_tokens"] = int(usage.get("completion_tokens") or 0)
-    except (TypeError, ValueError):
-        pass
-    cached = usage.get("prompt_cache_hit_tokens")
-    if cached is None:
-        cached = _best_cached_tokens(usage)
-    try:
-        out["cache_read_input_tokens"] = int(cached or 0)
-    except (TypeError, ValueError):
-        pass
-    try:
-        out["cache_creation_input_tokens"] = int(usage.get("prompt_cache_write_tokens") or 0)
-    except (TypeError, ValueError):
-        pass
+    def count(value):
+        try:
+            return max(0, int(value or 0)) if not isinstance(value, bool) else 0
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    prompt = count(usage.get("prompt_tokens"))
+    read = _best_cached_tokens(usage)
+    written = count(usage.get("prompt_cache_write_tokens", usage.get("cache_creation_input_tokens")))
+    if prompt:
+        read = min(read, prompt)
+        written = min(written, prompt - read)
+    # OpenAI prompt_tokens includes cache reads/writes; Anthropic input_tokens
+    # is only the uncached remainder. The three input buckets sum to the total.
+    out.update(input_tokens=max(0, prompt - read - written),
+               cache_read_input_tokens=read, cache_creation_input_tokens=written,
+               output_tokens=count(usage.get("completion_tokens")))
     service_tier = usage.get("service_tier")
     if service_tier:
         out["service_tier"] = service_tier
@@ -8410,7 +8407,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(200, RESPONSE_STORE.delete_conversation(payload.get("conversation")))
             return self._error(404, "not found", "invalid_request_error")
         except (wb_platforms.PlatformError, wb_responses.ResponseError) as exc:
-            return self._error(exc.status, str(exc), "invalid_request_error", exc.code)
+            # Panel authentication was checked before this operation. An
+            # upstream credential failure must not log the operator out.
+            status = 502 if isinstance(exc, wb_platforms.PlatformError) and exc.status in (401, 403) else exc.status
+            return self._error(status, str(exc), "invalid_request_error", exc.code)
         except ValueError as exc:
             return self._error(400, str(exc), "invalid_request_error")
         except Exception as exc:

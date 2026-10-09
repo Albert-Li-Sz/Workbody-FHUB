@@ -127,6 +127,22 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(first["x-opencode-project"], second["x-opencode-project"])
         self.assertNotEqual(first["x-opencode-request"], second["x-opencode-request"])
 
+    def test_upstream_auth_failure_keeps_the_panel_session_and_error_detail(self):
+        account = next(a for a in self.manager.accounts.values() if a.upstream == "opencode_zen")
+        for upstream_status in (401, 403):
+            with self.subTest(upstream_status=upstream_status):
+                failure = U.PlatformError("opencode_zen rejected the request (HTTP %d)" % upstream_status,
+                                          upstream_status, "upstream_error")
+                with mock.patch.object(self.manager, "open", side_effect=failure):
+                    status, value = self.management("/accounts/upstreams/accounts/test", {
+                        "uid": account.uid, "model": "opencode/native-responses"})
+                self.assertEqual(status, 502, value)
+                self.assertEqual(value["error"]["code"], "upstream_error")
+                self.assertIn("HTTP %d" % upstream_status, value["error"]["message"])
+                self.assertEqual(self.management("/accounts/upstreams?models=0")[0], 200)
+        self.assertEqual(self.request("/accounts/upstreams/accounts/test", {
+            "uid": account.uid, "model": "opencode/native-responses"})[0], 401)
+
     def test_command_interruption_records_partial_usage(self):
         status,raw,_=self.request("/v1/responses",self.body("responses","commandcode/fixture",True,"abort_stream"))
         self.assertEqual(status,200)

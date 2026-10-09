@@ -87,6 +87,14 @@ class PlatformsTests(unittest.TestCase):
         self.assertEqual(cache['models']['paid-model']['pricing']['unit'],'USD/1M tokens')
         self.assertFalse(next(r for r in calls if r.full_url=='https://models.dev/api.json').has_header('Authorization'))
 
+    def test_catalog_respects_per_model_protocols_and_retired_models(self):
+        models=U.parse_catalog('opencode_zen',{'models':{
+            'native-anthropic':{'npm':'@ai-sdk/openai-compatible','provider':{'npm':'@ai-sdk/anthropic'}},
+            'native-google':{'provider':{'npm':'@ai-sdk/google'}},
+            'disabled':{'disabled':True},'retired':{'status':'deprecated'}}})
+        self.assertEqual(models['native-anthropic']['native_protocol'],'messages')
+        self.assertEqual(set(models),{'native-anthropic'})
+
     def test_cline_pass_feed_does_not_depend_on_first_accounts_token(self):
         feed={'recommended':[{'id':'vendor/paid'}], 'free':[{'id':'cline-free/fixture'}],
               'clinePass':[{'id':'cline-pass/fixture','name':'Pass Fixture'}]}
@@ -117,6 +125,41 @@ class PlatformsTests(unittest.TestCase):
         self.assertTrue(account.allows('big-pickle'))
         self.assertEqual(self.manager.model('opencode_zen','claude-fixture')['native_protocol'],'messages')
         self.assertNotIn('organization-gateway-key',json.dumps(self.manager.snapshot()))
+
+    def test_console_template_request_uses_current_token_and_model_endpoint(self):
+        gateway={'url':'https://opencode.ai/inference/openai/v1','provider':'opencode',
+            'api_key':'{env:OPENCODE_CONSOLE_TOKEN}','headers':{'x-opencode-org-id':'org-one'},
+            'npm':'@ai-sdk/openai-compatible','models':{'claude-fixture':{'provider':{
+                'npm':'@ai-sdk/anthropic','api':'https://opencode.ai/inference/anthropic/v1'}}}}
+        uid=self.manager.import_accounts({'upstream':'opencode_zen','auth_type':'oauth',
+            'access_token':'console-access','org_id':'org-one','console_gateway':gateway})[0]['uid']
+        account=self.manager.accounts[uid]
+        calls=[]
+        def transport(request,**kwargs):
+            calls.append(request)
+            headers={name.lower():value for name,value in request.header_items()}
+            if headers.get('authorization')!='Bearer console-access' or headers.get('x-opencode-org-id')!='org-one':
+                raise urllib.error.HTTPError(request.full_url,401,'Unauthorized',{},io.BytesIO(b'{"error":"invalid credential"}'))
+            self.assertEqual(request.full_url,'https://opencode.ai/inference/anthropic/v1/messages')
+            self.assertEqual(headers['x-api-key'],'console-access')
+            return io.BytesIO(b'{"content":[{"type":"text","text":"OK"}]}')
+        self.manager.transport=transport
+        meta=self.manager.model('opencode_zen','claude-fixture')
+        with self.manager.open('opencode_zen','claude-fixture',{'messages':[{'role':'user','content':'Reply only OK.'}]},meta,bound_uid=uid) as lease:
+            self.assertIn(b'OK',lease.read())
+        self.assertEqual(len(calls),1)
+        self.assertFalse(self.manager.reservations)
+
+    def test_partial_go_defaults_do_not_disappear_when_zen_is_complete(self):
+        self.manager.registry_metadata=mock.Mock(return_value=({'opencode-go':{'npm':'@ai-sdk/openai-compatible',
+            'models':{'go-model':{'cost':{'input':1,'output':2}}}}},False))
+        self.manager.public_json=mock.Mock(return_value={'data':[{'id':'go-model'}]})
+        gateway=self.manager.console_gateway({'provider':{
+            'opencode':{'api':'https://opencode.ai/inference/openai/v1','npm':'@ai-sdk/openai-compatible',
+                'options':{'apiKey':'zen-key'},'models':{'zen-model':{}}},
+            'opencode-go':{'options':{'apiKey':'go-key'}}}})
+        self.assertEqual(set(gateway['models']),{'zen-model','go/go-model'})
+        self.assertEqual(gateway['provider_gateways']['opencode-go']['api_key'],'go-key')
 
     def test_cline_balance_queries_plan_and_all_quota_windows(self):
         account=self.cline[0]
@@ -169,6 +212,87 @@ class PlatformsTests(unittest.TestCase):
         self.assertTrue(account.view()['billing_status']['quota']['stale'])
         self.assertTrue(account.view()['billing_status']['subscription']['stale'])
         self.assertNotIn('monthly',self.manager.balance('opencode_zen')['quota_windows'])
+
+    def test_console_go_usage_uses_inference_gateway_and_refreshed_account_token(self):
+        uid=self.manager.import_accounts({'upstream':'opencode_zen','auth_type':'oauth',
+            'access_token':'old-access','org_id':'org-one','console_gateway':{
+                'url':'https://opencode.ai/inference/openai/v1','api_key':'{env:OPENCODE_CONSOLE_TOKEN}',
+                'headers':{'x-opencode-org-id':'org-one'},'models':{'fixture':{}}}})[0]['uid']
+        account=self.manager.accounts[uid]
+        calls=[]
+        def refresh(selected):
+            self.assertIs(selected,account)
+            selected.document['access_token']='fresh-access'
+        def transport(request,**kwargs):
+            calls.append(request)
+            self.assertEqual(request.full_url,'https://opencode.ai/inference/go/v1/usage')
+            headers={key.lower():value for key,value in request.header_items()}
+            self.assertEqual(headers['authorization'],'Bearer fresh-access')
+            self.assertEqual(headers['x-opencode-org-id'],'org-one')
+            return io.BytesIO(b'{"usage":{"rolling":{"percent":20}}}')
+        self.manager.ensure_token=mock.Mock(side_effect=refresh)
+        self.manager.transport=transport
+        self.manager.refresh_balance(account)
+        self.manager.ensure_token.assert_called_once_with(account)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(account.view()['quota']['fiveHour']['remaining_percent'],80)
+        self.assertIsNone(account.view()['balance']['remain'])
+
+    def test_opencode_known_errors_are_specific_without_echoing_secrets(self):
+        account=next(a for a in self.manager.accounts.values() if a.upstream=='opencode_zen')
+        for status,kind,code in ((403,'FreeTierError','opencode_free_tier_restricted'),
+                                 (410,'ModelDeprecated','model_deprecated')):
+            with self.subTest(kind=kind):
+                account.cooldowns.clear()
+                detail=json.dumps({'error':{'type':kind,'message':'echo '+account.token}}).encode()
+                failure=urllib.error.HTTPError('https://opencode.ai/zen/v1/chat/completions',status,kind,{},io.BytesIO(detail))
+                self.manager.transport=mock.Mock(side_effect=failure)
+                with self.assertRaises(U.PlatformError) as raised:
+                    self.manager.open('opencode_zen','fixture',{'messages':[]},self.meta,bound_uid=account.uid)
+                self.assertEqual(raised.exception.status,status)
+                self.assertEqual(raised.exception.code,code)
+                self.assertIn(kind,str(raised.exception))
+                self.assertNotIn(account.token,str(raised.exception))
+                self.assertIn(kind,account.view()['last_error'])
+                self.assertNotIn('*',account.cooldowns,'a model restriction must not block other models')
+                self.assertFalse(self.manager.reservations)
+
+    def test_go_quota_and_rate_limit_do_not_block_zen_on_the_same_account(self):
+        import wb_device_auth
+        gateway=wb_device_auth.console_gateway({'provider':{
+            name:{'api':'https://opencode.ai/inference/'+path+'/v1','options':{'apiKey':'tenant-key'},
+                  'models':{'fixture':{'cost':{'input':1,'output':2}},'promo':{'cost':{'input':0,'output':0}}}}
+            for name,path in (('opencode','openai'),('opencode-go','go/openai'))}})
+        uid=self.manager.import_accounts({'upstream':'opencode_zen','auth_type':'oauth','access_token':'current',
+            'console_gateway':gateway})[0]['uid']
+        account=self.manager.accounts[uid]
+        self.assertEqual(self.manager.model('opencode_zen','go/promo')['billing_mode'],'free')
+        account.document.update(quota={'weekly':{'remaining_percent':0,'reset_at':time.time()+60}},
+            billing_status={'quota':{'stale':False}})
+        meta=self.manager.model('opencode_zen','go/fixture')
+        with self.assertRaises(U.PlatformError):
+            self.manager.reserve('opencode_zen','go/fixture',meta,'','',1,bound_uid=uid)
+        chosen,ticket=self.manager.reserve('opencode_zen','fixture',meta,'','',1,bound_uid=uid)
+        self.assertIs(chosen,account);self.manager.release(ticket)
+        account.document['billing_status']['quota']['stale']=True
+        chosen,ticket=self.manager.reserve('opencode_zen','go/fixture',meta,'','',1,bound_uid=uid)
+        self.manager.release(ticket)
+        failure=urllib.error.HTTPError('https://opencode.ai/inference/go/openai/v1/chat/completions',429,'limited',{},io.BytesIO(b'INFERENCE_CAP_ERROR'))
+        self.manager.transport=mock.Mock(side_effect=failure)
+        with self.assertRaises(U.PlatformError):
+            self.manager.open('opencode_zen','go/fixture',{'messages':[]},meta,bound_uid=uid)
+        self.assertIn('go/*',account.cooldowns)
+        self.assertNotIn('*',account.cooldowns)
+        chosen,ticket=self.manager.reserve('opencode_zen','fixture',meta,'','',1,bound_uid=uid)
+        self.manager.release(ticket)
+
+    def test_free_tier_request_rejection_does_not_rotate_other_accounts(self):
+        self.manager.import_accounts({'upstream':'opencode_zen','api_key':'second-zen'})
+        failure=U.PlatformError('FreeTierError',403,'opencode_free_tier_restricted')
+        with mock.patch.object(self.manager,'open',side_effect=failure) as opened:
+            with self.assertRaises(U.PlatformError):
+                API._open(self.manager,'opencode_zen','fixture',{},self.meta,'session','owner',None)
+        self.assertEqual(opened.call_count,1)
 
     def test_billing_failure_marks_cached_quota_stale_without_blocking_other_queries(self):
         account=self.cline[0]

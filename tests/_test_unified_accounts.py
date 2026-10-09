@@ -166,6 +166,54 @@ class AccountTests(unittest.TestCase):
             with self.assertRaises(U.PlatformError):
                 self.manager.import_accounts({"upstream":"opencode_zen","auth_type":"oauth","access_token":"console-token","console_gateway":gateway})
 
+    def test_console_keeps_zen_and_go_routes_separate_through_restart_and_import(self):
+        config = {"provider": {
+            "opencode": {"api": "https://opencode.ai/inference/openai/v1", "npm": "@ai-sdk/openai-compatible",
+                "options": {"apiKey": "zen-private", "headers": {"x-opencode-org-id": "zen-org"}},
+                "models": {"same-model": {"cost": {"input": 1, "output": 2}}}},
+            "opencode-go": {"api": "https://opencode.ai/inference/go/openai/v1", "npm": "@ai-sdk/openai-compatible",
+                "options": {"apiKey": "{env:OPENCODE_CONSOLE_TOKEN}", "headers": {"x-opencode-org-id": "go-org"}},
+                "models": {"same-model": {"cost": {"input": 1, "output": 2}, "provider": {
+                    "npm": "@ai-sdk/anthropic", "api": "https://opencode.ai/inference/go/anthropic/v1"}}}}}}
+        gateway = D.console_gateway(config)
+        view = self.manager.import_accounts({"upstream": "opencode_zen", "auth_type": "oauth",
+            "access_token": "go-current", "console_gateway": gateway})[0]
+        account = self.manager.accounts[view["uid"]]
+        self.assertTrue(account.allows("same-model"))
+        self.assertTrue(account.allows("go/same-model"))
+        self.assertEqual(self.manager.headers(account, model="same-model")["Authorization"], "Bearer zen-private")
+        self.assertEqual(self.manager.headers(account, model="go/same-model")["Authorization"], "Bearer go-current")
+        self.assertEqual(self.manager.headers(account, model="go/same-model")["x-opencode-org-id"], "go-org")
+        meta = self.manager.model("opencode_zen", "go/same-model")
+        self.assertEqual((meta["native_protocol"], meta["entitlement"], meta["billing_mode"]), ("messages", "subscription", "paid"))
+        self.assertNotIn("pricing", meta)
+        self.assertEqual(meta["reference_pricing"]["unit"], "USD/1M tokens")
+        captured = []
+        self.manager.transport = lambda request, **kwargs: captured.append(request) or io.BytesIO(b'{}')
+        lease = self.manager.open("opencode_zen", "go/same-model", {"messages": []}, meta)
+        lease.close()
+        self.assertEqual(captured[-1].full_url, "https://opencode.ai/inference/go/anthropic/v1/messages")
+        self.assertEqual(json.loads(captured[-1].data)["model"], "same-model")
+        self.assertEqual(captured[-1].get_header("Authorization"), "Bearer go-current")
+        self.manager.import_accounts(self.manager.export_accounts())
+        reloaded = U.Manager(self.work.name)
+        restored = reloaded.accounts[account.uid]
+        self.assertTrue(restored.allows("go/same-model"))
+        public = json.dumps([reloaded.snapshot(), reloaded.models(["opencode_zen"])])
+        for secret in ("zen-private", "go-current", "OPENCODE_CONSOLE_TOKEN"):
+            self.assertNotIn(secret, public)
+        self.assertEqual(D.console_gateway({"disabled_providers": ["opencode-go"], **config})["models"].keys(), {"same-model"})
+
+    def test_console_prices_are_per_million_and_go_does_not_grant_api_key_accounts(self):
+        models = U.parse_catalog("opencode_zen", {"models": {
+            "priced": {"cost": {"input": 1.2, "output": 3, "cache_read": 0.1}},
+            "free": {"cost": {"input": 0, "output": 0}}}})
+        self.assertEqual(models["priced"]["pricing"]["input"], 1.2)
+        self.assertEqual(models["priced"]["pricing"]["unit"], "USD/1M tokens")
+        self.assertEqual(models["free"]["billing_mode"], "free")
+        view = self.manager.import_accounts({"upstream": "opencode_zen", "api_key": "zen-only"})[0]
+        self.assertFalse(self.manager.accounts[view["uid"]].allows("go/priced", {"console_provider": "opencode-go"}))
+
     def test_roundtrip_priority_and_mixed_credential_types(self):
         accounts=self.manager.import_accounts([{ "upstream":"cline","api_key":"sk_fixture","priority":4},
             {"upstream":"cline","access_token":"oauth-fixture","refresh_token":"refresh-fixture"},
@@ -238,11 +286,69 @@ class AccountTests(unittest.TestCase):
         self.assertNotEqual(first["x-opencode-request"],second["x-opencode-request"])
         self.assertNotEqual(first["x-opencode-session"],O.headers("other","conversation","owner")["x-opencode-session"])
         self.assertEqual(first["x-opencode-client"],"cli")
+        self.assertEqual(first["x-opencode-session-id"],first["x-opencode-session"])
+        self.assertEqual(first["x-opencode-request-id"],first["x-opencode-request"])
+        self.assertTrue(first["x-opencode-request"].startswith("msg_"))
         view=self.manager.import_accounts({"upstream":"opencode_zen","auth_type":"oauth","access_token":"console-token"})[0]
         headers=self.manager.headers(self.manager.accounts[view["uid"]])
         self.assertNotIn("Authorization",headers)
         self.assertNotIn("x-api-key",headers)
         self.assertIsNone(D.console_gateway({"provider":{"opencode":{"options":{"baseURL":"https://opencode.ai/zen/v1"},"models":{"model":{}}}}}))
+
+    def test_official_console_config_keeps_provider_api_and_org_header(self):
+        config = {"provider": {"opencode": {"npm": "@ai-sdk/openai-compatible",
+            "api": "https://opencode.ai/inference/openai/v1",
+            "options": {"apiKey": "{env:OPENCODE_CONSOLE_TOKEN}", "headers": {"x-opencode-org-id": "org-one"}},
+            "models": {"big-pickle": {}, "claude-fixture": {"provider": {
+                "npm": "@ai-sdk/anthropic", "api": "https://opencode.ai/inference/anthropic/v1"}},
+                "disabled-model": {"disabled": True}, "untrusted-model": {"provider": {"api": "https://evil.test/v1"}}}}}}
+        gateway = D.console_gateway(config)
+        self.assertIsNotNone(gateway)
+        self.assertEqual(gateway["url"], "https://opencode.ai/inference/openai/v1")
+        self.assertEqual(gateway["headers"]["x-opencode-org-id"], "org-one")
+        self.assertNotIn("disabled-model", gateway["models"])
+        self.assertNotIn("untrusted-model", gateway["models"])
+        uid = self.manager.import_accounts({"upstream": "opencode_zen", "auth_type": "oauth",
+            "access_token": "account-one-access", "org_id": "org-one", "console_gateway": gateway})[0]["uid"]
+        self.assertEqual(self.manager.model("opencode_zen", "claude-fixture")["native_protocol"], "messages")
+        headers = self.manager.headers(self.manager.accounts[uid])
+        self.assertEqual(headers["Authorization"], "Bearer account-one-access")
+        self.assertEqual(headers["x-opencode-org-id"], "org-one")
+        self.assertNotIn("account-one-access", json.dumps(self.manager.snapshot()))
+
+    def test_console_token_templates_are_account_local_and_follow_refresh(self):
+        gateway = {"url": "https://opencode.ai/inference/openai/v1", "provider": "opencode",
+            "api_key": "{env:OPENCODE_CONSOLE_TOKEN}", "headers": {}, "models": {"big-pickle": {}}}
+        views = self.manager.import_accounts([{"upstream": "opencode_zen", "auth_type": "oauth",
+            "access_token": "first-access", "console_gateway": gateway},
+            {"upstream": "opencode_zen", "auth_type": "oauth", "access_token": "second-access", "console_gateway": gateway}])
+        first, second = [self.manager.accounts[v["uid"]] for v in views]
+        with mock.patch.dict(os.environ, {"OPENCODE_CONSOLE_TOKEN": "other-process-secret"}):
+            self.assertEqual(self.manager.headers(first)["Authorization"], "Bearer first-access")
+            self.assertEqual(self.manager.headers(second)["Authorization"], "Bearer second-access")
+            first.document["access_token"] = "refreshed-first-access"
+            self.assertEqual(self.manager.headers(first)["x-api-key"], "refreshed-first-access")
+            self.assertEqual(self.manager.headers(second)["x-api-key"], "second-access")
+        restarted = U.Manager(self.manager.directory, self.manager.database)
+        self.assertEqual(restarted.headers(restarted.accounts[first.uid])["Authorization"], "Bearer first-access")
+
+    def test_console_config_rejects_unresolved_environment_and_file_credentials(self):
+        for value in ("{env:OTHER_KEY}", "{file:/tmp/private}", "${OTHER_KEY}"):
+            with self.subTest(value=value):
+                config = {"provider": {"opencode": {"api": "https://opencode.ai/inference/openai/v1",
+                    "models": {"big-pickle": {}}, "options": {"baseURL": "https://opencode.ai/inference/openai/v1", "apiKey": value}}}}
+                self.assertIsNone(D.console_gateway(config))
+                config["provider"]["opencode"]["options"] = {"baseURL": "https://opencode.ai/inference/openai/v1", "headers": {"Authorization": "Bearer " + value}}
+                self.assertIsNone(D.console_gateway(config))
+
+    def test_console_config_respects_disabled_providers_and_model_filters(self):
+        config={"provider":{"opencode":{"api":"https://opencode.ai/inference/openai/v1",
+            "options":{"apiKey":"fixture-key"},"whitelist":["allowed","blocked","retired"],
+            "blacklist":["blocked"],"models":{"allowed":{},"blocked":{},
+                "retired":{"status":"deprecated"},"unlisted":{}}}}}
+        self.assertEqual(set(D.console_gateway(config)["models"]),{"allowed"})
+        config["disabled_providers"]=["opencode"]
+        self.assertIsNone(D.console_gateway(config))
 
     def test_model_metadata_cannot_expose_nested_credentials(self):
         self.manager.import_accounts({"upstream":"cline","api_key":"sk_fixture"})

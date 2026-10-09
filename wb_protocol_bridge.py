@@ -50,6 +50,7 @@ def usage(value, protocol, upstream):
         prompt = value.get("input_tokens", 0)
         if protocol == "messages":
             prompt += cached + value.get("cache_creation_input_tokens", 0)
+            out["prompt_cache_write_tokens"] = value.get("cache_creation_input_tokens", 0)
         out.update(prompt_tokens=prompt, completion_tokens=value.get("output_tokens", 0),
                    total_tokens=prompt + value.get("output_tokens", 0),
                    prompt_tokens_details={"cached_tokens": cached})

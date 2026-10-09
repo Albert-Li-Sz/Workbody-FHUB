@@ -30,11 +30,30 @@ def official_url(value):
         return False
 
 
+def console_credential(value, token):
+    """Resolve only the selected account's official console token reference.
+
+    Never consult process environment or read files for remote configuration:
+    those values belong to other accounts or to the host, not this tenant.
+    Keep the template private so a refreshed token is used on every request.
+    """
+    if not isinstance(value, str) or len(value) > 16384 or any(c in value for c in "\r\n\x00"):
+        raise ValueError("invalid OpenCode credential configuration")
+    reference = "{env:OPENCODE_CONSOLE_TOKEN}"
+    if reference in value:
+        if not isinstance(token, str) or not token or any(c in token for c in "\r\n\x00"):
+            raise ValueError("OpenCode console token is unavailable")
+        value = value.replace(reference, token)
+    if any(marker in value for marker in ("{env:", "{file:", "${")):
+        raise ValueError("OpenCode credential configuration contains an unresolved reference")
+    return value
+
+
 def console_gateway(document, defaults=None):
     """Read provider configuration issued by the official console.
 
-    A console access token is not a Zen API Key. Keep its tenant gateway and
-    model list instead of silently substituting the legacy Zen endpoint.
+    Keep the tenant gateway and model list, including the token reference
+    explicitly issued by the console, instead of substituting legacy Zen.
     """
     config = document.get("config", document) if isinstance(document, dict) else {}
     if not isinstance(config, dict):
@@ -42,14 +61,16 @@ def console_gateway(document, defaults=None):
     providers = config.get("provider") or config.get("providers") or {}
     ordered = list(providers.items()) if isinstance(providers, dict) else []
     ordered.sort(key=lambda item: item[0] not in ("opencode", "opencode_zen", "opencode-zen"))
+    disabled = config.get("disabled_providers") or []
+    gateways = {}
     for name, provider in ordered:
-        if not isinstance(provider, dict):
+        if not isinstance(provider, dict) or isinstance(disabled, list) and name in disabled:
             continue
         options = provider.get("options") or {}
         if not isinstance(options, dict):
             continue
         inherited = (defaults or {}).get(name) or {}
-        url = options.get("baseURL") or provider.get("baseURL") or inherited.get("api")
+        url = options.get("baseURL") or provider.get("baseURL") or provider.get("api") or inherited.get("api")
         if not official_url(url):
             continue
         models = provider.get("models") or inherited.get("models")
@@ -61,20 +82,86 @@ def console_gateway(document, defaults=None):
         safe_headers = {}
         if isinstance(headers, dict):
             for key, value in headers.items():
-                if (str(key).lower() in ("authorization", "x-api-key", "x-org-id", "x-workspace-id")
+                if (str(key).lower() in ("authorization", "x-api-key", "x-org-id", "x-opencode-org-id", "x-workspace-id")
                         and isinstance(value, str) and not any(c in value for c in "\r\n\x00")):
                     safe_headers[key] = value
-        clean_models = {key: value for key, value in models.items() if isinstance(value, dict) and
-            (not isinstance(value.get("api"), dict) or not value["api"].get("url") or official_url(value["api"]["url"]))}
+        whitelist = provider.get("whitelist")
+        blacklist = provider.get("blacklist") or []
+        clean_models = {}
+        for key, value in models.items():
+            if (not isinstance(key, str) or not isinstance(value, dict) or value.get("disabled") is True
+                    or value.get("status") == "deprecated"):
+                continue
+            if isinstance(whitelist, list) and key not in whitelist:
+                continue
+            if isinstance(blacklist, list) and key in blacklist:
+                continue
+            api = value.get("api") if isinstance(value.get("api"), dict) else {}
+            override = value.get("provider") if isinstance(value.get("provider"), dict) else {}
+            if any(endpoint and not official_url(endpoint) for endpoint in (api.get("url"), override.get("api"))):
+                continue
+            clean_models[key] = value
         api_key = options.get("apiKey") if isinstance(options.get("apiKey"), str) else ""
-        if not clean_models or not (api_key or any(key.lower() in ("authorization", "x-api-key") for key in safe_headers)):
+        if not clean_models or not (api_key or any(key.lower() in ("authorization", "x-api-key") and value for key, value in safe_headers.items())):
             continue
-        if len(api_key) > 16384 or any(c in api_key for c in "\r\n\x00"):
+        try:
+            console_credential(api_key, "configuration-validation")
+            for value in safe_headers.values():
+                console_credential(value, "configuration-validation")
+        except ValueError:
             continue
-        return {"url": str(url).rstrip("/"), "provider": name,
+        gateways[name] = {"url": str(url).rstrip("/"), "provider": name,
                 "api_key": api_key,
                 "headers": safe_headers, "models": copy.deepcopy(clean_models), "npm": provider.get("npm") or inherited.get("npm", "")}
-    return None
+    if not gateways:
+        return None
+    # Zen and Go can advertise the same model with different billing and
+    # credentials. Keep an explicit namespace; a subscription request must
+    # never fall back to the Zen wallet just because its wire ID matches.
+    primary = next(iter(gateways.values()))
+    combined, routes = {}, {}
+    for name, gateway in gateways.items():
+        for identifier, metadata in gateway["models"].items():
+            alias = "go/" + identifier if name == "opencode-go" else identifier
+            if alias in combined:
+                continue
+            meta = copy.deepcopy(metadata)
+            meta.setdefault("npm", gateway["npm"])
+            meta["console_provider"] = name
+            if name == "opencode-go":
+                meta.update(entitlement="subscription", billing_mode="paid")
+            combined[alias] = meta
+            routes[alias] = {"provider": name, "wire_id": identifier}
+    return dict(primary, models=combined, provider_gateways=gateways, model_routes=routes, config_version=3)
+
+
+def model_gateway(gateway, model=None, provider=None):
+    """Select private provider credentials without mixing plans or accounts."""
+    route = (gateway.get("model_routes") or {}).get(model) or {}
+    name = provider or route.get("provider")
+    if name:
+        selected = (gateway.get("provider_gateways") or {}).get(name)
+        if selected:
+            return selected
+        if name != gateway.get("provider"):
+            raise ValueError("OpenCode provider gateway is unavailable")
+    return gateway
+
+
+def import_gateway(gateway):
+    """Revalidate exported private configuration and rebuild trusted routes."""
+    if not isinstance(gateway, dict):
+        return None
+    sources = gateway.get("provider_gateways")
+    if not isinstance(sources, dict) or not sources:
+        sources = {str(gateway.get("provider") or "opencode"): gateway}
+    providers = {}
+    for name, source in sources.items():
+        if not isinstance(source, dict) or not official_url(source.get("url")):
+            return None
+        providers[name] = {"api": source["url"], "options": {"apiKey": source.get("api_key"),
+            "headers": source.get("headers")}, "npm": source.get("npm", ""), "models": source.get("models")}
+    return console_gateway({"provider": providers})
 
 
 class DeviceLogins:

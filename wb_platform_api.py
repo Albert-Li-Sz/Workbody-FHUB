@@ -61,7 +61,8 @@ def _open(manager, upstream, raw_model, body, meta, session, owner, bound=None):
         except wb_platforms.PlatformError as exc:
             if exc.code == "account_unavailable" and previous_error is not None:
                 raise previous_error from exc
-            if attempt == attempts-1 or exc.status not in (401, 402, 403, 429, 502, 503, 504):
+            if (attempt == attempts-1 or exc.code in ("opencode_free_tier_restricted", "model_deprecated")
+                    or exc.status not in (401, 402, 403, 429, 502, 503, 504)):
                 raise
             previous_error = exc
 

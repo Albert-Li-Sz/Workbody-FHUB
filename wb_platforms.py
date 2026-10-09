@@ -119,12 +119,17 @@ def parse_catalog(upstream, document):
             continue
         identifier = item["id"]
         meta = dict(models.get(identifier, {}), **item)
+        if meta.get("disabled") is True or meta.get("status") == "deprecated":
+            models.pop(identifier, None)
+            continue
         protocol = meta.get("native_protocol") or meta.get("protocol")
         endpoint = str(meta.get("endpoint") or meta.get("api") or "")
         provider = meta.get("provider") if isinstance(meta.get("provider"), dict) else {}
         api = meta.get("api") if isinstance(meta.get("api"), dict) else {}
-        package = str(api.get("npm") or meta.get("npm") or provider.get("npm") or "")
+        package = str(api.get("npm") or provider.get("npm") or meta.get("npm") or "")
         if not protocol:
+            if package in ("@ai-sdk/google", "@ai-sdk/google-vertex"):
+                continue
             if upstream == "cline" or "chat/completions" in endpoint or "openai-compatible" in package:
                 protocol = "chat"
             elif "responses" in endpoint or package == "@ai-sdk/openai":
@@ -143,13 +148,27 @@ def parse_catalog(upstream, document):
         if protocol not in ("chat", "responses", "messages"):
             continue
         meta["native_protocol"] = protocol
+        if upstream == "opencode_zen" and isinstance(meta.get("cost"), dict):
+            pricing = {key: wb_platform_metadata.number(meta["cost"].get(key)) for key in
+                ("input", "output", "cache_read", "cache_write") if wb_platform_metadata.number(meta["cost"].get(key)) is not None}
+            if pricing:
+                pricing.update(unit="USD/1M tokens", source="opencode")
+                if meta.get("console_provider") == "opencode-go":
+                    meta["reference_pricing"] = pricing
+                    meta.pop("pricing", None)
+                else:
+                    meta.setdefault("pricing", pricing)
         prices = meta.get("pricing") or meta.get("cost") or {}
+        if not isinstance(prices, dict):
+            prices = {}
         input_price = _number(prices.get("input", prices.get("prompt")))
         output_price = _number(prices.get("output", prices.get("completion")))
         if meta.get("free") is True or input_price == 0 and output_price == 0:
             meta["billing_mode"] = "free"
         else:
             meta.setdefault("billing_mode", "paid")
+        if meta.get("console_provider") == "opencode-go":
+            meta["entitlement"] = "subscription"
         models[identifier] = meta
     return models
 
@@ -202,6 +221,8 @@ class Account:
                 local = parse_catalog("opencode_zen", {"models": [{"npm": gateway.get("npm"), **configured, "id": model}]}).get(model)
                 return bool(local and local["native_protocol"] == meta["native_protocol"])
             return True
+        if self.upstream == "opencode_zen" and (model.startswith("go/") or (meta or {}).get("console_provider") == "opencode-go"):
+            return False
         if self.upstream == "commandcode" and meta and meta.get("min_plan") and self.document.get("plan"):
             rank = {"go": 0, "provider": 0, "pro": 1, "pro-v1": 1, "teams-pro": 1, "goat": 2, "max": 3, "maxx": 4, "ultra": 4}
             plan = self.document["plan"].lower().replace("individual-", "")
@@ -211,6 +232,14 @@ class Account:
 
     def save(self):
         wb_storage.write_private_json(self.path, self.document)
+
+    def quota_blocked(self, model, meta, now):
+        if self.upstream != "opencode_zen" or not model.startswith("go/") or meta.get("billing_mode") == "free":
+            return False
+        if ((self.document.get("billing_status") or {}).get("quota") or {}).get("stale"):
+            return False
+        return any(isinstance(window, dict) and window.get("remaining_percent") == 0 and
+            _expiry(window.get("reset_at")) > now for window in (self.document.get("quota") or {}).values())
 
     def view(self):
         return {"uid": self.uid, "upstream": self.upstream, "nickname": self.document.get("name") or self.uid,
@@ -484,9 +513,7 @@ class Manager:
                 if gateway is not None:
                     if not isinstance(gateway, dict) or not wb_device_auth.official_url(gateway.get("url")):
                         raise PlatformError("OpenCode gateway must be an official HTTPS endpoint")
-                    gateway = wb_device_auth.console_gateway({"provider": {str(gateway.get("provider") or "opencode"): {
-                        "options": {"baseURL": gateway["url"], "apiKey": gateway.get("api_key"), "headers": gateway.get("headers")},
-                        "models": gateway.get("models"), "npm": gateway.get("npm", "")}}})
+                    gateway = wb_device_auth.import_gateway(gateway)
                     if not gateway:
                         raise PlatformError("OpenCode gateway must provide models and its own credential")
                 document.update(org_id=str(raw.get("org_id") or ""), orgs=[{"id":str(org["id"]),
@@ -613,7 +640,7 @@ class Manager:
             raise PlatformError("bound proxy slot is unavailable", 503)
         return wb_forward_proxy.slot_url(entry)
 
-    def headers(self, account=None):
+    def headers(self, account=None, model=None, provider=None):
         headers = {"Content-Type": "application/json", "User-Agent": "Workbody-FHUB/" + VERSION,
                    "X-CLIENT-TYPE": "cli", "X-CLIENT-VERSION": VERSION}
         if account:
@@ -626,12 +653,17 @@ class Manager:
                     headers.pop("x-api-key", None)
                     headers["x-org-id"] = account.document.get("org_id", "")
                     gateway = account.document.get("console_gateway") or {}
-                    if gateway.get("api_key"):
-                        headers["Authorization"] = "Bearer " + gateway["api_key"]
-                        headers["x-api-key"] = gateway["api_key"]
-                    for key, value in (gateway.get("headers") or {}).items():
-                        existing = next((name for name in headers if name.lower() == key.lower()), key)
-                        headers[existing] = value
+                    try:
+                        gateway = wb_device_auth.model_gateway(gateway, model, provider)
+                        if gateway.get("api_key"):
+                            credential = wb_device_auth.console_credential(gateway["api_key"], account.token)
+                            headers["Authorization"] = "Bearer " + credential
+                            headers["x-api-key"] = credential
+                        for key, value in (gateway.get("headers") or {}).items():
+                            existing = next((name for name in headers if name.lower() == key.lower()), key)
+                            headers[existing] = wb_device_auth.console_credential(value, account.token)
+                    except ValueError as exc:
+                        raise PlatformError(str(exc), 503, "account_unavailable") from exc
                 headers.pop("X-CLIENT-TYPE", None)
                 headers.pop("X-CLIENT-VERSION", None)
                 headers.update(wb_opencode_client.headers(account.uid))
@@ -679,19 +711,26 @@ class Manager:
 
     def console_gateway(self, config, account=None, proxy=None):
         gateway = wb_device_auth.console_gateway(config)
-        if gateway:
-            return gateway
         configuration = config.get("config", config) if isinstance(config, dict) else {}
         providers = (configuration.get("provider") or configuration.get("providers") or {}) if isinstance(configuration, dict) else {}
         if not isinstance(providers, dict):
-            return None
-        if not any(name in providers for name in ("opencode", "opencode_zen", "opencode-zen", "opencode-go")):
-            return None
+            return gateway
+        disabled = configuration.get("disabled_providers")
+        disabled = disabled if isinstance(disabled, list) else []
+        inherited = []
+        for name in ("opencode", "opencode_zen", "opencode-zen", "opencode-go"):
+            value = providers.get(name)
+            if not isinstance(value, dict) or name in disabled:
+                continue
+            options = value.get("options") or {}
+            if isinstance(options, dict) and (not value.get("models") or not
+                    (value.get("api") or value.get("baseURL") or options.get("baseURL"))):
+                inherited.append(name)
+        if not inherited:
+            return gateway
         registry, stale = self.registry_metadata(account, proxy=proxy)
         defaults = {}
-        for name in ("opencode", "opencode_zen", "opencode-zen", "opencode-go"):
-            if name not in providers:
-                continue
+        for name in inherited:
             provider_name = "opencode-go" if name == "opencode-go" else "opencode"
             reference = wb_platform_metadata.provider(registry, provider_name)
             url = "https://opencode.ai/zen/go/v1" if name == "opencode-go" else wb_platform_metadata.ZEN_URL
@@ -930,7 +969,16 @@ class Manager:
                 account.save()
             if not account.document.get("public") and (account.document.get("auth_type") != "oauth" or account.document.get("console_gateway")):
                 try:
-                    request = urllib.request.Request("https://opencode.ai/zen/go/v1/usage", headers=self.headers(account))
+                    self.ensure_token(account)
+                    usage_url = "https://opencode.ai/zen/go/v1/usage"
+                    gateway_url = (account.document.get("console_gateway") or {}).get("url", "")
+                    if account.document.get("auth_type") == "oauth" and wb_device_auth.official_url(gateway_url):
+                        parsed = urllib.parse.urlsplit(gateway_url)
+                        if parsed.path.startswith("/inference/"):
+                            usage_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/inference/go/v1/usage", "", ""))
+                    gateway = account.document.get("console_gateway") or {}
+                    go_provider = "opencode-go" if "opencode-go" in (gateway.get("provider_gateways") or {}) else None
+                    request = urllib.request.Request(usage_url, headers=self.headers(account, provider=go_provider))
                     with self.transport(request, timeout=15, proxy=self.proxy(account)) as response:
                         raw = response.read(1024 * 1024 + 1)
                     if len(raw) > 1024 * 1024:
@@ -1012,7 +1060,10 @@ class Manager:
             self.refreshing.add(upstream)
         def run():
             try:
-                if force or time.time() - self.catalogues.get(upstream, {}).get("updated_at", 0) >= 300:
+                legacy_console = upstream == "opencode_zen" and any(a.upstream == upstream and a.enabled and
+                    a.document.get("auth_type") == "oauth" and
+                    (a.document.get("console_gateway") or {}).get("config_version") != 3 for a in list(self.accounts.values()))
+                if force or legacy_console or time.time() - self.catalogues.get(upstream, {}).get("updated_at", 0) >= 300:
                     try:
                         self.refresh_catalog(upstream)
                     except Exception as exc:
@@ -1212,6 +1263,8 @@ class Manager:
                     pending[ticket["uid"]] = pending.get(ticket["uid"], 0) + ticket["estimate"]
             candidates = [a for a in self.accounts.values() if a.upstream == upstream and a.enabled and a.allows(model, meta)
                 and a.cooldowns.get("*", 0) <= now and a.cooldowns.get(model, 0) <= now
+                and (not model.startswith("go/") or a.cooldowns.get("go/*", 0) <= now)
+                and not a.quota_blocked(model, meta, now)
                 and (not maximum or flights.get(a.uid, 0) < maximum)
                 and (not a.document.get("public") or mode == "free")
                 and not (a.document.get("credit_exhausted") and mode != "free")]
@@ -1290,7 +1343,7 @@ class Manager:
             client_headers = wb_opencode_client.headers(account.uid, session, owner, body) if upstream == "opencode_zen" else {}
             for attempt in range(2):
                 token = account.token
-                headers = self.headers(account)
+                headers = self.headers(account, model=model)
                 headers.update(client_headers)
                 if upstream == "cline":
                     headers["X-Task-ID"] = request_body["session_id"]
@@ -1299,14 +1352,21 @@ class Manager:
                     gateway = account.document.get("console_gateway") or {}
                     if not gateway.get("url"):
                         raise PlatformError("OpenCode organization has no model gateway; refresh its configuration", 503, "account_unavailable")
-                    base = gateway["url"]
+                    try:
+                        selected = wb_device_auth.model_gateway(gateway, model)
+                    except ValueError as exc:
+                        raise PlatformError(str(exc), 503, "account_unavailable") from exc
+                    base = selected["url"]
                     configured = (gateway.get("models") or {}).get(model) or {}
                     api = configured.get("api") if isinstance(configured.get("api"), dict) else {}
-                    if api.get("url"):
-                        if not wb_device_auth.official_url(api["url"]):
+                    provider = configured.get("provider") if isinstance(configured.get("provider"), dict) else {}
+                    model_url = api.get("url") or provider.get("api")
+                    if model_url:
+                        if not wb_device_auth.official_url(model_url):
                             raise PlatformError("OpenCode model endpoint is not an official gateway", 503)
-                        base = api["url"]
-                    request_body["model"] = api.get("id") or configured.get("id") or model
+                        base = model_url
+                    wire_id = ((gateway.get("model_routes") or {}).get(model) or {}).get("wire_id") or model
+                    request_body["model"] = api.get("id") or configured.get("id") or wire_id
                 endpoint = {"chat": "/chat/completions", "responses": "/responses", "messages": "/messages"}[native]
                 if upstream == "commandcode":
                     endpoint = "/alpha/generate"
@@ -1339,6 +1399,8 @@ class Manager:
                         if hours and any(hours.groups()):
                             wait = max(wait, int(hours[1] or 0) * 3600 + int(hours[2] or 0) * 60)
                         scope = "*" if "INFERENCE_CAP_ERROR" in detail or upstream == "commandcode" and "USAGE_EXCEEDED" in detail else model
+                        if upstream == "opencode_zen" and model.startswith("go/") and scope == "*":
+                            scope = "go/*"
                         if upstream == "commandcode":
                             try:
                                 parsed = json.loads(detail)
@@ -1360,15 +1422,29 @@ class Manager:
                             account.document["credit_exhausted"] = True
                     elif exc.code >= 500:
                         account.cooldowns["*"] = time.time() + 5
-                    account.last_error = "upstream HTTP %d" % exc.code
-                    account.document["cooldowns"] = dict(account.cooldowns)
-                    account.save()
                     # Error bodies may echo submitted data; expose a bounded
                     # protocol message, never the authorization header/body.
                     error = PlatformError("%s rejected the request (HTTP %d)" % (upstream, exc.code), exc.code, "upstream_error", wait)
+                    kind = None
+                    if upstream == "opencode_zen":
+                        try:
+                            failure = json.loads(detail)
+                            if isinstance(failure, dict) and isinstance(failure.get("error"), dict):
+                                kind = failure["error"].get("type")
+                        except ValueError:
+                            pass
+                        if exc.code == 403 and kind == "FreeTierError":
+                            error = PlatformError("OpenCode's free tier can only be used from within OpenCode (HTTP 403; FreeTierError)",
+                                                  403, "opencode_free_tier_restricted")
+                        elif exc.code == 410 and kind == "ModelDeprecated":
+                            error = PlatformError("OpenCode has retired this model (HTTP 410; ModelDeprecated)", 410, "model_deprecated")
+                            account.cooldowns[model] = time.time() + 300
                     if exc.code in (400, 413, 422) and re.search(r"context[_ ](?:length|window|limit)|maximum context|max(?:imum)?[_ ]input[_ ]tokens", detail, re.I):
                         error = PlatformError("conversation exceeds this model's context window; start a new conversation or use a larger-context model",
                                               exc.code, "context_length_exceeded")
+                    account.last_error = str(error) if error.code in ("opencode_free_tier_restricted", "model_deprecated") else "upstream HTTP %d" % exc.code
+                    account.document["cooldowns"] = dict(account.cooldowns)
+                    account.save()
                     error.account_uid = account.uid
                     raise error from exc
                 except (urllib.error.URLError, OSError) as exc:
@@ -1378,7 +1454,7 @@ class Manager:
                     error.account_uid = account.uid
                     raise error from exc
         except PlatformError as exc:
-            if exc.status in (401, 403, 502, 503, 504):
+            if exc.status in (401, 403, 502, 503, 504) and exc.code not in ("opencode_free_tier_restricted", "model_deprecated"):
                 account.cooldowns["*"] = max(account.cooldowns.get("*", 0), time.time() + 5)
             exc.account_uid = account.uid
             self.release(ticket)

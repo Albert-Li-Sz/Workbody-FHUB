@@ -322,7 +322,7 @@ try:
           msg.get("content") == [{"type": "text", "text": "Hello world"}], msg.get("content"))
     check("stop_reason is end_turn", msg.get("stop_reason") == "end_turn", msg.get("stop_reason"))
     check("usage maps input/output",
-          (msg.get("usage") or {}).get("input_tokens") == 11
+          (msg.get("usage") or {}).get("input_tokens") == 7
           and (msg.get("usage") or {}).get("output_tokens") == 2, msg.get("usage"))
     sent = (MOCK["requests"][0].get("body") or {}) if MOCK["requests"] else {}
     check("upstream saw the system prompt",
@@ -374,7 +374,7 @@ try:
     final = [e[1] for e in events if e[0] == "message_delta"][0]
     check("final delta carries stop_reason + usage",
           final["delta"]["stop_reason"] == "end_turn"
-          and final["usage"]["input_tokens"] == 11
+          and final["usage"]["input_tokens"] == 7
           and final["usage"]["output_tokens"] == 2, final)
     start = [e[1] for e in events if e[0] == "message_start"][0]
     check("message_start names the model",
@@ -499,7 +499,8 @@ try:
                 check("DSH chat hides server blocks; auxiliary search retains them",
                       (all(b["type"] == "text" for b in blocks) if main_chat else
                        any(b["type"] == "web_search_tool_result" for b in blocks)), blocks)
-                check("all upstream rounds contribute tokens", usage.get("input_tokens") == 16
+                check("all upstream rounds contribute tokens", usage.get("input_tokens") == 12
+                      and usage.get("cache_read_input_tokens") == 3 and usage.get("cache_creation_input_tokens") == 1
                       and usage.get("output_tokens") == 5 and usage.get("server_tool_use", {}).get("web_search_requests") == 1, usage)
                 check("HTTP request opens exactly two model rounds", len(MOCK["requests"]) == 2, MOCK["requests"])
                 follow = MOCK["requests"][-1]["body"]
