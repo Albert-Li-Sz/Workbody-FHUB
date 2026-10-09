@@ -4,7 +4,7 @@ WorkBuddy、Cline 与 OpenCode Zen 多账号网关。将已有账号接入 OpenA
 
 当前版本 **1.2.1** · Python **3.9+** · 应用仅依赖 Python 标准库
 
-1.2.1 当前为预发布：代码、模拟协议回归及容器／迁移验证覆盖新功能，Cline／Zen 真实账号联调待配置后完成。稳定镜像 `latest` 在真实联调及正式发布后更新。
+1.2.1 已正式发布，提供固定版本镜像及稳定镜像 `latest`。代码、模拟协议回归及容器／迁移验证覆盖新功能；Cline／Zen 真实账号联调仍待配置后完成。
 
 [版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [多平台接入](docs/platforms.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
