@@ -54,6 +54,18 @@ class HTTPTests(unittest.TestCase):
             response=client.getresponse();return response.status,json.loads(response.read())
         finally:client.close()
 
+    def assert_reservations_released(self):
+        # The client can receive the final bytes before the handler's finally
+        # block releases its lease. Check eventual cleanup with a bounded wait.
+        deadline = time.monotonic() + 2
+        while True:
+            with self.manager.lock:
+                pending = dict(self.manager.reservations)
+            if not pending or time.monotonic() >= deadline:
+                self.assertFalse(pending)
+                return
+            time.sleep(0.005)
+
     def test_command_protocol_matrix(self):
         for protocol in ("chat","responses","messages"):
             for stream in (False,True):
@@ -67,7 +79,7 @@ class HTTPTests(unittest.TestCase):
         rows=list(self.db.usage_rows(upstream="commandcode"))
         self.assertEqual(len(rows),6)
         self.assertTrue(all(row["total_tokens"]==12 and row["credit"]==0.25 and row["cost_unit"]=="credits" for row in rows))
-        self.assertFalse(self.manager.reservations)
+        self.assert_reservations_released()
 
     def test_command_402_fails_over_within_provider(self):
         self.upstream.fail_key="Bearer user_first_fixture"
@@ -81,7 +93,7 @@ class HTTPTests(unittest.TestCase):
         following, ticket = self.manager.reserve("commandcode", "fixture", {"billing_mode":"paid"}, "", "owner", 4096)
         self.assertNotEqual(first.uid, following.uid, "a timed-out cooldown alone cannot clear credit exhaustion")
         self.manager.release(ticket)
-        self.assertFalse(self.manager.reservations)
+        self.assert_reservations_released()
 
     def test_command_quota_failure_uses_reset_and_stays_in_provider(self):
         self.upstream.fail_key="Bearer user_first_fixture"
@@ -96,7 +108,7 @@ class HTTPTests(unittest.TestCase):
             self.assertGreaterEqual(first.cooldowns["*"], reset-1)
             self.assertLess(first.cooldowns["*"], reset+2)
             self.assertTrue(all(call[0].endswith("/alpha/generate") for call in self.upstream.calls))
-            self.assertFalse(self.manager.reservations)
+            self.assert_reservations_released()
 
     def test_opencode_http_headers_preserve_session_and_selected_credential(self):
         body = self.body("responses", self.models["responses"])
@@ -123,7 +135,7 @@ class HTTPTests(unittest.TestCase):
         row=list(self.db.usage_rows(upstream="commandcode"))[0]
         self.assertEqual(row["total_tokens"],12)
         self.assertNotEqual(row["outcome"],"completed")
-        self.assertFalse(self.manager.reservations)
+        self.assert_reservations_released()
 
     def test_command_history_and_stable_session(self):
         status,raw,_=self.request("/v1/responses",self.body("responses","commandcode/fixture"))
