@@ -1,7 +1,7 @@
 """Canonical application version and checks for release artifact consistency."""
 from pathlib import Path
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 
 def verify_artifacts(root=None, tag=None):

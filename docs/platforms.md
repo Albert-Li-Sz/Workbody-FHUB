@@ -1,4 +1,4 @@
-# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.1 基线后的开发分支）
+# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.2）
 
 ## 配置账号
 
@@ -131,4 +131,4 @@ curl 'https://<公网IP>/api/billing/usage?upstream=opencode_zen' \
 - [OpenCode 官方客户端 3884062](https://github.com/anomalyco/opencode/blob/388406238bd5ca15564a762840a2362c3a45bd9c/packages/opencode/src/account/account.ts)：设备 OAuth、刷新与组织配置。
 - [CommandCodeGo-manager 856430b](https://github.com/learningdog1/CommandCodeGo-manager/tree/856430ba9e10f78c15c80d7f4d1370864b80cd57)：CLI 凭据导入、额度与切换；wire 格式另核对官方 `command-code@1.79.2`。
 
-新增内容尚未包含在已发布的 1.2.1 镜像中。测试分为本地协议回归、浏览器界面检查和真实上游：前两类使用独立模拟数据，真实账号授权／生成需要合法凭据，不能用模拟通过代替真实联调。
+这些新增内容从正式 1.2.2 源码与镜像提供。测试分为本地协议回归、浏览器界面检查和真实上游：前两类使用独立模拟数据，真实账号授权／生成需要合法凭据，不能用模拟通过代替真实联调。

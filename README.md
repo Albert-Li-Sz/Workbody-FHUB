@@ -2,9 +2,9 @@
 
 WorkBuddy、Cline、OpenCode 与 Command Code 多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages，提供平台隔离调度、余额与用量查询、可续接的 Responses 会话及实时控制台。
 
-当前版本 **1.2.1** · Python **3.9+** · 应用仅依赖 Python 标准库
+当前版本 **1.2.2** · Python **3.9+** · 应用仅依赖 Python 标准库
 
-当前开发分支从正式 `v1.2.1` 基线新增账号来源。WorkBuddy 原页面、OAuth 跳转链接和账号操作保持原样；新功能需运行本分支源码，已发布的 `1.2.1` 镜像不包含这些新增内容。
+1.2.2 从正式 `v1.2.1` 基线新增账号来源，完整保留 WorkBuddy 原页面、OAuth 跳转链接和账号操作。账号页新增 Cline、OpenCode、Command Code；正式版同时提供固定版本应用／Nginx 镜像、升级与回滚工具。
 
 [版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [多平台接入](docs/platforms.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
@@ -68,7 +68,7 @@ Windows、macOS、Linux 启动脚本继续可用。面板密码和 API Key 分�
 在原安装目录执行，先保留旧 Compose 配置：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.1/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.2/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -118,7 +118,7 @@ Responses 保存的是会话正文、工具结果及可能包含的上游密文�
 
 应用无额外 pip 依赖；Nginx 镜像额外包含 Certbot。发布工作流同时构建两个镜像的 `linux/amd64`、`linux/arm64` 版本，验证后更新稳定标签，并在 [Release](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) 附带源码、升级脚本、SHA-256 和镜像摘要。
 
-应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.2.1`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.1`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 108 个套件：88 个 Python + 20 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。测试默认最多 4 个套件并行、每套件使用独立临时目录；可传 `--jobs 1` 串行，`--logs <目录>` 保存完整输出。
+应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.2.2`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.2`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 108 个套件：88 个 Python + 20 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。测试默认最多 4 个套件并行、每套件使用独立临时目录；可传 `--jobs 1` 串行，`--logs <目录>` 保存完整输出。
 
 提示词重试、首字耗时、连接与统计优化见[性能与可靠性说明](docs/performance.md)。
 

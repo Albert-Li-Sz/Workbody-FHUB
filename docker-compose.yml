@@ -1,7 +1,7 @@
 name: workbody-fhub
 services:
   workbody-fhub:
-    image: ${WORKBODY_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub:1.2.1}
+    image: ${WORKBODY_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub:1.2.2}
     restart: unless-stopped
     user: "${PUID:-0}:${PGID:-0}"
     ports:
@@ -25,7 +25,7 @@ services:
       - ./accounts:/app/accounts
       - ./usage:/app/usage
   nginx:
-    image: ${WORKBODY_NGINX_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.1}
+    image: ${WORKBODY_NGINX_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.2}
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:

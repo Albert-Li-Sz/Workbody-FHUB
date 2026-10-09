@@ -29,6 +29,7 @@ from scripts.package_release import package
 
 PASSWORD = "synthetic-upgrade-password"
 KEY = "synthetic-upgrade-api-key"
+COMPOSE_VERSIONS = ("1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.2.1")
 
 
 def extract_source(archive, directory):
@@ -93,7 +94,7 @@ def arguments(directory, **options):
     return SimpleNamespace(**values)
 
 
-def seed_new_platform_and_history(directory):
+def seed_new_platform_and_history(directory, existing=None):
     """Confirm new state uses existing mounts and is covered by rollback."""
     import wb_database
     import wb_platforms
@@ -103,18 +104,24 @@ def seed_new_platform_and_history(directory):
     try:
         manager = wb_platforms.Manager(str(accounts), database)
         manager.refresh_async = lambda *args, **kwargs: None
-        manager.import_accounts([{"upstream":"cline", "access_token":"synthetic-upgrade-cline",
-                                  "enabled":False, "priority":4}])
-        assert next(iter(manager.accounts.values())).priority == 4
+        if existing is None:
+            manager.import_accounts([{"upstream":"cline", "access_token":"synthetic-upgrade-cline",
+                                      "enabled":False, "priority":4}])
+        account = next(iter(manager.accounts.values()))
+        assert account.priority == 4 and account.enabled is False
+        assert account.document["access_token"] == "synthetic-upgrade-cline"
         store = wb_responses.ResponseStore(database, str(accounts))
-        _, context = store.prepare({"model":"fixture-model", "input":"synthetic history"},
-                                   "fixture-key", ["workbuddy"], 100000)
-        response = store.finish({"status":"completed", "output":[]}, context,
-                                "workbuddy", "cn", "fixture-model", "fixture-account")
-        restored, _ = store.prepare({"previous_response_id":response["id"], "input":"next"},
+        if existing is None:
+            _, context = store.prepare({"model":"fixture-model", "input":"synthetic history"},
+                                       "fixture-key", ["workbuddy"], 100000)
+            response = store.finish({"status":"completed", "output":[]}, context,
+                                    "workbuddy", "cn", "fixture-model", "fixture-account")
+            existing = response["id"]
+        restored, _ = store.prepare({"previous_response_id":existing, "input":"next"},
                                     "fixture-key", ["workbuddy"], 100000)
         assert len(restored["input"]) == 2
         assert wb_settings.key_upstreams(wb_settings.load(str(accounts))["api_keys"][0]) == ["workbuddy"]
+        return existing
     finally:
         database.close_thread()
 
@@ -130,7 +137,7 @@ def compose_case(old_version, new_image, old_image, root):
     model = {"name":project,"services":{"workbody-fhub":{"image":old_image,"pull_policy":"never",
         "network_mode":"none", "environment":{"HOST":"0.0.0.0","PORT":"8788","PANEL_PASSWORD":PASSWORD},
         "volumes":[str(directory/"accounts")+":/app/accounts",str(directory/"usage")+":/app/usage"]}}}
-    if old_version in ("1.1.1", "1.1.2", "1.1.3"):
+    if old_version != "1.1.0":
         model["services"]["workbody-fhub"].pop("network_mode")
         model["networks"] = {"default":{"internal":True}}
         for name in (".tls", ".acme"):
@@ -144,13 +151,14 @@ def compose_case(old_version, new_image, old_image, root):
     try:
         update.run(command+["up","-d","--pull","never"],directory)
         update.wait_application(command,"workbody-fhub",directory,old_version,60)
-        old_schema = 2 if old_version in ("1.1.2", "1.1.3") else 1
+        old_schema = 3 if old_version == "1.2.1" else (2 if old_version in ("1.1.2", "1.1.3") else 1)
         assert_data(directory,old_schema)
+        old_history = seed_new_platform_and_history(directory) if old_schema == 3 else None
         update.upgrade(arguments(directory,compose_file=[str(compose)]))
         assert_data(directory,3)
-        seed_new_platform_and_history(directory)
+        seed_new_platform_and_history(directory, existing=old_history)
         runtime = update.compose_command(directory,[directory/update.RUNTIME_FILE])
-        if old_version in ("1.1.1", "1.1.2", "1.1.3"):
+        if old_version != "1.1.0":
             assert update.wait_gateway(runtime,"nginx",directory,VERSION,30)["status"] == "disabled"
         backups = list((directory/".update-backups").iterdir())
         assert len(backups) == 1
@@ -158,7 +166,10 @@ def compose_case(old_version, new_image, old_image, root):
         update.wait_application(update.compose_command(directory,[backups[0]/"rollback-compose.json"]),
                                 "workbody-fhub",directory,old_version,60)
         assert_data(directory,old_schema)
-        assert not list((directory/"accounts"/"upstreams").glob("account-*.json"))
+        if old_history:
+            seed_new_platform_and_history(directory, existing=old_history)
+        else:
+            assert not list((directory/"accounts"/"upstreams").glob("account-*.json"))
         print("Verified Compose %s -> %s -> rollback; priority/key/password/123 tokens/limits/session window preserved." % (old_version,VERSION))
     finally:
         update.run(["docker","compose","-p",project,"-f",str(compose),"down","--remove-orphans"],directory)
@@ -223,7 +234,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="workbody-migration-check-") as temporary:
             root=Path(temporary)
             native_case(root)
-            for version in ("1.1.0","1.1.1","1.1.2","1.1.3"):
+            for version in COMPOSE_VERSIONS:
                 compose_case(version,args.image,"workbody-fhub:"+version,root)
     finally:
         update.download,update.run,update.REGISTRY=original_download,original_run,original_registry

@@ -1,4 +1,4 @@
-# 从旧版升级到 1.2.1
+# 从旧版升级到 1.2.2
 
 升级工具为根目录的 `update.sh` 和 `update.py`。适用于单实例、本机 Docker Compose 安装；原生 Python 安装使用 `--source-only`。在**原安装目录**执行，不能先用新版 Compose 覆盖旧配置。
 
@@ -9,7 +9,7 @@
 旧安装没有更新脚本时，先下载固定版本：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.1/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.2/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -33,7 +33,7 @@ bash ./update.sh --compose-file docker-compose.yml \
 2. 解析旧编排、识别容器与实际挂载，拉取固定版本镜像并检查新配置。
 3. 固定旧容器的实际镜像 ID 和数据卷，包括原来的匿名卷；停止应用和本项目的 Nginx，备份全部可写 bind mount、named volume、将被覆盖的源码及旧编排。
 4. 安装源码，生成私有 `compose.runtime.json`，启动新版；首次启动导入旧账号、优先级、Key、设置和 JSONL 用量到 SQLite。
-5. 从容器内确认 `/health` 返回 `version: 1.2.1`；使用配套 Nginx 时同时检查 `nginx -t`、Nginx 健康入口和已启用的代理入口。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
+5. 从容器内确认 `/health` 返回 `version: 1.2.2`；使用配套 Nginx 时同时检查 `nginx -t`、Nginx 健康入口和已启用的代理入口。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
 
 备份位于 `.update-backups/<时间-随机标识>/`，目录权限 `0700`、归档与配置权限 `0600`。旧 JSON／JSONL 不会因迁移被删除。SQLite 主文件、WAL 与 SHM 在停服后一起保存，避免只复制主文件漏掉已提交数据。
 
@@ -88,13 +88,15 @@ docker compose -f .update-backups/<备份目录>/rollback-compose.json ps
 
 应用、Nginx 和 TLS 分别报告：证书仍在签发／重试或使用测试证书时，不会显示 HTTPS 生产证书已就绪；查看 `/tls/status` 的状态与到期时间。Nginx 配置、进程或已启用代理不可用时自动回退。1.1.2 增加 SQLite 小时汇总与持久化导出队列（schema 2）。1.1.3 沿用 schema 2，旧全局限额自动成为分渠道限额的默认值，临期优先调度默认关闭；回退旧程序必须恢复升级前的完整数据备份，不能直接让旧程序打开新版数据库。
 
-## 1.2.1 数据迁移
+## 1.2.2 数据迁移
 
 SQLite schema 2→3 在事务中为用量增加 `upstream`，旧请求归入 WorkBuddy；重建带平台维度的小时汇总。启动中断会回滚该迁移，版本号仅在全部步骤成功后更新。旧 Key 缺少平台字段时仍仅允许 WorkBuddy，原账号、优先级、限额、代理与密码保留。
 
 Cline／Zen 凭据新增在私有 `accounts/upstreams`；Responses 正文与分支快照存入同一数据库。升级不会自动授权旧 Key 使用新平台。所有数据都位于已有 accounts 挂载中，备份／回滚继续恢复完整目录；使用旧程序前恢复 schema 2 的升级前快照。
 
-验证脚本 `scripts/verify_upgrade.py` 覆盖 1.1.0、1.1.1、1.1.2、1.1.3 的 Compose 升级与回滚，以及原生源码迁移；使用模拟账号／日志，不需要真实凭据。
+1.2.1 升级到 1.2.2 沿用 schema 3；原 Cline／Zen 凭据和 Responses 历史继续保留。账号入口迁至「账号池」的来源页签，Responses 保留配置迁至设置页；WorkBuddy 原入口与 OAuth 保持原样。
+
+验证脚本 `scripts/verify_upgrade.py` 覆盖 1.1.0、1.1.1、1.1.2、1.1.3、1.2.1 的 Compose 升级与回滚，以及原生源码迁移；包含旧平台凭据与 Responses 历史保留检查，使用模拟账号／日志，不需要真实凭据。
 
 ## 原生 Python／Windows 安装
 
@@ -114,8 +116,8 @@ Windows 使用 `python update.py`；下载的附件可通过同一 Release 的 `
 正式镜像均支持 `linux/amd64` 与 `linux/arm64`：
 
 ```text
-ghcr.io/albert-li-sz/workbody-fhub:1.2.1
-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.1
+ghcr.io/albert-li-sz/workbody-fhub:1.2.2
+ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.2
 ```
 
 Release 同时附带源码归档、升级脚本、`checksums.txt` 与 `images.json`。后者记录应用／Nginx 摘要和提交，`latest` 在应用与 Nginx 两种架构镜像验证通过后才更新；校验文件最后生成，并附各镜像验证回执。

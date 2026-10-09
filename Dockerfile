@@ -3,9 +3,9 @@ ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-alpine@sha256:d9368b3
 FROM ${PYTHON_IMAGE}
 
 LABEL org.opencontainers.image.title="Workbody-FHUB" \
-      org.opencontainers.image.version="1.2.1" \
+      org.opencontainers.image.version="1.2.2" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT" \
-      org.opencontainers.image.description="WorkBuddy, Cline and OpenCode Zen multi-account gateway" \
+      org.opencontainers.image.description="WorkBuddy, Cline, OpenCode and Command Code multi-account gateway" \
       org.opencontainers.image.source="https://github.com/Albert-Li-Sz/Workbody-FHUB"
 
 # Set environment
