@@ -1,4 +1,4 @@
-# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.4）
+# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.6）
 
 ## 配置账号
 
@@ -44,11 +44,11 @@ OAuth 组织配置同时包含 Zen 和 Go 时，两组网关、请求头和模�
 
 ## 网关 Key 与模型 ID
 
-面板的 **模型库 → 模型与档位** 可以选择 WorkBuddy 国内／国际、Cline、OpenCode 和 Command Code。三个新增来源沿用账号池同步的目录，只显示已启用账号允许调用的模型；支持按模型 ID／名称搜索、按免费／付费／订阅筛选和分页。点击「刷新目录」会在后台同步当前来源，完成后由 SSE 更新页面。切换目录不修改网关出口、Key 权限或调度账号。
+面板的 **模型库 → 模型与档位** 可以选择 WorkBuddy 国内／国际、Cline、OpenCode 和 Command Code。三个新增来源沿用账号池同步的目录；管理页保留停用模型，公开目录只显示已启用账号允许调用且未停用的模型。支持按模型 ID／名称／别名搜索、按免费／付费／订阅筛选和分页。列表仅进入页面、切换渠道或手动刷新时加载，SSE 不自动重画；点击「刷新目录」等待同步完成后更新，保留页码、筛选和滚动位置。切换目录不修改网关出口、Key 权限或调度账号。
 
 WorkBuddy 保留消费倍率与输出探测结果；其他来源展示输入／输出和缓存价格、订阅权益、原生协议、视觉／工具／推理能力、上下文和最大输出。ClinePass、OpenCode Go 与 Command Code 订阅价格按参考价标注，实际余额和额度在账号池查询。思考档位支持 `reasoning_efforts` 以及上游 `reasoning_options` 的 effort／toggle 元数据，只展示明确提供的值和推理开关；仅声明推理能力的模型显示「原生推理／上游未公布档位」，缺失的价格和容量显示「上游未提供」。
 
-在 **设置 → API Key** 勾选 `allowed_upstreams`。合法值为 `workbuddy`、`cline`、`opencode_zen`、`commandcode`。旧 Key 缺少字段时默认仅允许 WorkBuddy；旧页面保存也保留已设置的平台权限。WorkBuddy 的 `realm=cn|intl` 独立于平台权限。
+在 **API Key** 勾选 `allowed_upstreams`。合法值为 `workbuddy`、`cline`、`opencode_zen`、`commandcode`。旧 Key 缺少字段时默认仅允许 WorkBuddy；旧页面保存也保留已设置的平台权限。WorkBuddy 的 `realm=cn|intl` 独立于平台权限。
 
 | Key 范围 | 模型 ID |
 | --- | --- |
@@ -68,6 +68,20 @@ curl 'https://<公网IP>/v1/models?upstream=cline' \
 Zen 目录取自官方 `/zen/v1/models`，该接口仅返回模型 ID。FHUB 用官方客户端采用的 [models.dev](https://models.dev/) 元数据补齐价格、上下文和协议，只保留实时列表中的模型；输入与输出价格都为零时才将其作为公开免费模型。单凭 `-free` 名称不推断免费权益。协议优先读取上游元数据，缺少时采用官方 Zen 模型表；需要原生 Gemini 协议的模型当前不纳入目录。官方目录变化后需刷新，具体协议以模型详情为准。
 
 `GET /v1/models` 与 `GET /v1/models/{id}` 返回对应模型的价格与元数据。Zen 的 `pricing` 与 ClinePass 的 `reference_pricing` 使用 `unit: USD/1M tokens`；原 OpenRouter 参考价保留 `USD/token`，面板统一换算显示每百万 Token。价格缺失显示「上游未提供」。Pass 价格是参考价，不能与钱包积分混为实际扣费。元数据缓存持久化，采集失败保留已知数据并标明过期状态。
+
+## 模型别名与启停
+
+模型库每个实际模型保留一行，可点击本名／别名复制完整 ID、保存一个调用别名或启停模型。配置按五个渠道分别保存，重启和同步目录保留；未配置的模型默认启用。外部平台自动保留 `cline/`、`opencode/`、`commandcode/` 前缀，别名不能与本渠道其他模型 ID 或别名重复。
+
+公开 `/v1/models` 同时返回本名与别名，`canonical_id` 指向本名、`is_alias` 区分别名条目；详情接口和三种生成协议都接受两者。别名解析后按本名验证 Key／账号权限、调度、计费及 Responses 续接。停用模型的两个入口均从公开列表移除，新调用返回 `403 model_disabled`；管理页保留该行，支持重新启用。
+
+面板鉴权 `GET /settings/models?channel=cline` 返回管理目录；`POST /settings/models` 按 `channel`、`model_id` 更新 `alias` 或布尔 `enabled`，不要求同时发送其他模型配置：
+
+```json
+{"channel":"cline","model_id":"cline/cline-pass/example","alias":"my-model","enabled":true}
+```
+
+对应的公开 ID 为 `cline/cline-pass/example` 与 `cline/my-model`。
 
 ## 三种生成协议
 
@@ -101,11 +115,11 @@ curl 'https://<公网IP>/api/billing/usage?upstream=opencode_zen' \
 | 上游 | 实际单位 | 查询范围 |
 | --- | --- | --- |
 | WorkBuddy | 积分 | Key 绑定的国内／国际渠道，包含停用账号 |
-| Cline | 积分 | 本机配置账号，按官方用户 ID 去重，包含停用账号 |
-| OpenCode Zen | USD | 无公开余额接口时返回未知／不完整，不伪造余额 |
+| Cline | 5 小时剩余百分比 | ClinePass 额度按官方用户 ID 去重，包含停用账号 |
+| OpenCode | 5 小时剩余百分比 | Go 额度按组织 ID 去重，包含停用账号；无订阅窗口时返回未知／不完整 |
 | Command Code | 积分 | 官方 credits 的月度、购买、免费余额；未知字段不填零 |
 
-多平台通过 `upstream` 分别查询，不能把积分和 USD 相加。含 WorkBuddy 的 Key 未指定平台时默认查询 WorkBuddy；只允许一个外部平台时默认该平台；允许多个外部平台时必须指定。`provider=deepseek|kimi|…` 仅控制兼容响应格式。Token 查询只统计当前网关 Key 发起的请求；平台每日调度统计可包含 Cline 同步到的其他实际积分消费。
+多平台通过 `upstream` 分别查询，不能把不同单位相加。含 WorkBuddy 的 Key 未指定平台时默认查询 WorkBuddy；只允许一个外部平台时默认该平台；允许多个外部平台时必须指定。`provider=deepseek|kimi|…` 仅控制兼容响应格式。Token 查询只统计当前网关 Key 发起的请求；平台每日调度统计可包含 Cline 同步到的其他实际积分消费。
 
 **账号池 → 对应来源 → 查询余额／额度** 后台刷新该来源账号：
 
@@ -115,7 +129,9 @@ curl 'https://<公网IP>/api/billing/usage?upstream=opencode_zen' \
 
 面板鉴权的 `GET /accounts/upstreams/billing?uid=<账号ID>` 或 `?upstream=cline` 返回账号的 `balance`、`subscription`、`quota`、`billing_status` 和查询错误。加 `refresh=1` 后异步刷新，`refreshing` 表示进度，账号 SSE 会推送结果；该接口需要 `X-Panel-Token`，不返回凭据。`GET /accounts/upstreams/models?upstream=cline&group=subscription` 可单独查询 Pass 目录与参考价格。
 
-公共 `GET /v1/balance?upstream=cline` 继续返回去重的积分总额，并提供 `quota_windows` 中各窗口已知账号的剩余百分比范围；不将百分比相加。失败的缓存额度不参与范围统计，缓存余额使 `complete=false`，`stale_count` 表示缓存余额数量。
+公共 `GET /v1/balance?upstream=cline|opencode_zen` 与兼容余额接口返回 5 小时剩余百分比之和，`unit=percent`、`window=fiveHour`。80% 与 60% 返回 140%；同一 Cline 用户或 OpenCode 组织只计一次，包含停用账号。`accounts` 仅包含额度、刷新与重置时间，不含账号身份或凭据。过期或失败的缓存不参与小计，缺失额度使 `complete=false`，兼容余额接口返回 `503 balance_unavailable`。账号页仍展示钱包积分与其他订阅窗口，Command Code 保留积分查询。
+
+[Go 官方额度说明](https://opencode.ai/docs/go/#usage-limits)将 5 小时窗口定义为月度额度的 20%。本网关直接读取上游 `fiveHour` 已用百分比和重置时间，转换为剩余百分比，不根据钱包余额推算。
 
 ## Responses 续接、分支与删除
 

@@ -191,7 +191,7 @@ def billing_response(summary, kind):
             response.update(provider="qwen", Code="200", Message="success", Success=True,
                             RequestId=str(uuid.uuid4()), Data={"AvailableAmount": amount,
                                 "AvailableCashAmount": "0.00", "CreditAmount": "0.00",
-                                "MybankCreditAmount": "0.00", "Currency": "USD"})
+                                "MybankCreditAmount": "0.00", "Currency": "percent" if summary.get("unit") == "percent" else "USD"})
         elif kind == "credit_grants":
             response.update(provider="openai", object="credit_summary", total_available=remaining,
                             grants={"object": "list", "data": []})
@@ -201,7 +201,7 @@ def billing_response(summary, kind):
             # WorkBuddy has no prepaid cash wallet; report the credit grant
             # as one balance, without claiming a topped-up cash amount.
             response.update(is_available=summary["total_remain"] > 0,
-                            balance_infos=[{"currency": "USD", "total_balance": amount,
+                            balance_infos=[{"currency": "percent" if summary.get("unit") == "percent" else "USD", "total_balance": amount,
                                             "granted_balance": amount,
                                             "topped_up_balance": "0.00"}])
         return response

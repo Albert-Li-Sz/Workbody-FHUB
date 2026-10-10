@@ -195,6 +195,53 @@ class PlatformsTests(unittest.TestCase):
         self.assertEqual(self.cline[0].view()['balance']['remain'],0)
         self.assertIn('quota',self.cline[0].view()['billing_errors'])
 
+    def test_subscription_balance_zero_missing_expired_and_distinct_resets(self):
+        now=time.time()
+        for account, owner, remaining, reset in ((self.cline[0],'a',80,'2099-01-01T00:00:00Z'),
+                                               (self.cline[1],'b',60,'2099-02-01T00:00:00Z')):
+            account.document.update(user_id=owner,quota={'fiveHour':{'remaining_percent':remaining,'reset_at':reset}},
+                billing_status={'quota':{'updated_at':now,'stale':False}})
+        self.cline[1].document['enabled']=False
+        result=self.manager.quota_balance('cline')
+        self.assertEqual((result['total_remain'],result['total_used'],result['total_granted']),(140,60,200))
+        self.assertEqual(len({row['reset_at'] for row in result['accounts']}),2)
+        for account in self.cline:
+            account.document['quota']['fiveHour']['remaining_percent']=0
+        self.assertEqual(self.manager.quota_balance('cline')['total_remain'],0)
+        self.assertTrue(self.manager.quota_balance('cline')['complete'])
+        self.cline[1].document['quota']={}
+        self.assertEqual(self.manager.quota_balance('cline')['unknown_count'],1)
+        self.cline[0].document['quota']['fiveHour']['reset_at']='2020-01-01T00:00:00Z'
+        result=self.manager.quota_balance('cline')
+        self.assertEqual((result['total_remain'],result['stale_count'],result['complete']),(None,1,False))
+
+    def test_opencode_quota_balance_deduplicates_org_and_keeps_wallet_unknown(self):
+        first=next(a for a in self.manager.accounts.values() if a.upstream=='opencode_zen')
+        uid=self.manager.import_accounts({'upstream':'opencode_zen','api_key':'other-zen-key'})[0]['uid']
+        second=self.manager.accounts[uid]
+        for account,org,remaining in ((first,'org-one',80),(second,'org-two',60)):
+            account.document.update(org_id=org,quota={'fiveHour':{'remaining_percent':remaining}},
+                billing_status={'quota':{'updated_at':time.time(),'stale':False}})
+        self.assertEqual(self.manager.quota_balance('opencode_zen')['total_remain'],140)
+        second.document['org_id']='org-one'
+        second.document['billing_status']['quota']['stale']=True
+        result=self.manager.quota_balance('opencode_zen')
+        self.assertEqual((result['total_remain'],result['account_count'],result['complete']),(80,1,True))
+
+    def test_quota_refresh_auth_failure_invalidates_cached_percentage(self):
+        for account in self.cline:
+            account.document.update(quota={'fiveHour':{'remaining_percent':80}},
+                billing_status={'quota':{'updated_at':time.time(),'stale':False}})
+        self.manager.refresh_catalog=mock.Mock(return_value={})
+        self.manager.ensure_token=mock.Mock(side_effect=U.PlatformError('expired token',401))
+        with mock.patch.object(U.threading,'Thread') as thread:
+            U.Manager.refresh_async(self.manager,'cline',force=True)
+            thread.call_args.kwargs['target']()
+        result=self.manager.quota_balance('cline',refresh=False)
+        self.assertEqual((result['total_remain'],result['complete'],result['stale_count']),(None,False,2))
+        self.assertEqual(result['refresh_failed'],2)
+        self.assertIsNone(self.manager.balance('opencode_zen')['total_remain'])
+
     def test_opencode_go_usage_does_not_invent_a_wallet_balance(self):
         account=next(a for a in self.manager.accounts.values() if a.upstream=='opencode_zen')
         def transport(request,**kwargs):

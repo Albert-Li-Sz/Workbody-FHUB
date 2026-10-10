@@ -301,12 +301,14 @@ async function autoAssignSlots(){
 
 function switchMainTab(tab){
   if(tab === 'platforms') tab = 'accounts';
+  if(!MAIN_TABS.includes(tab)) return;
   currentMainTab = tab;
   updateWorkspace(tab);
   closeSidebar();
   try {
     const url = new URL(window.location.href);
     url.searchParams.set('tab', tab);
+    if(['#settings-keys','#settings-slots','#settings-behavior'].includes(url.hash)) url.hash = '';
     history.replaceState(null, '', url.toString());
   } catch(e){}
   try { localStorage.setItem(MAIN_TAB_STORE, tab); } catch(e){}
@@ -316,6 +318,9 @@ function switchMainTab(tab){
     ['tasks', 'btnNavTasks', 'pageTasks'],
     ['analytics', 'btnNavAnalytics', 'pageAnalytics'],
     ['models', 'btnNavModels', 'pageModels'],
+    ['keys', 'btnNavKeys', 'pageKeys'],
+    ['proxies', 'btnNavProxies', 'pageProxies'],
+    ['behavior', 'btnNavBehavior', 'pageBehavior'],
     ['logs', 'btnNavLogs', 'pageLogs'],
     ['settings', 'btnNavSettings', 'pageSettings']
   ];
@@ -332,7 +337,8 @@ function switchMainTab(tab){
   if(tab === 'tasks'){ loadGrowthTasks(); loadSchedulerStatus(); }
   if(tab === 'models'){ loadModels(); }
   if(tab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
-  if(tab === 'settings'){ loadSettings(); loadProxySlots(); loadResponseStorage(); }
+  if(tab === 'proxies'){ loadProxySlots(); }
+  if(tab === 'settings'){ loadSettings(); loadResponseStorage(); }
   if(tab === 'logs'){
     startLogPolling();
     fetchNewLogs(true);
@@ -341,6 +347,11 @@ function switchMainTab(tab){
     stopLogPolling();
   }
 }
+
+window.addEventListener('hashchange', () => {
+  const tab = {'#settings-keys':'keys','#settings-slots':'proxies','#settings-behavior':'behavior'}[window.location.hash];
+  if(tab) switchMainTab(tab);
+});
 
 /* ---- 系统运行日志模块 ---- */
 let logEntries = [];

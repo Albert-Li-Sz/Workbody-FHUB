@@ -111,7 +111,7 @@
   };
 
   // 3. Tab 初始化
-  var TABS = ['gateway','accounts','tasks','analytics','models','logs','settings'];
+  var TABS = ['gateway','accounts','tasks','analytics','models','keys','proxies','behavior','logs','settings'];
   var pick = null;
   try {
     var q = new URLSearchParams(location.search).get('tab');
@@ -119,6 +119,8 @@
     var s = localStorage.getItem('wb-proxy-main-tab');
     if(s === 'platforms') s = 'accounts';
     pick = [q, s].find(function(t){ return TABS.indexOf(t) !== -1; }) || 'gateway';
+    var legacyTab = {'#settings-keys':'keys','#settings-slots':'proxies','#settings-behavior':'behavior'}[location.hash];
+    if(legacyTab) pick = legacyTab;
   } catch(e) { pick = 'gateway'; }
   window.__MAIN_TAB__ = pick;
 

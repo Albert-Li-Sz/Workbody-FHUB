@@ -15,17 +15,19 @@ function harness(savedChannel=''){
   const element = id => elements[id] || (elements[id]={value:'',textContent:'',innerHTML:'',dataset:{},hidden:false,disabled:false});
   const window = {MODEL_CHANNEL:'',VIEW_REALM:'intl',ACTIVE_GATEWAY_REALM:'intl'};
   const stored = {wb_model_channel:savedChannel};
-  const pending = [],posts = [];
+  const pending = [],posts = [],copies = [],toasts = [];
+  const navigator = {clipboard:{writeText:async value=>{copies.push(value);}}};
+  const toast = (...values)=>toasts.push(values);
   const getJSON = url => new Promise((resolve,reject) => pending.push({url,resolve,reject}));
   const postJSON = (url,body) => new Promise((resolve,reject) => posts.push({url,body,resolve,reject}));
   const localStorage = {getItem:key=>stored[key],setItem:(key,value)=>{stored[key]=value;}};
   const esc = value => String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const document = {getElementById:element,querySelector:()=>element('tbody')};
-  const api = new Function('window','document','localStorage','getJSON','postJSON','esc',
+  const api = new Function('window','document','localStorage','getJSON','postJSON','esc','navigator','toast','setTimeout',
     "let MODELS_DATA=[]; const SOURCE_ROOT='/accounts/upstreams';\n"+formatting+core+prices+extension+
-    '\nreturn {loadModels,selectModelsChannel,selectedModelsChannel,filterModelLibrary,pageModelLibrary,refreshModelLibrary,modelLibraryRow,modelLibraryEffortHtml,modelLibraryCapabilityHtml,get data(){return MODELS_DATA;}};')
-    (window,document,localStorage,getJSON,postJSON,esc);
-  return {api,element,window,stored,pending,posts};
+    '\nreturn {loadModels,selectModelsChannel,selectedModelsChannel,filterModelLibrary,pageModelLibrary,refreshModelLibrary,modelLibraryRow,modelLibraryEffortHtml,modelLibraryCapabilityHtml,copyModelId,editModelAlias,saveModelAlias,saveModelPolicy,get data(){return MODELS_DATA;}};')
+    (window,document,localStorage,getJSON,postJSON,esc,navigator,toast,callback=>setImmediate(callback));
+  return {api,element,window,stored,pending,posts,copies,toasts};
 }
 
 const go = {id:'opencode/go/fixture',upstream:'opencode_zen',name:'Go Reasoner',entitlement:'subscription',billing_mode:'paid',
@@ -40,7 +42,7 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
   const {api,element,pending,posts} = h;
   assert.equal(api.selectedModelsChannel(),'opencode_zen','new channels survive a reload');
   let work = api.loadModels();
-  assert.equal(pending[0].url,'/accounts/upstreams/models?upstream=opencode_zen');
+  assert.equal(pending[0].url,'/settings/models?channel=opencode_zen');
   assert(element('tbody').innerHTML.includes('正在加载'));
   pending.shift().resolve({models:[paid,free,go],catalogues:{opencode_zen:{updated_at:Date.now()/1000}}});
   await work;
@@ -85,7 +87,7 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
   assert(api.modelLibraryRow({id:'missing',max_output_tokens:-10,context_length:Infinity}).includes('上游未提供'));
 
   work=api.selectModelsChannel('cline');
-  assert.equal(pending[0].url,'/accounts/upstreams/models?upstream=cline');
+  assert.equal(pending[0].url,'/settings/models?channel=cline');
   const many=Array.from({length:61},(_,index)=>({id:'cline/model-'+String(index).padStart(2,'0'),upstream:'cline',billing_mode:'paid'}));
   pending.shift().resolve({models:many,catalogues:{cline:{updated_at:1,stale:true,metadata_stale:true}}});await work;
   assert.equal(element('pageModels').dataset.source,'cline');
@@ -95,8 +97,22 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
   api.pageModelLibrary(1);
   assert.equal((element('tbody').innerHTML.match(/<tr>/g)||[]).length,11);
   assert(element('modelLibraryNext').disabled);
-  work=api.loadModels();pending.shift().resolve({models:many});await work;
+  const beforeBackground=element('tbody').innerHTML;
+  work=api.loadModels({background:true});
+  assert.equal(element('tbody').innerHTML,beforeBackground,'background refresh must retain the table height while the request is in flight');
+  pending.shift().resolve({models:many});await work;
+  const savedRows=element('tbody').innerHTML;
+  work=api.loadModels();pending.shift().reject(new Error('refresh offline'));await work;
+  assert.equal(element('tbody').innerHTML,savedRows,'a failed reload retains the previous table');
   assert(element('modelLibraryPager').textContent.startsWith('2 / 2'),'SSE refresh preserves the current page');
+
+  const edited={dataset:{model:many[50].id},value:'cline/my-alias',disabled:false};
+  api.editModelAlias(edited);
+  work=api.saveModelAlias(edited);
+  assert.deepEqual(posts[0].body,{channel:'cline',model_id:many[50].id,alias:'cline/my-alias'});
+  posts.shift().resolve({alias:'cline/my-alias',enabled:false});await work;
+  assert(element('tbody').innerHTML.includes('cline/my-alias'));
+  assert(api.data.find(item=>item.id===many[50].id).enabled===false);
 
   // The shared generation prevents races across the old and new API paths.
   const old=api.selectModelsChannel('workbuddy-cn'),oldReply=pending.shift();
@@ -107,7 +123,7 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
   assert(!element('tbody').innerHTML.includes('old-workbuddy'));
   const stale=api.selectModelsChannel('cline'),staleReply=pending.shift();
   work=api.selectModelsChannel('workbuddy-cn');
-  assert.equal(pending[0].url,'/v1/models?channel=workbuddy-cn');
+  assert.equal(pending[0].url,'/settings/models?channel=workbuddy-cn');
   pending.shift().resolve({data:[{id:'domestic',credits:'x0.50',channel:'workbuddy-cn',output_clamp:16000,max_output_tokens:32000,reasoning_efforts:['low','high']}]});await work;
   staleReply.resolve({models:many});await stale;
   rows=element('tbody').innerHTML;
@@ -130,14 +146,21 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
   assert.deepEqual(posts[0].body,{upstream:'opencode_zen'});
   assert.equal(posts[0].url,'/accounts/upstreams/refresh');
   posts.shift().resolve({refreshing:true});await Promise.resolve();
-  pending.shift().resolve({models:[go],catalogues:{opencode_zen:{refreshing:true}}});await work;
+  pending.shift().resolve({models:[go],catalogues:{opencode_zen:{refreshing:true}}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert(element('modelRefreshButton').disabled,'manual refresh waits for the background job');
   assert(element('modelChannelStatus').textContent.includes('正在同步'));
+  await new Promise(resolve=>setImmediate(resolve));
+  pending.shift().resolve({models:[go],catalogues:{opencode_zen:{refreshing:false}}});await work;
   assert(!element('modelRefreshButton').disabled);
   work=api.selectModelsChannel('workbuddy-intl');pending.shift().resolve({data:[]});await work;
   work=api.refreshModelLibrary();
-  assert.equal(pending[0].url,'/v1/models?channel=workbuddy-intl');
+  assert.equal(pending[0].url,'/settings/models?channel=workbuddy-intl');
   pending.shift().resolve({data:[]});await work;
-  assert.equal(posts.length,0,'WorkBuddy refresh retains its original API');
+  assert.equal(posts.length,0,'WorkBuddy catalogue needs no external platform refresh');
+  await api.copyModelId('cline/copy-this');
+  assert.deepEqual(h.copies,['cline/copy-this']);
+  assert.equal(h.toasts.at(-1)[1],'ok');
   await api.selectModelsChannel('invalid');await api.selectModelsChannel('toString');
   assert.equal(pending.length,0);
   console.log('five model channels: capabilities, prices, tiers, scope, filters, paging, persistence, refresh and races passed');

@@ -1,4 +1,4 @@
-# 从旧版升级到 1.2.5
+# 从旧版升级到 1.2.6
 
 升级工具为根目录的 `update.sh` 和 `update.py`。适用于单实例、本机 Docker Compose 安装；原生 Python 安装使用 `--source-only`。在**原安装目录**执行，不能先用新版 Compose 覆盖旧配置。
 
@@ -9,7 +9,7 @@
 旧安装没有更新脚本时，先下载固定版本：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.5/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.6/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -33,7 +33,7 @@ bash ./update.sh --compose-file docker-compose.yml \
 2. 解析旧编排、识别容器与实际挂载，拉取固定版本镜像并检查新配置。
 3. 固定旧容器的实际镜像 ID 和数据卷，包括原来的匿名卷；停止应用和本项目的 Nginx，备份全部可写 bind mount、named volume、将被覆盖的源码及旧编排。
 4. 安装源码，生成私有 `compose.runtime.json`，启动新版；首次启动导入旧账号、优先级、Key、设置和 JSONL 用量到 SQLite。
-5. 从容器内确认 `/health` 返回 `version: 1.2.5`；使用配套 Nginx 时同时检查 `nginx -t`、Nginx 健康入口和已启用的代理入口。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
+5. 从容器内确认 `/health` 返回 `version: 1.2.6`；使用配套 Nginx 时同时检查 `nginx -t`、Nginx 健康入口和已启用的代理入口。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
 
 备份位于 `.update-backups/<时间-随机标识>/`，目录权限 `0700`、归档与配置权限 `0600`。旧 JSON／JSONL 不会因迁移被删除。SQLite 主文件、WAL 与 SHM 在停服后一起保存，避免只复制主文件漏掉已提交数据。
 
@@ -102,7 +102,9 @@ Cline／Zen 凭据新增在私有 `accounts/upstreams`；Responses 正文与分�
 
 1.2.4 升级到 1.2.5 继续沿用 schema 3，五渠道模型库复用现有账号池目录和元数据缓存，无需重新登录或导入账号。原账号、优先级、组织、Key、代理、用量及 Responses 历史保留；原 WorkBuddy 倍率与输出探测结果继续显示。
 
-验证脚本 `scripts/verify_upgrade.py` 覆盖 1.1.0、1.1.1、1.1.2、1.1.3、1.2.1、1.2.2、1.2.3、1.2.4 的 Compose 升级与回滚，以及原生源码迁移；包含旧平台凭据与 Responses 历史保留检查，使用模拟账号／日志，不需要真实凭据。
+1.2.5 升级到 1.2.6 继续沿用 schema 3。模型别名与启停保存在原私有设置的 `model_policies`，未配置模型默认启用、无别名；账号、Key、代理和 Responses 历史继续保留。旧设置锚点自动进入对应独立页面。Cline／OpenCode 公共余额数值改为 5 小时剩余百分比合计，单位为 `percent`，可超过 100%；数据不完整时兼容余额接口返回 `503 balance_unavailable`。WorkBuddy 与 Command Code 继续使用原积分单位。
+
+验证脚本 `scripts/verify_upgrade.py` 覆盖 1.1.0、1.1.1、1.1.2、1.1.3、1.2.1、1.2.2、1.2.3、1.2.4、1.2.5 的 Compose 升级与回滚，以及原生源码迁移；包含旧平台凭据与 Responses 历史保留检查，使用模拟账号／日志，不需要真实凭据。
 
 ## 原生 Python／Windows 安装
 
@@ -122,8 +124,8 @@ Windows 使用 `python update.py`；下载的附件可通过同一 Release 的 `
 正式镜像均支持 `linux/amd64` 与 `linux/arm64`：
 
 ```text
-ghcr.io/albert-li-sz/workbody-fhub:1.2.5
-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.5
+ghcr.io/albert-li-sz/workbody-fhub:1.2.6
+ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.6
 ```
 
 Release 同时附带源码归档、升级脚本、`checksums.txt` 与 `images.json`。后者记录应用／Nginx 摘要和提交，`latest` 在应用与 Nginx 两种架构镜像验证通过后才更新；校验文件最后生成，并附各镜像验证回执。

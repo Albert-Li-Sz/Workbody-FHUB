@@ -127,7 +127,7 @@ class ResponseStore:
             result["history"] = [json.loads(value[0]) for value in values]
         return result
 
-    def prepare(self, payload, owner, allowed, max_bytes):
+    def prepare(self, payload, owner, allowed, max_bytes, model_resolver=None):
         for field in ("store",):
             if field in payload and type(payload[field]) is not bool:
                 raise ResponseError("%s must be a boolean" % field)
@@ -148,12 +148,17 @@ class ResponseStore:
             if not cfg["enabled"]:
                 raise ResponseError("response not found", 404, "response_not_found")
             saved = self.get(previous, owner, allowed, include_history=True)
-            if payload.get("model") and payload["model"] != saved["model"]:
+            requested_model = payload.get("model")
+            if requested_model and model_resolver:
+                requested_model = model_resolver(requested_model, realm=saved["realm"] or None)
+            if requested_model and requested_model != saved["model"]:
                 raise ResponseError("a response chain keeps its model; send full history to start another chain")
             body["model"] = saved["model"]
             context.update(conversation=saved["conversation"], upstream=saved["upstream"],
                            realm=saved["realm"], account=saved["account"], bound=saved["bound"])
             history = saved["history"]
+        elif body.get("model") and model_resolver:
+            body["model"] = model_resolver(body["model"])
         body.pop("previous_response_id", None)
         body["input"] = history + input_items(payload.get("input"))
         if len(_json(body).encode("utf-8")) > max_bytes:

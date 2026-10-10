@@ -72,7 +72,7 @@ a{color:var(--fg)}
 .brand-copy strong{display:block;font-size:14px;letter-spacing:-.3px;font-weight:650}
 .brand-copy small{font-size:11px;color:var(--dim)}
 .workspace-label{padding:0 12px;margin-bottom:10px;font-size:11px;font-weight:550;color:var(--dim)}
-.main-nav{display:flex;flex-direction:column;align-items:stretch;gap:4px;background:none;border:0;padding:0;border-radius:0;width:100%;overflow:visible}
+.main-nav{display:flex;flex-direction:column;align-items:stretch;gap:4px;background:none;border:0;padding:0;border-radius:0;width:100%;overflow:visible;order:0}
 .main-nav-btn{flex:none;justify-content:flex-start;min-height:39px;width:100%;padding:8px 12px;border-radius:6px;border:1px solid transparent;color:var(--dim);gap:11px;font-size:13px;background:transparent;box-shadow:none;font-weight:500}
 .main-nav-btn svg{width:17px;height:17px;flex:none;stroke-width:1.7}
 .main-nav-btn.active{color:var(--accent);background:var(--accent-soft);border-color:transparent;box-shadow:none;font-weight:600}
@@ -260,3 +260,14 @@ footer #logfile{overflow-wrap:anywhere;word-break:break-word}
 #modelsTable .badge{margin:2px 2px 2px 0}
 #pageModels[data-source="opencode_zen"] .badge.subscription{color:var(--source-opencode);background:var(--source-opencode-soft)}
 @media(max-width:650px){.model-library-toolbar{gap:12px}.model-library-search{width:100%;flex-basis:100%}.model-library-search input{max-width:none}#modelsTable td[data-label="价格 / 权益"],#modelsTable td[data-label="思考档位"]{flex-direction:column;align-items:flex-start}}
+
+/* Model policies share the original channel renderers and mobile cards. */
+.model-copy{display:inline;text-align:left;min-height:0;padding:0;background:none;border:0;color:var(--fg);font:inherit;font-weight:650;overflow-wrap:anywhere;word-break:break-word}
+.model-copy:hover{color:var(--accent);text-decoration:underline;background:none}
+.model-policy{display:flex;flex-direction:column;gap:8px;min-width:200px}
+.model-policy>input{width:100%;font-size:12px}
+.model-policy>div{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.model-policy label{display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap}
+#modelsTable th:last-child{width:230px}
+#modelsTable td{vertical-align:top}
+@media(max-width:650px){#modelsTable td[data-label="别名与启用"]{grid-column:span 6;flex-direction:column;align-items:stretch}.model-policy{min-width:0;width:100%}}

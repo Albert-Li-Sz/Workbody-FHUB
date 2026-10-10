@@ -29,7 +29,9 @@ from scripts.package_release import package
 
 PASSWORD = "synthetic-upgrade-password"
 KEY = "synthetic-upgrade-api-key"
-COMPOSE_VERSIONS = ("1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.2.1", "1.2.2", "1.2.3", "1.2.4")
+MODEL_POLICIES = {"workbuddy-cn": {"fixture-model": {"alias": "fixture-alias", "enabled": False}},
+                  "cline": {"cline/fixture-model": {"alias": "cline/fixture-alias", "enabled": True}}}
+COMPOSE_VERSIONS = ("1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.2.1", "1.2.2", "1.2.3", "1.2.4", "1.2.5")
 
 
 def extract_source(archive, directory):
@@ -57,6 +59,7 @@ def seed(directory):
     settings = wb_settings.load(str(accounts))
     settings.update(daily_token_limit=900000, daily_credit_limit=321, model_daily_token_limit=456789)
     settings["pool"] = {"free_switch_window_tokens": 64000}
+    settings["model_policies"] = MODEL_POLICIES
     wb_settings.save(str(accounts), settings)
     row = {"event_id":"fixture-usage", "at":time.time()-10, "realm":"cn", "account":"fixture-account",
            "key":"fixture-key", "model":"fixture-model", "outcome":"completed", "total_tokens":123,
@@ -74,6 +77,7 @@ def assert_data(directory, schema):
     assert wb_settings.model_daily_token_limit(str(accounts), "cn") == 456789
     assert wb_settings.expiring_window_days(str(accounts)) == 0
     assert wb_settings.pool_config(str(accounts))["free_switch_window_tokens"] == 64000
+    assert settings["model_policies"] == MODEL_POLICIES
     account = json.loads((accounts / "fixture.json").read_text())
     assert account["priority"] == 7 and account["enabled"] is False
     connection = sqlite3.connect(accounts / "workbody.sqlite3")
@@ -166,7 +170,7 @@ def compose_case(old_version, new_image, old_image, root):
     try:
         update.run(command+["up","-d","--pull","never"],directory)
         update.wait_application(command,"workbody-fhub",directory,old_version,60)
-        old_schema = 3 if old_version in ("1.2.1", "1.2.2", "1.2.3", "1.2.4") else (2 if old_version in ("1.1.2", "1.1.3") else 1)
+        old_schema = 3 if old_version in ("1.2.1", "1.2.2", "1.2.3", "1.2.4", "1.2.5") else (2 if old_version in ("1.1.2", "1.1.3") else 1)
         assert_data(directory,old_schema)
         old_history = seed_new_platform_and_history(directory) if old_schema == 3 else None
         update.upgrade(arguments(directory,compose_file=[str(compose)]))

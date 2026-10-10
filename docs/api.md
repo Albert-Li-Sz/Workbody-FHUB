@@ -1,6 +1,6 @@
 # API 与余额协议说明
 
-适用版本：**1.2.2**。
+适用版本：**1.2.6**。
 
 ## 地址与鉴权
 
@@ -24,6 +24,8 @@ Key 的 `allowed_upstreams` 限定可用平台，旧 Key 默认只允许 WorkBud
 | POST | `/v1/responses` | Responses，支持流式 |
 | POST | `/v1/messages` | Anthropic Messages |
 | GET / DELETE | `/v1/responses/{id}` | 当前 Key 的已保存响应；删除不破坏其他分支 |
+
+公开模型列表同时列出本名和配置的渠道别名，`canonical_id` 指向实际本名，`is_alias` 表示是否别名；两者的能力、权益与价格相同。详情与生成均支持两种 ID，停用后移除两个入口并拒绝新调用。面板管理接口 `GET /settings/models?channel=...` 保留停用行，`POST /settings/models` 接受 `channel`、`model_id`、`alias`、`enabled`；需要面板 token，详见[模型管理](platforms.md#模型别名与启停)。
 
 模型 ID 可以 URL 编码，包含 `/` 时使用 `%2F`。未知模型详情返回 `404 model not found`。目录可随上游更新，具体 ID、上下文、输出上限和能力以当前响应为准。
 
@@ -80,15 +82,17 @@ DSH 的辅助搜索入口独立配置，需将 `DEEPSEEK_SEARCH_BASE_URL` 或搜
 
 ## 余额来源与刷新
 
-WorkBuddy 余额入口汇总当前 Key 渠道内全部账号的剩余积分，包含停用账号。Cline 与 Command Code 各自以积分汇总已配置的官方用户，Zen 以 USD 表示且未提供时保持未知。`upstream=workbuddy|cline|opencode_zen|commandcode` 指定当前 Key 允许的平台；含 WorkBuddy 的 Key 默认查询 WorkBuddy，单个外部平台 Key 默认该平台，多个外部平台 Key 需指定。不同平台分别查询。币种名称及金额字段是响应协议标签，数值单位统一为积分，不做人民币、美元或 Token 的换算。
+WorkBuddy 余额入口汇总当前 Key 渠道内全部账号的剩余积分，包含停用账号。ClinePass 与 OpenCode Go 返回 5 小时剩余百分比合计，按 Cline 用户／OpenCode 组织去重，包含停用账号。80% 与 60% 合计为 140%，响应标明 `unit=percent`、`currency=percent`、`window=fiveHour`；缺失或过期额度不补零、不用钱包余额代替。Command Code 仍返回积分。`upstream=workbuddy|cline|opencode_zen|commandcode` 指定当前 Key 允许的平台；含 WorkBuddy 的 Key 默认查询 WorkBuddy，单个外部平台 Key 默认该平台，多个外部平台 Key 需指定。不同平台分别查询。数值单位以顶层 `unit` 为准，不把订阅百分比、积分或现金互相换算。
 
 | 参数 | 行为 |
 | --- | --- |
-| 不传 `refresh` | 过期或缺失数据自动刷新，默认查询缓存 60 秒 |
-| `refresh=1` | 强制刷新当前渠道账号积分 |
-| `refresh=0` | 仅读本机已有积分缓存 |
+| 不传 `refresh` | 使用对应平台缓存，过期或缺失数据自动刷新 |
+| `refresh=1` | 强制刷新当前平台余额／额度；Cline、OpenCode 和 Command Code 在后台刷新 |
+| `refresh=0` | 仅读本机已有余额／额度缓存 |
 
-原生查询允许返回已知小计和完整性状态；各余额格式适配在剩余积分未知或刷新失败时返回 `503 balance_unavailable`。已用积分未知不会阻止纯余额查询，旧版 `subscription` 和账单 `usage` 仍要求完整的已用信息。
+WorkBuddy 沿用 60 秒查询缓存；Cline／OpenCode 的额度超过 10 分钟或已到重置时间时标记过期，后台查询完成后更新缓存。
+
+原生查询允许返回已知小计和完整性状态；Cline／OpenCode 的 `accounts` 只包含各去重额度的百分比、重置时间与缓存状态，`known_count`、`unknown_count`、`stale_count` 区分可用／未知／过期。兼容余额格式在余额或额度不完整时返回 `503 balance_unavailable`。已用积分未知不会阻止纯余额查询，旧版 `subscription` 和账单 `usage` 仍要求完整的已用信息。
 
 ## 余额协议兼容范围
 
@@ -172,7 +176,7 @@ curl --request GET 'http://127.0.0.1:8788/v1/users/me/balance' \
 
 积分放入可用／赠送余额，现金余额为 `0`；若总积分为负，现金位置保留该负值、赠送位置为 `0`。数值仍为积分。
 
-DeepSeek 使用两位小数的字符串余额，`is_available` 表示剩余积分是否大于零。`balance_infos[].currency` 为 `USD` 协议标签，用于兼容优先读取 USD 的客户端；顶层仍声明 `currency: "credits"`。千问 `Data.Currency` 同样为 `USD` 协议标签，`AvailableAmount` 是积分字符串，现金和授信字段为 `"0.00"`。
+DeepSeek 使用两位小数的字符串余额，`is_available` 表示剩余积分是否大于零。WorkBuddy 的 `balance_infos[].currency` 为 `USD` 协议标签，用于兼容优先读取 USD 的客户端；顶层仍声明 `currency: "credits"`。千问 `Data.Currency` 同样为 `USD` 协议标签，`AvailableAmount` 是积分字符串，现金和授信字段为 `"0.00"`。
 
 OpenAI 旧版 `subscription.hard_limit_usd` 为剩余＋已用积分；旧版账单 `usage.total_usage` 为已用积分×100，以适配旧客户端的 `/100` 计算。这些字段名不代表真实美元金额。
 

@@ -1073,14 +1073,18 @@ class Manager:
                             exc.close()
                 for account in list(self.accounts.values()):
                     if account.upstream == upstream and (account.enabled or force):
+                        quota_pending = upstream in ("cline", "opencode_zen")
                         try:
                             self.ensure_token(account)
                             cached = account.document.get("balance") or {}
                             if force or time.time() - cached.get("updated_at", 0) >= 300:
                                 self.refresh_balance(account)
+                                quota_pending = False
                                 self.refresh_paid_usage(account)
                         except Exception as exc:
                             account.last_error = "%s refresh failed (%s)" % (upstream, type(exc).__name__)
+                            if quota_pending:
+                                self._store_billing(account, "quota", error=account.last_error)
                             if isinstance(exc, urllib.error.HTTPError):
                                 exc.close()
             finally:
@@ -1140,6 +1144,48 @@ class Manager:
         return {"upstream": upstream, "accounts": rows, "balance": self.balance(upstream),
                 "refreshing": upstream in self.refreshing, "queried_at": time.time()}
 
+    def quota_balance(self, upstream, refresh=None):
+        """Public subscription balance: one full identity represents 100%."""
+        now = time.time()
+        groups = {}
+        for account in list(self.accounts.values()):
+            if account.upstream != upstream:
+                continue
+            owner = (account.document.get("org_id") if upstream == "opencode_zen" else None) or account.document.get("user_id") or account.uid
+            status = (account.document.get("billing_status") or {}).get("quota") or {}
+            item = (account.document.get("quota") or {}).get("fiveHour") or {}
+            remain = _number(item.get("remaining_percent"))
+            updated = _number(status.get("updated_at")) or 0
+            reset = _expiry(item.get("reset_at"))
+            stale = bool(status.get("stale") or remain is not None and
+                         (not updated or now - updated > 600 or reset and reset <= now))
+            row = {"remaining_percent": min(100, remain) if remain is not None else None,
+                   "percent_used": max(0, 100 - min(100, remain)) if remain is not None else None,
+                   "reset_at": item.get("reset_at"), "updated_at": updated or None, "stale": stale}
+            failed = bool((account.document.get("billing_errors") or {}).get("quota"))
+            rank = (remain is not None and not stale, updated, remain is not None)
+            if owner not in groups or rank > groups[owner][0]:
+                groups[owner] = (rank, row, failed)
+        rows = [value[1] for value in groups.values()]
+        known = [row for row in rows if row["remaining_percent"] is not None and not row["stale"]]
+        stale_count = sum(row["stale"] for row in rows)
+        failed = sum(value[2] for value in groups.values())
+        if refresh is True or refresh is None and len(known) != len(rows):
+            self.refresh_async(upstream, force=refresh is True)
+        complete = bool(rows) and len(known) == len(rows) and not failed
+        remaining = round(sum(row["remaining_percent"] for row in known), 6) if known else None
+        return {"ok": True, "object": "balance", "upstream": upstream, "unit": "percent", "currency": "percent",
+                "window": "fiveHour", "total_remain": remaining,
+                "total_used": round(sum(row["percent_used"] for row in known), 6) if complete else None,
+                "total_granted": len(known) * 100 if complete else None,
+                "account_count": len(rows), "known_count": len(known), "unknown_count": len(rows) - len(known),
+                "stale_count": stale_count, "refresh_failed": failed, "complete": complete,
+                "refreshed": False, "refreshing": upstream in self.refreshing, "queried_at": now,
+                "quota_windows": {"fiveHour": {"known_accounts": len(known), "total_remaining_percent": remaining,
+                    "remaining_percent_min": min(row["remaining_percent"] for row in known) if known else None,
+                    "remaining_percent_max": max(row["remaining_percent"] for row in known) if known else None}},
+                "accounts": rows}
+
     def start(self):
         if self.worker:
             return
@@ -1159,7 +1205,7 @@ class Manager:
             raise PlatformError("model is not in the synchronized platform catalogue; refresh models first", 404, "model_not_found")
         return meta
 
-    def models(self, allowed):
+    def models(self, allowed, include_unavailable=False):
         data = []
         for upstream in BASES:
             if upstream not in allowed:
@@ -1168,8 +1214,9 @@ class Manager:
             if time.time() - cache.get("updated_at", 0) > 300:
                 self.refresh_async(upstream)
             for identifier, meta in (cache.get("models") or {}).items():
-                if not any(a.upstream == upstream and a.enabled and a.allows(identifier, meta) and
-                           (not a.document.get("public") or meta.get("billing_mode") == "free") for a in list(self.accounts.values())):
+                available = any(a.upstream == upstream and a.enabled and a.allows(identifier, meta) and
+                           (not a.document.get("public") or meta.get("billing_mode") == "free") for a in list(self.accounts.values()))
+                if not available and not include_unavailable:
                     continue
                 public_meta = _public_metadata(meta)
                 item = dict(public_meta, id=PREFIXES[upstream] + identifier, object="model", owned_by=upstream,

@@ -2,7 +2,7 @@
 name: workbody-fhub
 services:
   workbody-fhub:
-    image: ${WORKBODY_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub:1.2.5}
+    image: ${WORKBODY_IMAGE:-ghcr.io/albert-li-sz/workbody-fhub:1.2.6}
     restart: unless-stopped
     user: "${PUID:-0}:${PGID:-0}"
     ports:

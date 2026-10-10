@@ -58,6 +58,7 @@ import wb_catalog
 import wb_ipintel
 import wb_pricing
 import wb_settings
+import wb_model_policy
 import wb_webtools
 import wb_webflow
 import wb_messages_web
@@ -8163,6 +8164,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._platform_management("/platforms" + path[len("/accounts/upstreams"):], query=query)
         if path == "/settings/responses":
             return self._platform_management("/platforms", query={"models": ["0"]})
+        if path == "/settings/models":
+            return self._model_management(query=query)
         for prefix in ("/v1/responses/", "/responses/"):
             if path.startswith(prefix):
                 return self._stored_response(path[len(prefix):])
@@ -8499,11 +8502,24 @@ class Handler(BaseHTTPRequestHandler):
         if PLATFORMS and not channel:
             data.extend(PLATFORMS.models(allowed))
         def permitted(item):
-            if wb_settings.key_allows_model(getattr(self, "key_entry", None), item["id"]):
+            if wb_settings.key_allows_model(getattr(self, "key_entry", None), item.get("canonical_id", item["id"])):
                 return True
             return (len(allowed) == 1 and item.get("upstream_model") and
                     wb_settings.key_allows_model(getattr(self, "key_entry", None), item["upstream_model"]))
-        data = [item for item in data if permitted(item)]
+        expanded = []
+        if req_realm not in ("cn", "intl"):
+            expanded.extend(dict(item, canonical_id=item["id"], is_alias=False)
+                            for item in data if item.get("upstream") == "workbuddy")
+        for model_channel in wb_model_policy.CHANNELS:
+            entries = [item for item in data if wb_model_policy.channel_for(item.get("upstream", "workbuddy"), req_realm) == model_channel]
+            if entries:
+                native_ids = None
+                if PLATFORMS and model_channel in wb_model_policy.PREFIXES:
+                    native_ids = {wb_platforms.PREFIXES[model_channel] + identifier for identifier in
+                                  (PLATFORMS.catalogues.get(model_channel, {}).get("models") or {})}
+                expanded.extend(wb_model_policy.expand(entries, wb_model_policy.policies(ACCOUNTS_DIR, model_channel),
+                                                       model_channel, real_ids=native_ids))
+        data = [item for item in expanded if permitted(item)]
         if model_id is not None:
             try:
                 _, _, model_id = wb_platforms.route(model_id, getattr(self, "key_entry", None))
@@ -8515,6 +8531,49 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(404, "model not found", "invalid_request_error")
         return self._json(200, {"object": "list", "data": data, "realm": req_realm,
                                 "channel": {"cn": "workbuddy-cn", "intl": "workbuddy-intl"}.get(req_realm), "source": "workbuddy" if allowed == ["workbuddy"] else "fhub", "upstreams": allowed})
+
+    def _model_management(self, query=None, payload=None):
+        try:
+            channel = (payload or {}).get("channel") if payload is not None else (query or {}).get("channel", [None])[0]
+            if channel not in wb_model_policy.CHANNELS:
+                raise wb_model_policy.PolicyError("invalid model channel")
+            catalogues = {}
+            if channel.startswith("workbuddy-"):
+                realm = "cn" if channel == "workbuddy-cn" else "intl"
+                entries = [dict(model_entry(mid, meta), upstream="workbuddy") for mid, meta in fetch_models(realm=realm)]
+            else:
+                if not PLATFORMS:
+                    return self._error(503, "platform manager is unavailable")
+                entries = PLATFORMS.models([channel], include_unavailable=True)
+                catalogues[channel] = PLATFORMS.catalogue_status(channel)
+            if payload is not None:
+                result = wb_model_policy.update(ACCOUNTS_DIR, channel, payload.get("model_id"), payload,
+                                                {item["id"] for item in entries})
+                wb_events.BROKER.publish("models")
+                return self._json(200, result)
+            data = wb_model_policy.decorate(entries, wb_model_policy.policies(ACCOUNTS_DIR, channel), channel)
+            return self._json(200, {"data": data, "models": data, "channel": channel, "catalogues": catalogues})
+        except wb_model_policy.PolicyError as exc:
+            return self._error(exc.status, str(exc), "invalid_request_error", exc.code)
+        except Exception:
+            return self._error(502, "cannot load this channel's model catalogue")
+
+    def _resolve_model_policy(self, model, realm=None):
+        upstream, raw, public = wb_platforms.route(model, self.key_entry)
+        realm = realm or self._request_realm() or CURRENT_REALM
+        channel = wb_model_policy.channel_for(upstream, realm)
+        if channel is None:
+            channel = wb_model_policy.channel_for(upstream, exclusive_realm(public))
+            if channel is None:
+                return public
+        if upstream == "workbuddy":
+            # Use an already synchronized catalogue here; generation must not
+            # need a fresh metadata request just to check its local switch.
+            known = {mid for mid, _ in (_models_cache.get(realm) or {}).get("data") or []}
+        else:
+            known = {wb_platforms.PREFIXES[upstream] + identifier for identifier in
+                     (PLATFORMS.catalogues.get(upstream, {}).get("models") or {})} if PLATFORMS else set()
+        return wb_model_policy.resolve(ACCOUNTS_DIR, channel, public, known)
 
     def _get_v1_usage(self, query):
         if not self._authorized():
@@ -8592,7 +8651,12 @@ class Handler(BaseHTTPRequestHandler):
                 kind = wb_balance.PROVIDERS.get(query["provider"][0].strip().lower())
                 if kind is None:
                     return self._error(400, "unsupported balance provider", "invalid_request_error")
-            summary = PLATFORMS.balance(upstream, query.get("refresh", ["0"])[0] in ("1", "true", "yes"))
+            value = query.get("refresh", [""])[0].lower()
+            if value not in ("", "1", "true", "yes", "0", "false", "no"):
+                return self._error(400, "refresh must be 1 or 0", "invalid_request_error")
+            balance_query = PLATFORMS.quota_balance if upstream in ("cline", "opencode_zen") else PLATFORMS.balance
+            refresh = None if not value else value in ("1", "true", "yes")
+            summary = balance_query(upstream, refresh)
             if kind == "balance":
                 return self._json(200, summary)
             response = wb_balance.billing_response(summary, kind)
@@ -10954,6 +11018,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_panel(path)
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
+        if path == "/settings/models":
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._model_management(payload=payload)
         if path.startswith("/platforms/"):
             payload = self._payload_or_error(allow_list=(path == "/platforms/accounts/import"))
             if payload is None:
@@ -11031,18 +11100,21 @@ class Handler(BaseHTTPRequestHandler):
                         "responses" if path in ("/v1/responses", "/responses") else "chat")
             try:
                 wb_validation.validate_request(payload, protocol)
-                if payload.get("model"):
-                    _, _, canonical = wb_platforms.route(payload["model"], self.key_entry)
-                    payload["model"] = canonical
+                if payload.get("model") and not (protocol == "responses" and RESPONSE_STORE):
+                    payload["model"] = self._resolve_model_policy(payload["model"])
                 if protocol == "responses" and RESPONSE_STORE:
                     payload, self._response_context = RESPONSE_STORE.prepare(payload, self._key_id(),
-                        wb_settings.key_upstreams(self.key_entry), MAX_PAYLOAD_BYTES)
+                        wb_settings.key_upstreams(self.key_entry), MAX_PAYLOAD_BYTES, model_resolver=self._resolve_model_policy)
                     bound_realm = self._key_realm()
                     if (self._response_context.get("realm") and bound_realm and
                             self._response_context["realm"] != bound_realm):
                         raise wb_responses.ResponseError("response not found", 404, "response_not_found")
                 wb_validation.validate_request(payload, protocol)
+                if payload.get("model"):
+                    payload["model"] = self._resolve_model_policy(payload["model"])
                 upstream, raw_model, public_model = wb_platforms.route(payload.get("model"), self.key_entry)
+                if upstream == "workbuddy" and not public_model:
+                    self._resolve_model_policy("hy4-preview" if protocol == "chat" else "deepseek-v4.1-flash")
                 if upstream != "workbuddy":
                     if not PLATFORMS:
                         raise wb_platforms.PlatformError("platform manager is unavailable", 503)
@@ -11054,7 +11126,7 @@ class Handler(BaseHTTPRequestHandler):
                     return wb_platform_api.handle(self, payload, protocol, upstream, raw_model, public_model)
                 if protocol == "responses":
                     wb_protocol_bridge.validate_portable_responses(payload)
-            except (wb_responses.ResponseError, wb_platforms.PlatformError) as exc:
+            except (wb_responses.ResponseError, wb_platforms.PlatformError, wb_model_policy.PolicyError) as exc:
                 if exc.status == 429:
                     return self._anthropic_rate_limited(exc) if is_messages_route else self._rate_limited(exc)
                 if is_messages_route:

@@ -21,6 +21,9 @@
       <button class="main-nav-btn" id="btnNavTasks" data-action="switchMainTab" data-on="click" data-arg="tasks" title="任务中心"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="17" rx="2"/><path d="M9 4V2h6v2M8 10l2 2 4-4M8 16h8"/></svg><span>任务中心</span></button>
       <button class="main-nav-btn" id="btnNavAnalytics" data-action="switchMainTab" data-on="click" data-arg="analytics" title="用量与成本"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 3v17h17M8 16v-5M13 16V7M18 16V4"/></svg><span>用量与成本</span></button>
       <button class="main-nav-btn" id="btnNavModels" data-action="switchMainTab" data-on="click" data-arg="models" title="模型与档位"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><span>模型库</span></button>
+      <button class="main-nav-btn" id="btnNavKeys" data-action="switchMainTab" data-on="click" data-arg="keys" title="API Key"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="4"/><path d="m11 11 9 9M15 15l3-3M18 18l3-3"/></svg><span>API Key</span></button>
+      <button class="main-nav-btn" id="btnNavProxies" data-action="switchMainTab" data-on="click" data-arg="proxies" title="代理槽"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M7 10v7h7M10 7h7v7"/></svg><span>代理槽</span></button>
+      <button class="main-nav-btn" id="btnNavBehavior" data-action="switchMainTab" data-on="click" data-arg="behavior" title="行为与工具"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 6 4-4a6 6 0 0 1-8 8l-7 7a2 2 0 0 0 4 4l7-7a6 6 0 0 1 8-8l-4 4Z"/></svg><span>行为与工具</span></button>
       <button class="main-nav-btn" id="btnNavLogs" data-action="switchMainTab" data-on="click" data-arg="logs" title="运行日志"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg><span>请求与日志</span></button>
       <button class="main-nav-btn" id="btnNavSettings" data-action="switchMainTab" data-on="click" data-arg="settings" title="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg><span>设置</span></button>
     </nav>
@@ -433,6 +436,7 @@
             <th style="text-align:center;width:110px">上下文窗口</th>
             <th style="text-align:center;width:100px">最大输出</th>
             <th style="text-align:left">思考档位</th>
+            <th style="text-align:left">别名与启用</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -621,12 +625,120 @@
 
 
 
+<div id="pageKeys" class="main-page">
+  <div class="page-hero"><div><div class="eyebrow">网关配置</div><h2>API Key</h2><p>管理 Key 的平台权限、模型限制与 WorkBuddy 出口绑定。</p></div><div class="page-actions"><button class="sec" data-action="loadSettings" data-on="click" data-arg="1">重新读取</button></div></div>
+    <section id="settings-keys">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0">API Key 与出口绑定 <em id="setKeyState"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">
+            为每个 Key 固定绑定 WorkBuddy 国内或 WorkBuddy 国际。绑定后不受默认出口切换影响。
+          </div>
+        </div>
+        <button  data-action="addApiKeyRow" data-on="click">+ 添加 API Key</button>
+      </div>
+      <div id="keyList"></div>
+      <!-- 已删除的 Key 只留名字和日期：密钥已抹掉，所以这里没有「复制」。
+           历史用量按 id 记账，删掉这一行会让那些请求变成「未知 key」。 -->
+      <div id="deletedKeySection"></div>
+    </section>
+</div>
+
+<div id="pageProxies" class="main-page">
+  <div class="page-hero"><div><div class="eyebrow">网关配置</div><h2>代理槽</h2><p>配置账号固定出口、代理认证与出口检测。</p></div><div class="page-actions"><button class="sec" data-action="loadProxySlots" data-on="click" data-arg="1">重新读取</button></div></div>
+    <section id="settings-slots">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+        <div>
+          <h2 style="margin:0">代理槽 <em id="slotState"></em></h2>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">
+            支持 HTTP、SOCKS5／SOCKS5h 及用户名密码认证。每个账号固定绑定一个出口代理槽，修改后绑定账号自动跟随。
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="sec"  data-action="discoverProxySlots" data-on="click">自动发现 mihomo 端口</button>
+          <button class="sec"  data-action="addProxySlotRow" data-on="click">+ 添加槽位</button>
+          <button  data-action="saveProxySlots" data-on="click">保存槽位</button>
+        </div>
+      </div>
+      <div id="slotList"></div>
+      <div id="slotDiscover"></div>
+    </section>
+</div>
+
+<div id="pageBehavior" class="main-page">
+  <div class="page-hero"><div><div class="eyebrow">网关配置</div><h2>行为与工具</h2><p>管理出站身份切换、每日活跃及本地网络工具。</p></div><div class="page-actions"><button class="sec" data-action="loadSettings" data-on="click" data-arg="1">重新读取</button></div></div>
+      <section id="settings-behavior">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">429 自动切换出站身份 <em id="setAutoSwitchState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额渠道，开启后 429 会少一些。默认关闭。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：切换后的身分会被保存，重启后继续沿用，不会自动回到 WB。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAutoSwitch" type="checkbox" style="width:16px;height:16px">
+              启用自动切换
+            </label>
+            <button  data-action="saveAutoSwitchProduct" data-on="click">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              为国际版账号增加一次网页渠道对话，用于领取每日活跃奖励。默认开启。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：网页渠道会真的起一次任务，消耗该账号少量积分，换来的是每日 30/50 积分活跃奖励。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setDailyChatWeb" type="checkbox" style="width:16px;height:16px">
+              走网页渠道
+            </label>
+            <button  data-action="saveDailyChatWeb" data-on="click">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">本地网络工具 (web_search / web_fetch) <em id="setLocalWebToolsState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              为客户端声明的 web_search / web_fetch 提供本地执行：通过 DuckDuckGo 搜索或读取网页，再将结果返回模型。默认关闭，关闭时原样转发工具声明。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              注意：开启后网关会主动出网抓取模型给出的 URL（校验 DNS 与每次重定向，只连接已验证的公网地址），且每轮代跑都会多跑一次上游、多消耗该账号的额度；国内网络下 DuckDuckGo 可能连不上，那时模型拿到的是错误文本。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setLocalWebTools" type="checkbox" style="width:16px;height:16px">
+              由网关代跑
+            </label>
+            <button  data-action="saveLocalWebTools" data-on="click">保存</button>
+          </div>
+        </div>
+      </section>
+
+
+</div>
+
   <div id="pageSettings" class="main-page">
     <div class="page-hero">
       <div>
         <div class="eyebrow">设置</div>
         <h2>网关设置</h2>
-        <p>管理访问权限、账号额度与网关行为。每个区块独立保存。</p>
+        <p>管理面板访问、账号额度、计价与会话存储。每个区块独立保存。</p>
       </div>
       <div class="page-actions">
         <button class="sec" data-action="loadSettings" data-on="click" data-arg="1">重新读取</button>
@@ -634,13 +746,10 @@
     </div>
     <nav class="settings-subnav" aria-label="设置分类">
       <a href="#settings-access">存取</a>
-      <a href="#settings-keys">API Key</a>
-      <a href="#settings-slots">代理槽</a>
       <a href="#settings-quota">额度治理</a>
       <a href="#settings-pricing">计价</a>
       <a href="#settings-responses">Responses 会话</a>
       <a href="#settings-infrastructure">存储与连接</a>
-      <a href="#settings-behavior">行为与工具</a>
       <a href="#settings-advanced">进阶</a>
       <a href="#settings-runtime">运行信息</a>
     </nav>
@@ -665,39 +774,9 @@
       <div id="settingsSnapshotHint" style="display:none;margin-top:10px;color:var(--warn);font-size:12px">设置文件无法读取，当前使用最后一次有效配置。请修复设置文件后再修改配置。</div>
     </section>
 
-    <section id="settings-keys">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-        <div>
-          <h2 style="margin:0">API Key 与出口绑定 <em id="setKeyState"></em></h2>
-          <div style="font-size:12px;color:var(--dim);margin-top:4px">
-            为每个 Key 固定绑定 WorkBuddy 国内或 WorkBuddy 国际。绑定后不受默认出口切换影响。
-          </div>
-        </div>
-        <button  data-action="addApiKeyRow" data-on="click">+ 添加 API Key</button>
-      </div>
-      <div id="keyList"></div>
-      <!-- 已删除的 Key 只留名字和日期：密钥已抹掉，所以这里没有「复制」。
-           历史用量按 id 记账，删掉这一行会让那些请求变成「未知 key」。 -->
-      <div id="deletedKeySection"></div>
-    </section>
 
-    <section id="settings-slots">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-        <div>
-          <h2 style="margin:0">代理槽 <em id="slotState"></em></h2>
-          <div style="font-size:12px;color:var(--dim);margin-top:4px">
-            支持 HTTP、SOCKS5／SOCKS5h 及用户名密码认证。每个账号固定绑定一个出口代理槽，修改后绑定账号自动跟随。
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="sec"  data-action="discoverProxySlots" data-on="click">自动发现 mihomo 端口</button>
-          <button class="sec"  data-action="addProxySlotRow" data-on="click">+ 添加槽位</button>
-          <button  data-action="saveProxySlots" data-on="click">保存槽位</button>
-        </div>
-      </div>
-      <div id="slotList"></div>
-      <div id="slotDiscover"></div>
-    </section>
+
+
 
     <section id="settings-quota">
       <h2>分渠道限额与积分临期</h2>
@@ -761,69 +840,6 @@
         <h2>存储与连接</h2>
         <div class="infrastructure-grid" id="infrastructureStats"><div class="empty">读取运行状态…</div></div>
         <p class="hint">SQLite 保存账号、设置、用量与会话绑定。单实例无需 Redis；Redis 镜像可在下方按需配置。</p>
-      </section>
-
-      <section id="settings-behavior">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-          <div>
-            <h2 style="margin:0">429 自动切换出站身份 <em id="setAutoSwitchState"></em></h2>
-            <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              某账号在某模型上被上游限流（429）时，自动在 WB / VSC / CLI 之间换身分重试，每轮最多 4 次。三条身分走不同的配额渠道，开启后 429 会少一些。默认关闭。
-            </div>
-            <div style="font-size:12px;color:var(--warn);margin-top:4px">
-              注意：切换后的身分会被保存，重启后继续沿用，不会自动回到 WB。
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
-              <input id="setAutoSwitch" type="checkbox" style="width:16px;height:16px">
-              启用自动切换
-            </label>
-            <button  data-action="saveAutoSwitchProduct" data-on="click">保存</button>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-          <div>
-            <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
-            <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              为国际版账号增加一次网页渠道对话，用于领取每日活跃奖励。默认开启。
-            </div>
-            <div style="font-size:12px;color:var(--warn);margin-top:4px">
-              注意：网页渠道会真的起一次任务，消耗该账号少量积分，换来的是每日 30/50 积分活跃奖励。
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
-              <input id="setDailyChatWeb" type="checkbox" style="width:16px;height:16px">
-              走网页渠道
-            </label>
-            <button  data-action="saveDailyChatWeb" data-on="click">保存</button>
-          </div>
-        </div>
-      </section>
-
-      <section>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-          <div>
-            <h2 style="margin:0">本地网络工具 (web_search / web_fetch) <em id="setLocalWebToolsState"></em></h2>
-            <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              为客户端声明的 web_search / web_fetch 提供本地执行：通过 DuckDuckGo 搜索或读取网页，再将结果返回模型。默认关闭，关闭时原样转发工具声明。
-            </div>
-            <div style="font-size:12px;color:var(--warn);margin-top:4px">
-              注意：开启后网关会主动出网抓取模型给出的 URL（校验 DNS 与每次重定向，只连接已验证的公网地址），且每轮代跑都会多跑一次上游、多消耗该账号的额度；国内网络下 DuckDuckGo 可能连不上，那时模型拿到的是错误文本。
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
-              <input id="setLocalWebTools" type="checkbox" style="width:16px;height:16px">
-              由网关代跑
-            </label>
-            <button  data-action="saveLocalWebTools" data-on="click">保存</button>
-          </div>
-        </div>
       </section>
 
       <span id="settings-advanced"></span>

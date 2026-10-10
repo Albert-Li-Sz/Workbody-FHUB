@@ -249,22 +249,24 @@ async function loadSettings(showToast){
       }
     // Rebuild the editable rows, keeping stored values so an untouched field
     // is not accidentally blanked.
-    API_KEY_ROWS = (data.api_keys || []).map(k => ({
-      id: k.id || '',
-      name: k.name || '',
-      key: '',
-      // The server keeps the stored value when a row comes back blank, so
-      // leaving the field untouched will not wipe an existing key.
-      stored_key: '',
-      masked: k.masked || '',
-      realm: k.realm || '',
-      allowed_upstreams: k.allowed_upstreams || ['workbuddy'],
-      models: Array.isArray(k.models) ? k.models.slice() : [],
-      enabled: k.enabled !== false,
-      created_at: k.created_at || '',
-      _editing: false,
-    }));
-    window.API_KEY_ROWS = API_KEY_ROWS;
+    if(showToast || !API_KEY_ROWS.some(row => row._editing)){
+      API_KEY_ROWS = (data.api_keys || []).map(k => ({
+        id: k.id || '',
+        name: k.name || '',
+        key: '',
+        // The server keeps the stored value when a row comes back blank, so
+        // leaving the field untouched will not wipe an existing key.
+        stored_key: '',
+        masked: k.masked || '',
+        realm: k.realm || '',
+        allowed_upstreams: k.allowed_upstreams || ['workbuddy'],
+        models: Array.isArray(k.models) ? k.models.slice() : [],
+        enabled: k.enabled !== false,
+        created_at: k.created_at || '',
+        _editing: false,
+      }));
+      window.API_KEY_ROWS = API_KEY_ROWS;
+    }
     DELETED_KEY_ROWS = (data.deleted_api_keys || []).map(k => ({
       id: k.id || '',
       name: k.name || '',

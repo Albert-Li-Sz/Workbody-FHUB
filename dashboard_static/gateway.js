@@ -231,7 +231,7 @@ function generatePageList(current, total){
 
 // Tab ids in nav order. One list so the restore path and the nav cannot
 // drift apart.
-const MAIN_TABS = ['gateway', 'accounts', 'tasks', 'analytics', 'models', 'logs', 'settings'];
+const MAIN_TABS = ['gateway', 'accounts', 'tasks', 'analytics', 'models', 'keys', 'proxies', 'behavior', 'logs', 'settings'];
 const MAIN_TAB_STORE = 'wb-proxy-main-tab';
 let currentMainTab = 'gateway';
 let analyticsRange = 'today';
@@ -397,7 +397,8 @@ async function flushPanelRefresh(){
   if(topics.has('tasks') && currentMainTab === 'tasks') jobs.push(loadGrowthTasks());
   if(topics.has('scheduler') && ['gateway','tasks'].includes(currentMainTab)) jobs.push(loadSchedulerStatus());
   if(topics.has('logs') && currentMainTab === 'logs' && logAutoRefresh) jobs.push(fetchNewLogs(false));
-  if(topics.has('models') && currentMainTab === 'models') jobs.push(loadModels());
+  // Model browsing is explicitly refreshed by navigation or the user.
+  // Background catalogue events must not replace a table being read/edited.
   if(topics.has('account_activity')) renderAccounts();
   // Settings editors retain unsaved inputs. Their own save handlers reload
   // confirmed values; another admin's event must not erase a draft.
@@ -502,7 +503,7 @@ async function startDashboard(){
   // 别让国内版那条约 2 秒的成长任务接口把首屏的用量卡片拖在后面。
   await loadSettings();
   await initRealm();
-  await Promise.all([loadAccounts(), loadModels(), loadGrowthTasks(),
+  await Promise.all([loadAccounts(), loadGrowthTasks(),
                      loadSchedulerStatus(), refresh()]);
   updateRecentLimitButtons();
   // The head script already resolved this before first paint; re-apply it
