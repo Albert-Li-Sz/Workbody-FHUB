@@ -42,12 +42,22 @@ class PlatformsTests(unittest.TestCase):
 
     def test_legacy_and_single_platform_aliases(self):
         self.assertEqual(U.route('model', None), ('workbuddy','model','model'))
-        self.assertEqual(U.route('provider/model', {'allowed_upstreams':['cline']}), ('cline','provider/model','cline/provider/model'))
+        self.assertEqual(U.route('provider/model', {'allowed_upstreams':['cline']}), ('cline','provider/model','provider/model'))
+        self.assertEqual(U.route('cline/provider/model', {'allowed_upstreams':['cline']}), ('cline','provider/model','provider/model'))
         with self.assertRaises(U.PlatformError) as result:
             U.route('opencode/model', {'allowed_upstreams':['cline']})
         self.assertEqual(result.exception.status, 403)
         with self.assertRaises(U.PlatformError):
             U.route('model', {'allowed_upstreams':['cline','opencode_zen']})
+
+    def test_cline_native_namespace_and_other_platform_prefixes(self):
+        native = {'cline-pass/model', 'cline/native', 'opencode/model'}
+        key = {'allowed_upstreams': ['cline', 'opencode_zen']}
+        for value in ('cline-pass/model', 'cline/native'):
+            self.assertEqual(U.route(value, key, native), ('cline', value, value))
+            self.assertEqual(U.route('cline/' + value, key, native), ('cline', value, value))
+        self.assertEqual(U.route('opencode/model', key, native), ('opencode_zen', 'model', 'opencode/model'))
+        self.assertEqual(U.route('opencode/model', {'allowed_upstreams':['cline']}, native), ('cline', 'opencode/model', 'opencode/model'))
 
     def test_catalog_entitlements_and_native_protocols(self):
         models=U.parse_catalog('cline', {'data':{'recommended':[{'id':'paid'}], 'free':[{'id':'free'}], 'clinePass':[{'id':'pass'}]}})

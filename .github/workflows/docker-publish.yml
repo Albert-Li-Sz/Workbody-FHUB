@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Published release tag (e.g. v1.2.6)"
+        description: "Published release tag (e.g. v1.2.7)"
         required: true
         type: string
       reuse_images:
@@ -159,7 +159,7 @@ jobs:
         APP_IMAGE: ${{ steps.images.outputs.primary }}
         NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
       run: |
-        for version in 1.1.0 1.1.1 1.1.2 1.1.3 1.2.1 1.2.2 1.2.3 1.2.4 1.2.5; do
+        for version in 1.1.0 1.1.1 1.1.2 1.1.3 1.2.1 1.2.2 1.2.3 1.2.4 1.2.5 1.2.6; do
           docker pull "ghcr.io/albert-li-sz/workbody-fhub:$version"
           docker tag "ghcr.io/albert-li-sz/workbody-fhub:$version" "workbody-fhub:$version"
         done
@@ -171,6 +171,7 @@ jobs:
         docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.3
         docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.4
         docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.5
+        docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.6
         docker pull "$APP_IMAGE:$RELEASE_TAG"
         docker pull "$NGINX_IMAGE:$RELEASE_TAG"
         # Container-written private bind mounts belong to root on Linux. Exercise

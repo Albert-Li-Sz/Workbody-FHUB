@@ -262,6 +262,12 @@ footer #logfile{overflow-wrap:anywhere;word-break:break-word}
 @media(max-width:650px){.model-library-toolbar{gap:12px}.model-library-search{width:100%;flex-basis:100%}.model-library-search input{max-width:none}#modelsTable td[data-label="价格 / 权益"],#modelsTable td[data-label="思考档位"]{flex-direction:column;align-items:flex-start}}
 
 /* Model policies share the original channel renderers and mobile cards. */
+.model-library-batch{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px;font-size:12px;color:var(--dim)}
+.model-library-batch label{display:flex;align-items:center;gap:6px;color:var(--fg)}
+.model-library-batch input,.model-select{width:16px;height:16px;padding:0;flex:none;accent-color:var(--accent)}
+.model-name{display:flex;align-items:flex-start;gap:8px}
+.model-name>div{min-width:0}
+.model-select{margin-top:2px}
 .model-copy{display:inline;text-align:left;min-height:0;padding:0;background:none;border:0;color:var(--fg);font:inherit;font-weight:650;overflow-wrap:anywhere;word-break:break-word}
 .model-copy:hover{color:var(--accent);text-decoration:underline;background:none}
 .model-policy{display:flex;flex-direction:column;gap:8px;min-width:200px}

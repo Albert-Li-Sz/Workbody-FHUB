@@ -44,24 +44,42 @@ class PlatformError(ValueError):
         self.message, self.detail = message, ""
 
 
-def route(model, key_entry=None):
+def public_model_id(upstream, identifier):
+    return identifier if upstream == "cline" else PREFIXES[upstream] + identifier
+
+
+def route(model, key_entry=None, cline_ids=None):
     allowed = wb_settings.key_upstreams(key_entry)
     model = str(model or "")
+    # Cline's native catalogue IDs already carry their provider namespace.
+    # Exact catalogue matches also preserve a native ID beginning with cline/.
+    reserved = any(model.startswith(prefix) for upstream, prefix in PREFIXES.items() if upstream != "cline")
+    if model and model in (cline_ids or ()) and (not reserved or allowed == ["cline"]):
+        if "cline" not in allowed:
+            raise PlatformError("API Key does not allow this platform", 403, "platform_not_allowed")
+        return "cline", model, model
     for upstream, prefix in PREFIXES.items():
         if model.startswith(prefix):
             if upstream not in allowed:
                 raise PlatformError("API Key does not allow this platform", 403, "platform_not_allowed")
             if not model[len(prefix):]:
                 raise PlatformError("model ID is empty")
-            return upstream, model[len(prefix):], model
+            raw = model[len(prefix):]
+            return upstream, raw, public_model_id(upstream, raw)
     if len(allowed) == 1 and allowed[0] in PREFIXES:
         upstream = allowed[0]
         if not model:
             raise PlatformError("model is required for this platform")
-        return upstream, model, PREFIXES[upstream] + model
+        return upstream, model, public_model_id(upstream, model)
     if "workbuddy" in allowed:
         return "workbuddy", model, model
     raise PlatformError("use a platform-prefixed model ID with a multi-platform API Key")
+
+
+def key_allows_model(key_entry, upstream, public_model):
+    """Retain existing Cline-prefixed Key allowlists across the ID change."""
+    return (wb_settings.key_allows_model(key_entry, public_model) or
+            upstream == "cline" and wb_settings.key_allows_model(key_entry, "cline/" + public_model))
 
 
 def _number(value):
@@ -1219,7 +1237,7 @@ class Manager:
                 if not available and not include_unavailable:
                     continue
                 public_meta = _public_metadata(meta)
-                item = dict(public_meta, id=PREFIXES[upstream] + identifier, object="model", owned_by=upstream,
+                item = dict(public_meta, id=public_model_id(upstream, identifier), object="model", owned_by=upstream,
                             upstream=upstream, upstream_model=identifier, created=int(cache.get("updated_at", 0)),
                             stale=bool(meta.get("stale")) or time.time() - cache.get("updated_at", 0) > 600)
                 limits = meta.get("limit") or {}

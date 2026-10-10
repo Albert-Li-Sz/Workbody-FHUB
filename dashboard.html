@@ -426,6 +426,13 @@
         </select>
       </label>
     </div>
+    <div class="model-library-batch">
+      <label><input id="modelLibrarySelectAll" type="checkbox" data-action="selectAllModelLibrary" data-on="change"> 全选筛选结果（跨页）</label>
+      <span id="modelLibrarySelectionCount" aria-live="polite">已选 0 个</span>
+      <button id="modelLibraryBatchEnable" class="sec mini" data-action="setSelectedModelsEnabled" data-on="click" data-arg="1" disabled>批量启用</button>
+      <button id="modelLibraryBatchDisable" class="sec mini" data-action="setSelectedModelsEnabled" data-on="click" data-arg="0" disabled>批量停用</button>
+      <button id="modelLibraryClearSelection" class="sec mini" data-action="clearModelSelection" data-on="click" disabled>取消选择</button>
+    </div>
     <div style="overflow-x:auto">
       <table id="modelsTable" class="data-cards">
         <thead>

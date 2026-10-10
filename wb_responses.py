@@ -149,11 +149,14 @@ class ResponseStore:
                 raise ResponseError("response not found", 404, "response_not_found")
             saved = self.get(previous, owner, allowed, include_history=True)
             requested_model = payload.get("model")
+            saved_model = saved["model"]
+            if model_resolver:
+                saved_model = model_resolver(saved_model, realm=saved["realm"] or None, upstream=saved["upstream"])
             if requested_model and model_resolver:
-                requested_model = model_resolver(requested_model, realm=saved["realm"] or None)
-            if requested_model and requested_model != saved["model"]:
+                requested_model = model_resolver(requested_model, realm=saved["realm"] or None, upstream=saved["upstream"])
+            if requested_model and requested_model != saved_model:
                 raise ResponseError("a response chain keeps its model; send full history to start another chain")
-            body["model"] = saved["model"]
+            body["model"] = saved_model
             context.update(conversation=saved["conversation"], upstream=saved["upstream"],
                            realm=saved["realm"], account=saved["account"], bound=saved["bound"])
             history = saved["history"]

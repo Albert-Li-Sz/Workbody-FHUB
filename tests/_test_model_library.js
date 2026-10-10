@@ -25,7 +25,7 @@ function harness(savedChannel=''){
   const document = {getElementById:element,querySelector:()=>element('tbody')};
   const api = new Function('window','document','localStorage','getJSON','postJSON','esc','navigator','toast','setTimeout',
     "let MODELS_DATA=[]; const SOURCE_ROOT='/accounts/upstreams';\n"+formatting+core+prices+extension+
-    '\nreturn {loadModels,selectModelsChannel,selectedModelsChannel,filterModelLibrary,pageModelLibrary,refreshModelLibrary,modelLibraryRow,modelLibraryEffortHtml,modelLibraryCapabilityHtml,copyModelId,editModelAlias,saveModelAlias,saveModelPolicy,get data(){return MODELS_DATA;}};')
+    '\nreturn {loadModels,selectModelsChannel,selectedModelsChannel,filterModelLibrary,pageModelLibrary,refreshModelLibrary,modelLibraryRow,modelLibraryEffortHtml,modelLibraryCapabilityHtml,copyModelId,editModelAlias,saveModelAlias,saveModelPolicy,selectAll:typeof selectAllModelLibrary=== "function"?selectAllModelLibrary:null,toggleSelection:typeof toggleModelSelection=== "function"?toggleModelSelection:null,batchEnabled:typeof setSelectedModelsEnabled=== "function"?setSelectedModelsEnabled:null,clearSelection:typeof clearModelSelection=== "function"?clearModelSelection:null,get data(){return MODELS_DATA;}};')
     (window,document,localStorage,getJSON,postJSON,esc,navigator,toast,callback=>setImmediate(callback));
   return {api,element,window,stored,pending,posts,copies,toasts};
 }
@@ -88,12 +88,44 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
 
   work=api.selectModelsChannel('cline');
   assert.equal(pending[0].url,'/settings/models?channel=cline');
-  const many=Array.from({length:61},(_,index)=>({id:'cline/model-'+String(index).padStart(2,'0'),upstream:'cline',billing_mode:'paid'}));
+  const many=Array.from({length:61},(_,index)=>({id:'cline-pass/model-'+String(index).padStart(2,'0'),upstream:'cline',billing_mode:'paid'}));
   pending.shift().resolve({models:many,catalogues:{cline:{updated_at:1,stale:true,metadata_stale:true}}});await work;
   assert.equal(element('pageModels').dataset.source,'cline');
   assert.equal(h.stored.wb_model_channel,'cline');
   assert.equal((element('tbody').innerHTML.match(/<tr>/g)||[]).length,50);
   assert.equal(element('modelChannelStatus').dataset.tone,'warn');
+  assert(element('modelLibrarySelectionCount').textContent.includes('已选 0'), 'model library must expose batch selection');
+  api.selectAll({checked:true});
+  assert(element('modelLibrarySelectionCount').textContent.includes('已选 61'), 'all filtered pages are selected');
+  assert(element('modelLibrarySelectAll').checked);
+  api.toggleSelection({dataset:{model:many[0].id},checked:false});
+  assert(element('modelLibrarySelectAll').indeterminate);
+  assert(element('modelLibrarySelectionCount').textContent.includes('已选 60'));
+  work=api.batchEnabled(false);
+  await api.batchEnabled(true);
+  assert.equal(posts.length,1,'a pending batch cannot issue another write');
+  assert.equal(posts[0].body.model_ids.length,60);
+  assert(!posts[0].body.model_ids.includes(many[0].id));
+  posts.shift().resolve({channel:'cline',model_ids:many.slice(1).map(item=>item.id),enabled:false,count:60});await work;
+  assert(api.data[0].enabled!==false);
+  assert(api.data.slice(1).every(item=>item.enabled===false));
+  assert(!element('modelLibraryBatchEnable').disabled);
+  work=api.batchEnabled(true);posts.shift().reject(new Error('batch offline'));await work;
+  assert(api.data.slice(1).every(item=>item.enabled===false),'failed batch retains all model switches');
+  assert(h.toasts.at(-1)[0].includes('batch offline'));
+  api.clearSelection();
+  element('modelLibrarySearch').value='model-0';api.filterModelLibrary();
+  api.selectAll({checked:true});
+  assert(element('modelLibrarySelectionCount').textContent.includes('已选 10'));
+  element('modelLibrarySearch').value='';api.filterModelLibrary();
+  assert(element('modelLibrarySelectionCount').textContent.includes('已选 10'), 'selection persists while filtering');
+  api.selectAll({checked:true});
+  element('modelLibrarySearch').value='model-0';api.filterModelLibrary();
+  api.selectAll({checked:false});
+  assert(element('modelLibrarySelectionCount').textContent.includes('已选 51'));
+  assert(!element('modelLibrarySelectAll').checked && !element('modelLibrarySelectAll').indeterminate, 'unselect affects only the current filter');
+  element('modelLibrarySearch').value='';api.filterModelLibrary();
+  api.clearSelection();
   api.pageModelLibrary(1);
   assert.equal((element('tbody').innerHTML.match(/<tr>/g)||[]).length,11);
   assert(element('modelLibraryNext').disabled);
@@ -106,19 +138,26 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
   assert.equal(element('tbody').innerHTML,savedRows,'a failed reload retains the previous table');
   assert(element('modelLibraryPager').textContent.startsWith('2 / 2'),'SSE refresh preserves the current page');
 
-  const edited={dataset:{model:many[50].id},value:'cline/my-alias',disabled:false};
+  const edited={dataset:{model:many[50].id},value:'my-alias',disabled:false};
   api.editModelAlias(edited);
   work=api.saveModelAlias(edited);
-  assert.deepEqual(posts[0].body,{channel:'cline',model_id:many[50].id,alias:'cline/my-alias'});
-  posts.shift().resolve({alias:'cline/my-alias',enabled:false});await work;
-  assert(element('tbody').innerHTML.includes('cline/my-alias'));
+  assert.deepEqual(posts[0].body,{channel:'cline',model_id:many[50].id,alias:'my-alias'});
+  posts.shift().resolve({alias:'my-alias',enabled:false});await work;
+  assert(element('tbody').innerHTML.includes('my-alias'));
   assert(api.data.find(item=>item.id===many[50].id).enabled===false);
+
+  api.toggleSelection({dataset:{model:many[50].id},checked:true});
+  const oldBatch=api.batchEnabled(true),batchReply=posts.shift();
+  assert(element('modelLibraryBatchEnable').disabled);
 
   // The shared generation prevents races across the old and new API paths.
   const old=api.selectModelsChannel('workbuddy-cn'),oldReply=pending.shift();
   work=api.selectModelsChannel('commandcode');
   pending.shift().resolve({models:[{id:'commandcode/only',upstream:'commandcode',native_protocol:'chat'}]});await work;
   oldReply.resolve({data:[{id:'old-workbuddy',credits:'x0.5'}]});await old;
+  batchReply.resolve({model_ids:[many[50].id],enabled:true,count:1});await oldBatch;
+  assert.equal(api.data[0].enabled,undefined, 'a late batch reply cannot update another channel');
+  assert(element('modelLibrarySelectionCount').textContent.includes('已选 0'), 'selections are isolated by channel');
   assert(element('tbody').innerHTML.includes('commandcode/only'));
   assert(!element('tbody').innerHTML.includes('old-workbuddy'));
   const stale=api.selectModelsChannel('cline'),staleReply=pending.shift();
@@ -158,10 +197,22 @@ const paid = {id:'opencode/paid',upstream:'opencode_zen',billing_mode:'paid',nat
   assert.equal(pending[0].url,'/settings/models?channel=workbuddy-intl');
   pending.shift().resolve({data:[]});await work;
   assert.equal(posts.length,0,'WorkBuddy catalogue needs no external platform refresh');
-  await api.copyModelId('cline/copy-this');
-  assert.deepEqual(h.copies,['cline/copy-this']);
+  await api.copyModelId('cline-pass/copy-this');
+  assert.deepEqual(h.copies,['cline-pass/copy-this']);
   assert.equal(h.toasts.at(-1)[1],'ok');
   await api.selectModelsChannel('invalid');await api.selectModelsChannel('toString');
   assert.equal(pending.length,0);
+  const changed = harness('cline');
+  work=changed.api.loadModels();changed.pending.shift().resolve({data:many.slice(0,3)});await work;
+  changed.api.selectAll({checked:true});
+  work=changed.api.loadModels();changed.pending.shift().resolve({data:many.slice(0,2)});await work;
+  assert(changed.element('modelLibrarySelectionCount').textContent.includes('已选 2'), 'refresh drops selected IDs removed from the catalogue');
+  const reload=changed.api.loadModels(),beforeWrite=changed.pending.shift();
+  work=changed.api.batchEnabled(false);
+  changed.posts.shift().resolve({model_ids:many.slice(0,2).map(m=>m.id),enabled:false,count:2});await work;
+  beforeWrite.resolve({data:many.slice(0,2).map(m=>({...m,enabled:true}))});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert(changed.api.data.every(m=>m.enabled===false), 'a refresh started before saving cannot overwrite the batch result');
+  changed.pending.shift().resolve({data:many.slice(0,2).map(m=>({...m,enabled:false}))});await reload;
   console.log('five model channels: capabilities, prices, tiers, scope, filters, paging, persistence, refresh and races passed');
 })().catch(error=>{console.error(error);process.exit(1);});

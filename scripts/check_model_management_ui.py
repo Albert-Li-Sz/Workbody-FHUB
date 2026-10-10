@@ -20,7 +20,7 @@ def main():
     scenario.setUp()
     try:
         S.set_panel_password(P.ACCOUNTS_DIR, "synthetic-ui-password")
-        models = {"provider/model-%03d" % index: {"native_protocol": "chat", "billing_mode": "free",
+        models = {"cline-pass/model-%03d" % index: {"native_protocol": "chat", "billing_mode": "free",
             "context_length": 100000, "max_output_tokens": 32000, "reasoning_efforts": ["low", "high"]}
             for index in range(121)}
         scenario.manager.catalogues["cline"] = {"models": models, "updated_at": time.time()}
@@ -55,7 +55,7 @@ def main():
                 page.wait_for_function("!modelLibraryLoading")
             page.locator("#modelChannelSelect").select_option("cline")
             page.wait_for_function("MODELS_DATA.length === 121")
-            page.locator("#modelLibrarySearch").fill("provider/model")
+            page.locator("#modelLibrarySearch").fill("cline-pass/model")
             page.locator("#modelLibraryNext").click()
             assert page.locator("#modelLibraryPager").inner_text().startswith("2 / 3")
             page.evaluate("window.scrollTo(0,900)")
@@ -73,10 +73,11 @@ def main():
             row = page.locator("#modelsTable tbody tr").first
             row.locator('[data-action="editModelAlias"]').fill("friendly")
             row.locator('[data-action="saveModelAlias"]').click()
-            page.wait_for_selector('.model-copy[data-arg="cline/friendly"]')
-            page.locator('.model-copy[data-arg="cline/friendly"]').click()
-            assert page.evaluate("navigator.clipboard.readText()") == "cline/friendly"
+            page.wait_for_selector('.model-copy[data-arg="friendly"]')
+            page.locator('.model-copy[data-arg="friendly"]').click()
+            assert page.evaluate("navigator.clipboard.readText()") == "friendly"
             canonical = row.locator(".model-copy").first.get_attribute("data-arg")
+            assert canonical.startswith("cline-pass/"), "Cline exposes the native ID without another cline/ prefix"
             row.locator(".model-copy").first.click()
             assert page.evaluate("navigator.clipboard.readText()") == canonical
             row.locator('[data-action="toggleModelEnabled"]').uncheck()
@@ -88,7 +89,44 @@ def main():
             assert canonical not in [model["id"] for model in public["data"]]
             row.locator('[data-action="toggleModelEnabled"]').check()
             page.wait_for_function("modelId => MODELS_DATA.find(m=>m.id===modelId).enabled===true", arg=canonical)
+            page.locator("#modelLibrarySearch").fill("cline-pass/model-00")
+            page.locator("#modelLibrarySelectAll").check()
+            assert "已选 10" in page.locator("#modelLibrarySelectionCount").inner_text()
+            page.locator("#modelLibraryBatchDisable").click()
+            page.wait_for_function("MODELS_DATA.filter(m=>m.id.startsWith('cline-pass/model-00')).every(m=>m.enabled===false)")
+            page.locator("#modelLibrarySearch").fill("")
+            assert page.locator("#modelLibrarySelectAll").evaluate("el=>el.indeterminate")
+            assert "已选 10" in page.locator("#modelLibrarySelectionCount").inner_text()
+            page.locator("#modelLibrarySelectAll").check()
+            assert "已选 121" in page.locator("#modelLibrarySelectionCount").inner_text()
+            page.locator("#modelLibraryNext").click()
+            assert page.locator('#modelsTable [data-action="toggleModelSelection"]:checked').count() == 50
+            page.evaluate("window.scrollTo(0,900)")
+            batch_scroll = page.evaluate("window.scrollY")
+            page.evaluate("setSelectedModelsEnabled(false)")
+            page.wait_for_function("MODELS_DATA.every(m=>m.enabled===false)&&!modelLibraryState().saving")
+            assert page.locator("#modelLibraryPager").inner_text().startswith("2 / 3")
+            assert abs(page.evaluate("window.scrollY") - batch_scroll) <= 1
+            public = page.evaluate("async()=>await(await fetch('/v1/models?upstream=cline',{headers:{Authorization:'Bearer synthetic-client'}})).json()")
+            assert public["data"] == [], "all filtered pages must be disabled"
+            page.evaluate("setSelectedModelsEnabled(true)")
+            page.wait_for_function("MODELS_DATA.every(m=>m.enabled===true)&&!modelLibraryState().saving")
+            assert page.locator('.model-copy[data-arg="friendly"]').count() == 1, "batch changes must preserve aliases"
+            page.locator("#modelChannelSelect").select_option("workbuddy-cn")
+            page.wait_for_function("!modelLibraryLoading")
+            assert "已选 0" in page.locator("#modelLibrarySelectionCount").inner_text()
+            page.locator("#modelLibrarySelectAll").check()
+            page.locator("#modelLibraryBatchDisable").click()
+            page.wait_for_function("MODELS_DATA.every(m=>m.enabled===false)&&!modelLibraryState().saving")
+            page.locator("#modelLibraryBatchEnable").click()
+            page.wait_for_function("MODELS_DATA.every(m=>m.enabled===true)&&!modelLibraryState().saving")
+            page.locator("#modelChannelSelect").select_option("cline")
+            page.wait_for_function("!modelLibraryLoading")
+            assert "已选 121" in page.locator("#modelLibrarySelectionCount").inner_text()
+            page.locator("#modelLibraryClearSelection").click()
+            assert "已选 0" in page.locator("#modelLibrarySelectionCount").inner_text()
             page.evaluate("window.scrollTo(0,0)")
+            page.wait_for_timeout(4500)
             page.screenshot(path=str(output / "models-desktop.png"), full_page=False)
             for tab, selector in (("keys", "#keyList"), ("proxies", "#slotList"), ("behavior", "#setLocalWebTools")):
                 page.locator("#btnNav" + tab.capitalize()).click()
@@ -127,7 +165,14 @@ def main():
             page.wait_for_selector("#modelChannelSelect")
             page.locator("#modelChannelSelect").select_option("cline")
             page.wait_for_function("MODELS_DATA.length === 121")
+            page.locator("#modelLibrarySelectAll").check()
+            assert "已选 121" in page.locator("#modelLibrarySelectionCount").inner_text()
+            page.locator("#modelLibraryBatchDisable").click()
+            page.wait_for_function("MODELS_DATA.every(m=>m.enabled===false)&&!modelLibraryState().saving")
+            page.locator("#modelLibraryBatchEnable").click()
+            page.wait_for_function("MODELS_DATA.every(m=>m.enabled===true)&&!modelLibraryState().saving")
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "model page overflows phone width"
+            page.wait_for_timeout(4500)
             page.screenshot(path=str(output / "models-mobile.png"), full_page=False)
             for tab in ("keys", "proxies", "behavior"):
                 page.locator('[data-action="toggleSidebar"]').click()
@@ -140,7 +185,8 @@ def main():
             assert not errors, errors
             browser.close()
         print(json.dumps({"passed": True, "checks": ["five channels", "SSE scroll and table stability", "manual completion", "paging",
-            "save alias", "copy both IDs", "disable and enable", "independent pages", "direct URL and legacy anchor",
+            "native Cline IDs", "save alias", "copy both IDs", "disable and enable", "filtered and cross-page batch selection",
+            "batch preserves aliases, page and scroll", "batch channel isolation", "mobile batch actions", "independent pages", "direct URL and legacy anchor",
             "API Key, proxy and behavior save", "all configuration pages on mobile", "mobile model layout", "no JavaScript errors"], "screenshots": str(output)}, ensure_ascii=False))
     finally:
         scenario.doCleanups()

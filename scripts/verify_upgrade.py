@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import update
 import wb_settings
+import wb_model_policy
 from wb_version import VERSION
 from scripts.package_release import package
 
@@ -31,7 +32,7 @@ PASSWORD = "synthetic-upgrade-password"
 KEY = "synthetic-upgrade-api-key"
 MODEL_POLICIES = {"workbuddy-cn": {"fixture-model": {"alias": "fixture-alias", "enabled": False}},
                   "cline": {"cline/fixture-model": {"alias": "cline/fixture-alias", "enabled": True}}}
-COMPOSE_VERSIONS = ("1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.2.1", "1.2.2", "1.2.3", "1.2.4", "1.2.5")
+COMPOSE_VERSIONS = ("1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.2.1", "1.2.2", "1.2.3", "1.2.4", "1.2.5", "1.2.6")
 
 
 def extract_source(archive, directory):
@@ -78,6 +79,7 @@ def assert_data(directory, schema):
     assert wb_settings.expiring_window_days(str(accounts)) == 0
     assert wb_settings.pool_config(str(accounts))["free_switch_window_tokens"] == 64000
     assert settings["model_policies"] == MODEL_POLICIES
+    assert wb_model_policy.policies(str(accounts), "cline")["fixture-model"] == {"alias": "fixture-alias", "enabled": True}
     account = json.loads((accounts / "fixture.json").read_text())
     assert account["priority"] == 7 and account["enabled"] is False
     connection = sqlite3.connect(accounts / "workbody.sqlite3")
@@ -170,7 +172,7 @@ def compose_case(old_version, new_image, old_image, root):
     try:
         update.run(command+["up","-d","--pull","never"],directory)
         update.wait_application(command,"workbody-fhub",directory,old_version,60)
-        old_schema = 3 if old_version in ("1.2.1", "1.2.2", "1.2.3", "1.2.4", "1.2.5") else (2 if old_version in ("1.1.2", "1.1.3") else 1)
+        old_schema = 3 if old_version in ("1.2.1", "1.2.2", "1.2.3", "1.2.4", "1.2.5", "1.2.6") else (2 if old_version in ("1.1.2", "1.1.3") else 1)
         assert_data(directory,old_schema)
         old_history = seed_new_platform_and_history(directory) if old_schema == 3 else None
         update.upgrade(arguments(directory,compose_file=[str(compose)]))

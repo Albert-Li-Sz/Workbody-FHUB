@@ -68,9 +68,11 @@ def _open(manager, upstream, raw_model, body, meta, session, owner, bound=None):
 
 
 def open_chat(proxy, payload, session_key=None, preferred_uid=None):
-    upstream, raw_model, public_model = wb_platforms.route(payload.get("model"),
-        {"allowed_upstreams": list(wb_platforms.BASES)})
     manager = proxy.PLATFORMS
+    hint = payload.get("_platform_upstream")
+    upstream, raw_model, public_model = wb_platforms.route(payload.get("model"),
+        {"allowed_upstreams": [hint] if hint in wb_platforms.BASES else list(wb_platforms.BASES)},
+        (manager.catalogues.get("cline", {}).get("models") or {}))
     meta = manager.model(upstream, raw_model)
     body = _native_body(payload, meta["native_protocol"], meta)
     session = session_key or proxy.derive_affinity_key(payload.get("messages")) or ""
@@ -130,6 +132,7 @@ def _handle(handler, payload, protocol, upstream, raw_model, public_model):
     else:
         chat = copy.deepcopy(payload)
     chat["model"] = public_model
+    chat["_platform_upstream"] = upstream
     session = _session(handler, chat, proxy)
     bound = handler._response_context.get("account") if handler._response_context and handler._response_context.get("bound") else None
     # Tools in a gateway web workflow retain their definitions in Chat; only

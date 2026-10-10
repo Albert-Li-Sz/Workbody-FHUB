@@ -3,7 +3,7 @@ const assert=require('assert'),fs=require('fs'),vm=require('vm'),path=require('p
 const elements={};
 function element(id){ return elements[id] || (elements[id]={value:'',dataset:{},innerHTML:'',textContent:'',hidden:false,classList:{add(){},remove(){},toggle(){},contains(){return false;}},contains:()=>false,setAttribute(){},focus(){},click(){}}); }
 const account={uid:'cline-fixture',upstream:'cline',nickname:'fixture',enabled:true,priority:100,in_flight:0,models:[],today:{tokens:1000000},proxy_slot:''};
-const data={accounts:[account,{...account,uid:'cc-fixture',upstream:'commandcode'},{...account,uid:'zen-fixture',upstream:'opencode_zen',public:true,enabled:false,auth_type:'api_key'}],catalogues:{cline:{count:1}},models:[{upstream:'cline',id:'cline/test',native_protocol:'chat',context_length:1000000}],routing:{},models_revision:'1',responses:{max_mb:1024,enabled:true,retention_days:7},proxy_slots:[]};
+const data={accounts:[account,{...account,uid:'cc-fixture',upstream:'commandcode'},{...account,uid:'zen-fixture',upstream:'opencode_zen',public:true,enabled:false,auth_type:'api_key'}],catalogues:{cline:{count:1}},models:[{upstream:'cline',id:'cline-pass/test',native_protocol:'chat',context_length:1000000}],routing:{},models_revision:'1',responses:{max_mb:1024,enabled:true,retention_days:7},proxy_slots:[]};
 const posts=[],notices=[];let gets=0;
 const context=vm.createContext({console,window:{addEventListener(){}},document:{activeElement:null,getElementById:element,addEventListener(){}},setTimeout,clearInterval,
  esc:v=>String(v??'').replaceAll('<','&lt;'),fmt:String,fmtTokens:v=>String(v)+'K',isAuthError:()=>false,
@@ -51,13 +51,13 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,'../dashboard_static/account
  await context.switchAccountSource('workbuddy');assert(!element('workbuddyAccountsPanel').hidden);assert(element('sourceAccountsPanel').hidden);
  assert(posts.every(p=>!p.url.startsWith('/accounts/login')),'source actions never touch WorkBuddy login');
  context.getJSON=getJSON;
- data.models=[{upstream:'cline',id:'cline/vendor/paid',billing_mode:'paid',native_protocol:'chat'},
-   {upstream:'cline',id:'cline/cline-pass/fixture',entitlement:'subscription',billing_mode:'paid',native_protocol:'chat',reference_pricing:{input:0.3,output:1.2,cache_read:0.006,unit:'USD/1M tokens'}},
-   {upstream:'cline',id:'cline/cline-free/fixture',entitlement:'free',billing_mode:'free',native_protocol:'chat'}];
+ data.models=[{upstream:'cline',id:'vendor/paid',billing_mode:'paid',native_protocol:'chat'},
+   {upstream:'cline',id:'cline-pass/fixture',entitlement:'subscription',billing_mode:'paid',native_protocol:'chat',reference_pricing:{input:0.3,output:1.2,cache_read:0.006,unit:'USD/1M tokens'}},
+   {upstream:'cline',id:'cline-free/fixture',entitlement:'free',billing_mode:'free',native_protocol:'chat'}];
  data.models_revision='2';data.catalogues.cline={groups:{subscription:1},updated_at:1,stale:true};
  account.quota={fiveHour:{percent_used:25,remaining_percent:75},monthly:{percent_used:10,remaining_percent:90}};
  await context.switchAccountSource('cline');
- assert(element('sourceModels').innerHTML.indexOf('cline/cline-pass/fixture')<element('sourceModels').innerHTML.indexOf('cline/vendor/paid'));
+ assert(element('sourceModels').innerHTML.indexOf('cline-pass/fixture')<element('sourceModels').innerHTML.indexOf('vendor/paid'));
  assert(element('sourceModels').innerHTML.includes('$0.006'),'small cache prices must retain precision');
  assert(element('sourceCatalogStatus').textContent.includes('ClinePass 已采集 1'));
  assert(!element('sourceCatalogStatus').textContent.includes('正在刷新'),'expired cache alone is not an active refresh');
@@ -67,9 +67,9 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,'../dashboard_static/account
  assert(element('sourceAccountsTable').innerHTML.includes('剩余 90%（已用 10%）（缓存）'));
  assert(context.sourceModelPrice({pricing:{input:-1,output:true,unit:'USD/1M tokens'}}).includes('输入 未知 · 输出 未知'));
  element('sourceModelGroup').value='subscription';context.filterSourceModels();
- assert(element('sourceModels').innerHTML.includes('cline/cline-pass/fixture'));
- assert(!element('sourceModels').innerHTML.includes('cline/vendor/paid'));
- assert(!element('sourceModels').innerHTML.includes('cline/cline-free/fixture'));
+ assert(element('sourceModels').innerHTML.includes('cline-pass/fixture'));
+ assert(!element('sourceModels').innerHTML.includes('vendor/paid'));
+ assert(!element('sourceModels').innerHTML.includes('cline-free/fixture'));
  assert.equal(element('sourceAccountsPanel').dataset.source,'cline');
  assert.equal(element('sourceCatalogStatus').dataset.tone,'warn');
  assert.equal(context.sourceModelEntitlement({upstream:'opencode_zen',entitlement:'subscription'}),'OpenCode Go 订阅');

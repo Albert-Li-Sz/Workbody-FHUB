@@ -1,6 +1,6 @@
 # API 与余额协议说明
 
-适用版本：**1.2.6**。
+适用版本：**1.2.7**。
 
 ## 地址与鉴权
 
@@ -25,7 +25,7 @@ Key 的 `allowed_upstreams` 限定可用平台，旧 Key 默认只允许 WorkBud
 | POST | `/v1/messages` | Anthropic Messages |
 | GET / DELETE | `/v1/responses/{id}` | 当前 Key 的已保存响应；删除不破坏其他分支 |
 
-公开模型列表同时列出本名和配置的渠道别名，`canonical_id` 指向实际本名，`is_alias` 表示是否别名；两者的能力、权益与价格相同。详情与生成均支持两种 ID，停用后移除两个入口并拒绝新调用。面板管理接口 `GET /settings/models?channel=...` 保留停用行，`POST /settings/models` 接受 `channel`、`model_id`、`alias`、`enabled`；需要面板 token，详见[模型管理](platforms.md#模型别名与启停)。
+公开模型列表同时列出本名和配置的渠道别名，`canonical_id` 指向实际本名，`is_alias` 表示是否别名；两者的能力、权益与价格相同。Cline 直接使用上游 ID，兼容旧 `cline/` 调用。详情与生成均支持两种 ID，停用后移除两个入口并拒绝新调用。面板管理接口 `GET /settings/models?channel=...` 保留停用行，`POST /settings/models` 接受 `channel`、`model_id`、`alias`、`enabled`；批量启停使用 `channel`、非空 `model_ids` 数组和布尔 `enabled`，全部验证后一次保存，保留别名。需要面板 token，详见[模型管理](platforms.md#模型别名与启停)。
 
 模型 ID 可以 URL 编码，包含 `/` 时使用 `%2F`。未知模型详情返回 `404 model not found`。目录可随上游更新，具体 ID、上下文、输出上限和能力以当前响应为准。
 

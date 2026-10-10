@@ -1,4 +1,4 @@
-# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.6）
+# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.7）
 
 ## 配置账号
 
@@ -53,10 +53,10 @@ WorkBuddy 保留消费倍率与输出探测结果；其他来源展示输入／�
 | Key 范围 | 模型 ID |
 | --- | --- |
 | WorkBuddy | 原来的模型 ID |
-| Cline | `cline/<原始ID>`；仅允许 Cline 的 Key 也接受原始 ID |
+| Cline | 原始 ID，如 `cline-pass/<模型名>`；兼容旧 `cline/<原始ID>` |
 | Zen | `opencode/<原始ID>`；仅允许 Zen 的 Key 也接受原始 ID |
 | Command Code | `commandcode/<原始ID>`；仅允许 Command Code 的 Key 也接受原始 ID |
-| 多个外部平台 | 使用平台前缀，避免同名歧义 |
+| 多个外部平台 | Cline 使用原始 ID，其他平台沿用各自前缀；同名时明确指定 `?upstream=cline` 或 `?upstream=workbuddy` |
 
 ```bash
 curl 'https://<公网IP>/v1/models?upstream=cline' \
@@ -71,17 +71,25 @@ Zen 目录取自官方 `/zen/v1/models`，该接口仅返回模型 ID。FHUB 用
 
 ## 模型别名与启停
 
-模型库每个实际模型保留一行，可点击本名／别名复制完整 ID、保存一个调用别名或启停模型。配置按五个渠道分别保存，重启和同步目录保留；未配置的模型默认启用。外部平台自动保留 `cline/`、`opencode/`、`commandcode/` 前缀，别名不能与本渠道其他模型 ID 或别名重复。
+模型库每个实际模型保留一行，可点击本名／别名复制完整 ID、保存一个调用别名或启停模型。配置按五个渠道分别保存，重启和同步目录保留；未配置的模型默认启用。Cline 本名和别名直接使用原始 ID；OpenCode、Command Code 别名保留 `opencode/`、`commandcode/` 前缀，别名不能与本渠道其他模型 ID 或别名重复。旧 Cline 前缀调用、白名单、启停配置及 Responses 历史继续兼容。
+
+每行支持勾选；**全选筛选结果（跨页）** 覆盖当前搜索／权益筛选的所有分页，取消全选仅取消当前筛选结果。已选项按渠道保存，切换筛选或分页仍保留，隐藏的选中数量明确显示；**取消选择** 清空本渠道选择。批量启用／停用应用到本渠道全部已选模型，一次保存，失败时保持原开关、别名、页码和滚动位置。
 
 公开 `/v1/models` 同时返回本名与别名，`canonical_id` 指向本名、`is_alias` 区分别名条目；详情接口和三种生成协议都接受两者。别名解析后按本名验证 Key／账号权限、调度、计费及 Responses 续接。停用模型的两个入口均从公开列表移除，新调用返回 `403 model_disabled`；管理页保留该行，支持重新启用。
 
 面板鉴权 `GET /settings/models?channel=cline` 返回管理目录；`POST /settings/models` 按 `channel`、`model_id` 更新 `alias` 或布尔 `enabled`，不要求同时发送其他模型配置：
 
 ```json
-{"channel":"cline","model_id":"cline/cline-pass/example","alias":"my-model","enabled":true}
+{"channel":"cline","model_id":"cline-pass/example","alias":"my-model","enabled":true}
 ```
 
-对应的公开 ID 为 `cline/cline-pass/example` 与 `cline/my-model`。
+对应的公开 ID 为 `cline-pass/example` 与 `my-model`。多平台 Key 遇到 Cline 与 WorkBuddy 的同名 ID 时返回 `400 ambiguous_model`，通过调用 URL 的 `?upstream=cline`／`?upstream=workbuddy` 明确选择；旧 `cline/<ID>` 也可指定 Cline。
+
+同一面板接口支持批量启停；`model_ids` 必须为非空数组，不能与 `model_id` 或 `alias` 混用。先验证全部 ID 属于该渠道，再原子保存，别名保持原值；返回更新的 `model_ids`、`enabled` 和去重后的 `count`：
+
+```json
+{"channel":"cline","model_ids":["cline-pass/example","cline-free/example"],"enabled":false}
+```
 
 ## 三种生成协议
 

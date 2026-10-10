@@ -198,7 +198,7 @@ class HTTPTests(unittest.TestCase):
             'entitlement':'subscription','reference_pricing':{'input':0.3,'output':1.2,'unit':'USD/1M tokens'}}
         status,value=self.management('/accounts/upstreams/models?upstream=cline&group=subscription')
         self.assertEqual(status,200)
-        self.assertEqual([model['id'] for model in value['models']],['cline/cline-pass/fixture'])
+        self.assertEqual([model['id'] for model in value['models']],['cline-pass/fixture'])
         status,raw,_=self.request('/v1/models/cline/cline-pass/fixture')
         self.assertEqual(status,200)
         self.assertEqual(json.loads(raw)['reference_pricing']['output'],1.2)
@@ -219,7 +219,7 @@ class HTTPTests(unittest.TestCase):
                 self.manager.refreshing.add(upstream)
                 status, value = self.management('/accounts/upstreams/models?upstream=' + upstream)
                 self.assertEqual(status, 200)
-                self.assertEqual([m['id'] for m in value['models']], [prefix + 'fixture'])
+                self.assertEqual([m['id'] for m in value['models']], ['fixture' if upstream == 'cline' else prefix + 'fixture'])
                 self.assertEqual(set(value['catalogues']), {upstream})
                 state = value['catalogues'][upstream]
                 self.assertTrue(state['stale'])

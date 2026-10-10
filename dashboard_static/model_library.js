@@ -13,7 +13,7 @@ try {
 } catch(e){}
 
 function modelLibraryState(channel=selectedModelsChannel()){
-  if(!MODEL_LIBRARY_STATES.has(channel)) MODEL_LIBRARY_STATES.set(channel,{query:'',group:'all',page:1,drafts:new Map()});
+  if(!MODEL_LIBRARY_STATES.has(channel)) MODEL_LIBRARY_STATES.set(channel,{query:'',group:'all',page:1,drafts:new Map(),selected:new Set(),saving:false,revision:0});
   return MODEL_LIBRARY_STATES.get(channel);
 }
 
@@ -42,6 +42,8 @@ function restoreModelLibraryScroll(position){
 
 function applyModelLibraryResult(result,channel){
   MODELS_DATA = result.data || result.models || [];
+  const state = modelLibraryState(channel), ids = new Set(MODELS_DATA.map(model=>model.id));
+  for(const modelId of state.selected) if(!ids.has(modelId)) state.selected.delete(modelId);
   modelLibraryLoadedChannel = channel;
   modelLibraryLoading = false;
   const position = modelLibraryScroll();
@@ -65,6 +67,7 @@ loadModels = async function(options={}){
   const channel = selectedModelsChannel();
   syncModelLibrary(channel);
   const generation = ++MODEL_LOAD_GENERATION;
+  const revision = modelLibraryState(channel).revision;
   const retain = modelLibraryLoadedChannel === channel;
   modelLibraryLoading = !retain;
   const status = document.getElementById('modelChannelStatus');
@@ -76,6 +79,7 @@ loadModels = async function(options={}){
   try {
     const result = await getJSON('/settings/models?channel=' + encodeURIComponent(channel));
     if(generation !== MODEL_LOAD_GENERATION) return;
+    if(revision !== modelLibraryState(channel).revision) return loadModels(options);
     applyModelLibraryResult(result,channel);
   } catch(error){
     if(generation !== MODEL_LOAD_GENERATION) return;
@@ -96,8 +100,11 @@ async function refreshModelLibrary(){
     await postJSON(SOURCE_ROOT + '/refresh',{upstream:channel});
     const deadline = Date.now() + 90000;
     while(generation === MODEL_LOAD_GENERATION && channel === selectedModelsChannel()){
+      if(Date.now() >= deadline) throw new Error('同步尚未完成，请稍后重试');
+      const revision = modelLibraryState(channel).revision;
       const result = await getJSON('/settings/models?channel=' + encodeURIComponent(channel));
       if(generation !== MODEL_LOAD_GENERATION || channel !== selectedModelsChannel()) return;
+      if(revision !== modelLibraryState(channel).revision) continue;
       const catalogue = (result.catalogues || {})[channel] || {};
       if(!catalogue.refreshing){
         if(catalogue.error) throw new Error(catalogue.error);
@@ -118,14 +125,17 @@ async function refreshModelLibrary(){
 }
 
 function modelLibraryNameHtml(model){
+  const state = modelLibraryState();
+  const selection = '<input type="checkbox" class="model-select" aria-label="选择 '+esc(model.id)+'" data-action="toggleModelSelection" data-on="change" data-model="'+esc(model.id)+'"'
+    +(state.selected.has(model.id)?' checked':'')+(state.saving?' disabled':'')+'>';
   const copy = value => '<button type="button" class="model-copy" data-action="copyModelId" data-on="click" data-arg="'+esc(value)+'" title="点击复制模型 ID">'+esc(value)+'</button>';
-  return copy(model.id)+(model.alias ? '<div class="hint">别名 '+copy(model.alias)+'</div>' : '');
+  return '<div class="model-name">'+selection+'<div>'+copy(model.id)+(model.alias ? '<div class="hint">别名 '+copy(model.alias)+'</div>' : '')+'</div></div>';
 }
 
 function modelLibraryPolicyHtml(model){
   const draft = modelLibraryState().drafts.get(model.id);
   const alias = draft == null ? model.alias || '' : draft;
-  const attr = ' data-model="'+esc(model.id)+'"';
+  const attr = ' data-model="'+esc(model.id)+'"'+(modelLibraryState().saving?' disabled':'');
   return '<td data-label="别名与启用"><div class="model-policy">'
     +'<input type="text" aria-label="'+esc(model.id)+' 的别名" placeholder="调用别名（可留空）" value="'+esc(alias)+'" data-action="editModelAlias" data-on="input"'+attr+'>'
     +'<div><label><input type="checkbox"'+(model.enabled !== false?' checked':'')+' data-action="toggleModelEnabled" data-on="change"'+attr+'> 启用</label> '
@@ -136,20 +146,25 @@ function editModelAlias(element){ modelLibraryState().drafts.set(element.dataset
 
 async function saveModelPolicy(element,fields){
   const channel = selectedModelsChannel(), modelId = element.dataset.model;
-  element.disabled = true;
+  const state = modelLibraryState(channel);
+  if(state.saving) return;
+  state.saving = true; renderModelSelection();
   try {
     const result = await postJSON('/settings/models',{channel,model_id:modelId,...fields});
+    state.revision++;
+    if(Object.prototype.hasOwnProperty.call(fields,'alias')) state.drafts.delete(modelId);
     if(channel === selectedModelsChannel()){
       const model = MODELS_DATA.find(item => item.id === modelId);
       if(model) Object.assign(model,{alias:result.alias,enabled:result.enabled});
-      if(Object.prototype.hasOwnProperty.call(fields,'alias')) modelLibraryState(channel).drafts.delete(modelId);
-      const position = modelLibraryScroll(); renderAvailableModels(); restoreModelLibraryScroll(position);
     }
     toast('模型配置已保存','ok');
   } catch(error){
     if(Object.prototype.hasOwnProperty.call(fields,'enabled')) element.checked = !fields.enabled;
     toast('保存模型配置失败：'+error.message,'bad');
-  } finally { element.disabled = false; }
+  } finally {
+    state.saving = false;
+    if(channel === selectedModelsChannel()) renderModelSelection();
+  }
 }
 
 function saveModelAlias(element){
@@ -182,6 +197,72 @@ function pageModelLibrary(step){
   const state = modelLibraryState();
   state.page = Math.max(1,state.page + Number(step));
   renderAvailableModels();
+}
+
+function filteredModelLibrary(){
+  const state = modelLibraryState(), query = state.query.trim().toLowerCase();
+  return MODELS_DATA.filter(model => (model.id+' '+(model.name || '')+' '+(model.alias || '')).toLowerCase().includes(query)
+    && (state.group === 'all' || modelLibraryBilling(model) === state.group));
+}
+
+function syncModelSelection(){
+  const state = modelLibraryState(), list = filteredModelLibrary();
+  const selectedCount = list.filter(model=>state.selected.has(model.id)).length;
+  const all = document.getElementById('modelLibrarySelectAll');
+  all.checked = list.length > 0 && selectedCount === list.length;
+  all.indeterminate = selectedCount > 0 && selectedCount < list.length;
+  all.disabled = modelLibraryLoading || state.saving || !list.length;
+  document.getElementById('modelLibrarySelectionCount').textContent = '已选 '+state.selected.size+' 个'
+    +(selectedCount < state.selected.size?'（其中 '+(state.selected.size-selectedCount)+' 个在其他筛选结果中）':'');
+  for(const id of ['modelLibraryBatchEnable','modelLibraryBatchDisable','modelLibraryClearSelection']){
+    document.getElementById(id).disabled = modelLibraryLoading || modelLibraryLoadedChannel !== selectedModelsChannel() || state.saving || !state.selected.size;
+  }
+}
+
+function renderModelSelection(){
+  const position = modelLibraryScroll(); renderAvailableModels(); restoreModelLibraryScroll(position);
+}
+
+function toggleModelSelection(element){
+  const state = modelLibraryState();
+  if(state.saving || !MODELS_DATA.some(model=>model.id===element.dataset.model)) return;
+  if(element.checked) state.selected.add(element.dataset.model); else state.selected.delete(element.dataset.model);
+  syncModelSelection();
+}
+
+function selectAllModelLibrary(element){
+  const state = modelLibraryState();
+  if(modelLibraryLoading || state.saving) return;
+  for(const model of filteredModelLibrary()){
+    if(element.checked) state.selected.add(model.id); else state.selected.delete(model.id);
+  }
+  renderModelSelection();
+}
+
+function clearModelSelection(){
+  const state = modelLibraryState();
+  if(state.saving) return;
+  state.selected.clear(); renderModelSelection();
+}
+
+async function setSelectedModelsEnabled(enabled){
+  const channel = selectedModelsChannel(), state = modelLibraryState(channel);
+  if(state.saving || modelLibraryLoading || modelLibraryLoadedChannel !== channel || !state.selected.size) return;
+  const modelIds = [...state.selected];
+  state.saving = true; renderModelSelection();
+  try {
+    const result = await postJSON('/settings/models',{channel,model_ids:modelIds,enabled});
+    state.revision++;
+    if(channel === selectedModelsChannel()){
+      const ids = new Set(result.model_ids);
+      for(const model of MODELS_DATA) if(ids.has(model.id)) model.enabled = result.enabled;
+    }
+    toast('已'+(enabled?'启用':'停用')+' '+result.count+' 个模型','ok');
+  } catch(error){ toast('批量保存失败：'+error.message,'bad'); }
+  finally {
+    state.saving = false;
+    if(channel === selectedModelsChannel()) renderModelSelection();
+  }
 }
 
 function modelLibraryBilling(model){
@@ -260,9 +341,7 @@ renderAvailableModels = function(){
   const state = modelLibraryState(channel);
   const external = !!MODEL_LIBRARY_SOURCES[channel];
   const all = MODELS_DATA;
-  const query = state.query.trim().toLowerCase();
-  const list = all.filter(model => (model.id+' '+(model.name || '')+' '+(model.alias || '')).toLowerCase().includes(query)
-    && (state.group === 'all' || modelLibraryBilling(model) === state.group));
+  const list = filteredModelLibrary();
   if(external) list.sort((a,b) => {
     const order = model => ({subscription:0,free:1,paid:2}[modelLibraryBilling(model)] ?? 3);
     return order(a)-order(b) || a.id.localeCompare(b.id);
@@ -289,4 +368,5 @@ renderAvailableModels = function(){
   document.getElementById('modelLibraryPager').textContent = modelLibraryLoading ? '正在加载目录…' : state.page+' / '+pages+' 页 · '+list.length+' 个模型';
   document.getElementById('modelLibraryPrevious').disabled = modelLibraryLoading || state.page <= 1;
   document.getElementById('modelLibraryNext').disabled = modelLibraryLoading || state.page >= pages;
+  syncModelSelection();
 };
