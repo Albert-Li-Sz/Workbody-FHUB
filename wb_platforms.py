@@ -1463,6 +1463,18 @@ class Manager:
             self.release(ticket)
             raise
 
+    def catalogue_status(self, upstream):
+        """Public sync state shared by account and model-library panels."""
+        with self.lock:
+            cache = self.catalogues.get(upstream, {})
+            return {"updated_at": cache.get("updated_at", 0),
+                    "stale": time.time() - cache.get("updated_at", 0) > 600,
+                    "count": len(cache.get("models", {})),
+                    "error": self.catalog_errors.get(upstream, ""),
+                    "groups": copy.deepcopy(cache.get("groups") or {}),
+                    "metadata_stale": cache.get("metadata_stale", False),
+                    "refreshing": upstream in self.refreshing}
+
     def snapshot(self):
         with self.lock:
             self._today()
@@ -1479,11 +1491,8 @@ class Manager:
                   (a.document.get("console_gateway") or {}).get("models")) for a in self.accounts.values()]], sort_keys=True).encode()).hexdigest()
             return {"accounts": accounts, "routing": self.routing(),
                     "cline_routes": copy.deepcopy(wb_settings.load(self.directory).get("cline_routes") or {}),
-                    "models_revision": model_revision, "catalogues": {upstream: {
-                "updated_at": cache.get("updated_at", 0), "stale": time.time() - cache.get("updated_at", 0) > 600,
-                "count": len(cache.get("models", {})), "error": self.catalog_errors.get(upstream, ""),
-                "groups": copy.deepcopy(cache.get("groups") or {}), "metadata_stale": cache.get("metadata_stale", False),
-                "refreshing": upstream in self.refreshing} for upstream, cache in self.catalogues.items()}}
+                    "models_revision": model_revision, "catalogues": {
+                        upstream: self.catalogue_status(upstream) for upstream in self.catalogues}}
 
     def start_login(self, upstream="cline", options=None):
         return self.logins.start(upstream, options)

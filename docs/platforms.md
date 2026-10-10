@@ -44,6 +44,10 @@ OAuth 组织配置同时包含 Zen 和 Go 时，两组网关、请求头和模�
 
 ## 网关 Key 与模型 ID
 
+面板的 **模型库 → 模型与档位** 可以选择 WorkBuddy 国内／国际、Cline、OpenCode 和 Command Code。三个新增来源沿用账号池同步的目录，只显示已启用账号允许调用的模型；支持按模型 ID／名称搜索、按免费／付费／订阅筛选和分页。点击「刷新目录」会在后台同步当前来源，完成后由 SSE 更新页面。切换目录不修改网关出口、Key 权限或调度账号。
+
+WorkBuddy 保留消费倍率与输出探测结果；其他来源展示输入／输出和缓存价格、订阅权益、原生协议、视觉／工具／推理能力、上下文和最大输出。ClinePass、OpenCode Go 与 Command Code 订阅价格按参考价标注，实际余额和额度在账号池查询。思考档位支持 `reasoning_efforts` 以及上游 `reasoning_options` 的 effort／toggle 元数据，只展示明确提供的值和推理开关；仅声明推理能力的模型显示「原生推理／上游未公布档位」，缺失的价格和容量显示「上游未提供」。
+
 在 **设置 → API Key** 勾选 `allowed_upstreams`。合法值为 `workbuddy`、`cline`、`opencode_zen`、`commandcode`。旧 Key 缺少字段时默认仅允许 WorkBuddy；旧页面保存也保留已设置的平台权限。WorkBuddy 的 `realm=cn|intl` 独立于平台权限。
 
 | Key 范围 | 模型 ID |

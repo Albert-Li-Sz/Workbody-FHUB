@@ -22,7 +22,7 @@ function mk(id){
   const el = {
     id, innerHTML: '', textContent: '', value: '', checked: false, disabled: false,
     scrollHeight: 100, scrollTop: 0, clientHeight: 100,
-    _classes: new Set(), style: {}, children: [],
+    _classes: new Set(), style: {}, children: [], dataset: {},
     focus(){}, blur(){}, click(){},
     appendChild(c){ this.children.push(c); },
     querySelectorAll(){ return []; }, querySelector(){ return null; },

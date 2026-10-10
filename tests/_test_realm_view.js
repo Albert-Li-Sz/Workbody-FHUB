@@ -15,7 +15,7 @@ const html = require('./dashboard_source').htmlSource();
 const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)]
   .map(match => match[1]).join('\n');
 const element = () => ({
-  innerHTML: '', textContent: '', value: '', style: {},
+  innerHTML: '', textContent: '', value: '', style: {}, dataset: {},
   classList: {add(){}, remove(){}, contains(){ return false; }},
   addEventListener(){}, querySelector(){ return null; }, querySelectorAll(){ return []; },
   appendChild(){}, focus(){}, setAttribute(){}, getAttribute(){ return ''; },

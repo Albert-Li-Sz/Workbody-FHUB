@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-UPDATE_VERSION=1.2.4
+UPDATE_VERSION=1.2.5
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 if ! command -v python3 >/dev/null 2>&1; then
     printf '%s\n' '需要 Python 3.9+；Debian/Ubuntu 可先安装 python3。' >&2

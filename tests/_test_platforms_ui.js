@@ -73,6 +73,7 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,'../dashboard_static/account
  assert.equal(element('sourceAccountsPanel').dataset.source,'cline');
  assert.equal(element('sourceCatalogStatus').dataset.tone,'warn');
  assert.equal(context.sourceModelEntitlement({upstream:'opencode_zen',entitlement:'subscription'}),'OpenCode Go 订阅');
+ assert.equal(context.sourceModelEntitlement({upstream:'commandcode',entitlement:'subscription'}),'Command Code 订阅');
  const zen=data.accounts.find(a=>a.uid==='zen-fixture');zen.enabled=true;zen.cooldowns={'paid-model':300};
  zen.verified_at=1;zen.billing_errors={quota:'<unsafe>'};
  data.models.push({upstream:'opencode_zen',id:'opencode/go/fixture',entitlement:'subscription',billing_mode:'paid',native_protocol:'chat'});

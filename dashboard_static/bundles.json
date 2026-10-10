@@ -10,6 +10,7 @@
     "proxies.js",
     "analytics.js",
     "account_sources.js",
+    "model_library.js",
     "actions.js"
   ]
 }

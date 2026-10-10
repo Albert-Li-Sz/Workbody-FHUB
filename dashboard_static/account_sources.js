@@ -310,7 +310,7 @@ function sourceModelPrice(model){
   return '输入 '+rate(['input','prompt'])+' · 输出 '+rate(['output','completion'])+'<div class="hint">缓存读 '+rate(['cache_read','input_cache_read'])+' · 写 '+rate(['cache_write','input_cache_write'])+'</div><div class="hint">USD / 1M Token'+(model.entitlement==='subscription'?' · 订阅配额参考价':model.reference_pricing && !model.pricing?' · 参考价':'')+(price.stale?' · 缓存价格':'')+'</div>';
 }
 function sourceModelEntitlement(model){
-  if(model.entitlement==='subscription') return model.upstream==='opencode_zen'?'OpenCode Go 订阅':'ClinePass 订阅';
+  if(model.entitlement==='subscription') return {opencode_zen:'OpenCode Go 订阅',cline:'ClinePass 订阅',commandcode:'Command Code 订阅'}[model.upstream] || '订阅模型';
   return {free:'免费',recommended:'积分模型',account:'积分模型',clineCloud:'Cline Cloud'}[model.entitlement]
     || model.min_plan || (model.billing_mode==='free'?'免费':'付费');
 }

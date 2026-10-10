@@ -390,29 +390,45 @@
       <div>
         <div class="eyebrow">模型目录</div>
         <h2>模型与档位</h2>
-        <p>按渠道查看模型、上下文容量、推理／视觉能力、消费倍率与输出上限。</p>
+        <p>按渠道查看模型、价格与订阅权益、上下文容量、模型能力和思考档位。</p>
       </div>
       <div class="page-actions">
         <label for="modelChannelSelect">渠道</label>
         <select id="modelChannelSelect" class="slot-select" data-action="selectModelsChannel" data-on="change">
           <option value="workbuddy-cn">WorkBuddy 国内</option>
           <option value="workbuddy-intl" selected>WorkBuddy 国际</option>
+          <option value="cline">Cline</option>
+          <option value="opencode_zen">OpenCode</option>
+          <option value="commandcode">Command Code</option>
         </select>
-        <button class="sec" data-action="loadModels" data-on="click">刷新目录</button>
+        <button id="modelRefreshButton" class="sec" data-action="refreshModelLibrary" data-on="click">刷新目录</button>
         <button class="sec" data-action="switchMainTab" data-on="click" data-arg="analytics">查看用量</button>
       </div>
     </div>
   <section>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px">
-      <h2 style="margin:0"><span id="modelChannelTitle">WorkBuddy 国际模型</span> <em id="availModelCount"></em></h2>
-      <div id="modelChannelStatus" role="status" style="font-size:12px;color:var(--dim)">仅切换模型目录，网关默认出口与 Key 绑定保持原配置。</div>
+      <h2 class="model-library-title" style="margin:0"><span id="modelChannelTitle">WorkBuddy 国际模型</span> <em id="availModelCount"></em></h2>
+    </div>
+    <div id="modelChannelStatus" class="model-library-notice" role="status" data-tone="info">仅切换模型目录，网关默认出口与 Key 绑定保持原配置。</div>
+    <div class="model-library-toolbar">
+      <label class="model-library-search" for="modelLibrarySearch">搜索模型
+        <input id="modelLibrarySearch" type="search" placeholder="模型 ID 或名称" data-action="filterModelLibrary" data-on="input">
+      </label>
+      <label for="modelLibraryGroup">计费 / 权益
+        <select id="modelLibraryGroup" class="slot-select" data-action="filterModelLibrary" data-on="change">
+          <option value="all">全部模型</option>
+          <option value="subscription" id="modelLibrarySubscription">订阅模型</option>
+          <option value="free">免费模型</option>
+          <option value="paid">付费模型</option>
+        </select>
+      </label>
     </div>
     <div style="overflow-x:auto">
       <table id="modelsTable" class="data-cards">
         <thead>
           <tr>
             <th style="text-align:left;width:220px">模型 ID</th>
-            <th style="text-align:center;width:140px">消费倍率</th>
+            <th id="modelBillingHeader" style="text-align:center;width:200px">消费倍率</th>
             <th style="text-align:center;width:160px">模型能力</th>
             <th style="text-align:center;width:110px">上下文窗口</th>
             <th style="text-align:center;width:100px">最大输出</th>
@@ -421,6 +437,13 @@
         </thead>
         <tbody></tbody>
       </table>
+    </div>
+    <div class="model-library-pagination">
+      <span id="modelLibraryPager" aria-live="polite"></span>
+      <div>
+        <button id="modelLibraryPrevious" class="sec mini" data-action="pageModelLibrary" data-on="click" data-arg="-1">上一页</button>
+        <button id="modelLibraryNext" class="sec mini" data-action="pageModelLibrary" data-on="click" data-arg="1">下一页</button>
+      </div>
     </div>
   </section>
   </div>

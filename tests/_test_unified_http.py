@@ -205,6 +205,48 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.management('/accounts/upstreams/models?upstream=invalid')[0],400)
         self.assertEqual(self.management('/accounts/upstreams/models?group=invalid')[0],400)
 
+    def test_model_library_scopes_capabilities_and_sync_state(self):
+        for upstream, prefix in U.PREFIXES.items():
+            with self.subTest(upstream=upstream):
+                self.manager.catalogues[upstream] = {"models": {"fixture": {
+                    "native_protocol": "chat", "billing_mode": "paid", "reasoning": True,
+                    "reasoning_efforts": ["low", "high"], "tool_call": True,
+                    "reasoning_options": [{"type": "toggle"}, {"type": "effort", "values": ["low", "high", "max"]}],
+                    "modalities": {"input": ["text", "image"]},
+                    "limit": {"context": 1000000, "output": 64000},
+                    "options": {"apiKey": "private-fixture-secret"}}},
+                    "updated_at": time.time() - 700, "metadata_stale": True}
+                self.manager.refreshing.add(upstream)
+                status, value = self.management('/accounts/upstreams/models?upstream=' + upstream)
+                self.assertEqual(status, 200)
+                self.assertEqual([m['id'] for m in value['models']], [prefix + 'fixture'])
+                self.assertEqual(set(value['catalogues']), {upstream})
+                state = value['catalogues'][upstream]
+                self.assertTrue(state['stale'])
+                self.assertTrue(state['metadata_stale'])
+                self.assertTrue(state['refreshing'])
+                model = value['models'][0]
+                self.assertEqual(model['context_length'], 1000000)
+                self.assertEqual(model['max_output_tokens'], 64000)
+                self.assertEqual(model['reasoning_efforts'], ['low', 'high'])
+                self.assertEqual(model['reasoning_options'][1]['values'], ['low', 'high', 'max'])
+                self.assertEqual(model['modalities']['input'], ['text', 'image'])
+                self.assertTrue(model['tool_call'])
+                self.assertNotIn('private-fixture-secret', json.dumps(value))
+                self.manager.refreshing.discard(upstream)
+
+    def test_model_library_does_not_expose_disabled_account_models(self):
+        for account in self.manager.accounts.values():
+            if account.upstream == 'cline':
+                account.document['enabled'] = False
+        status, value = self.management('/accounts/upstreams/models?upstream=cline')
+        self.assertEqual(status, 200)
+        self.assertEqual(value['models'], [])
+        self.assertIn('cline', value['catalogues'])
+        # A gateway key cannot grant panel-management access.
+        status, _, _ = self.request('/accounts/upstreams/models?upstream=cline')
+        self.assertEqual(status, 401)
+
     def test_source_import_export_leaves_workbuddy_transfer_unchanged(self):
         row={"upstream":"commandcode","api_key":"user_import_fixture","priority":3}
         status,value=self.management("/accounts/upstreams/accounts/import",[row])

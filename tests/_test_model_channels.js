@@ -8,7 +8,7 @@ const formatting = html.slice(html.indexOf('const fmt ='), html.indexOf('const e
 assert.ok(source.includes('async function selectModelsChannel'));
 const options = /id="modelChannelSelect"[\s\S]*?<\/select>/.exec(html)[0];
 assert.deepStrictEqual([...options.matchAll(/<option value="([^"]+)"/g)].map(m => m[1]),
-                       ['workbuddy-cn', 'workbuddy-intl']);
+                       ['workbuddy-cn', 'workbuddy-intl', 'cline', 'opencode_zen', 'commandcode']);
 const elements = {};
 const el = id => elements[id] || (elements[id] = {value:'',textContent:'',innerHTML:''});
 const tbody = el('tbody');

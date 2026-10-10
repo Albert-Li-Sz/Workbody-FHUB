@@ -8286,7 +8286,9 @@ class Handler(BaseHTTPRequestHandler):
                             raise wb_platforms.PlatformError("invalid model group")
                         models = [model for model in models if model.get("entitlement") == group or
                             model.get("billing_mode") == group and (group != "paid" or model.get("entitlement") != "subscription")]
-                    return self._json(200, {"models": models})
+                    scopes = [upstream] if upstream else list(wb_platforms.BASES)
+                    return self._json(200, {"models": models, "catalogues": {
+                        name: PLATFORMS.catalogue_status(name) for name in scopes}})
                 if path == "/platforms/billing":
                     uid = query.get("uid", [None])[0]
                     account = PLATFORMS.accounts.get(uid) if uid else None

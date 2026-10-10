@@ -241,3 +241,22 @@ footer #logfile{overflow-wrap:anywhere;word-break:break-word}
 .credit-history-scroll{overflow:auto;max-height:260px}
 #creditHistoryTable th{position:sticky;top:0;z-index:1;background:var(--panel)}
 @media(max-width:650px){.limits-scroll{overflow:visible}table.limits-matrix td:first-child{display:block;min-width:0}.limits-matrix input{width:170px}}
+
+/* Model channels use the same platform colors and notices as the account pool. */
+.model-library-title{display:flex;align-items:center;gap:8px;color:var(--source-color)}
+.model-library-title::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--source-color);flex:none}
+.model-library-notice{font-size:12px;line-height:1.7;padding:10px 12px;border-radius:8px;background:var(--info-soft);color:var(--info);overflow-wrap:anywhere}
+.model-library-notice[data-tone="warn"]{background:var(--warn-soft);color:var(--warn)}
+.model-library-notice[data-tone="bad"]{background:var(--bad-soft);color:var(--bad)}
+.model-library-toolbar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:18px 0}
+.model-library-toolbar label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}
+.model-library-search{flex:1;min-width:200px}
+.model-library-search input{flex:1;min-width:0;max-width:420px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--fg);font:inherit}
+.model-library-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;font-size:12px;color:var(--dim)}
+.model-library-pagination>div{display:flex;gap:6px}
+.model-library-price{font-size:12px;line-height:1.65;margin-top:7px}
+#modelsTable td{vertical-align:top;overflow-wrap:anywhere}
+#modelsTable .mono b{font-size:12px}
+#modelsTable .badge{margin:2px 2px 2px 0}
+#pageModels[data-source="opencode_zen"] .badge.subscription{color:var(--source-opencode);background:var(--source-opencode-soft)}
+@media(max-width:650px){.model-library-toolbar{gap:12px}.model-library-search{width:100%;flex-basis:100%}.model-library-search input{max-width:none}#modelsTable td[data-label="价格 / 权益"],#modelsTable td[data-label="思考档位"]{flex-direction:column;align-items:flex-start}}
