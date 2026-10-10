@@ -3,7 +3,7 @@ ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.11-alpine@sha256:d9368b3
 FROM ${PYTHON_IMAGE}
 
 LABEL org.opencontainers.image.title="Workbody-FHUB" \
-      org.opencontainers.image.version="1.2.7" \
+      org.opencontainers.image.version="1.2.8" \
       org.opencontainers.image.licenses="Apache-2.0 AND MIT" \
       org.opencontainers.image.description="WorkBuddy, Cline, OpenCode and Command Code multi-account gateway" \
       org.opencontainers.image.source="https://github.com/Albert-Li-Sz/Workbody-FHUB"
@@ -37,9 +37,12 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','8788'), timeout=3)" || exit 1
 
 # Launch the proxy in the project's LAN mode: --lan listens on every interface
-# and forces an api key (generated once, persisted in ./accounts/settings.json
-# and printed in the startup log). Without it the container published port 8788
-# to the network while key checking stayed off.
+# and forces an api key (generated once and persisted in
+# ./accounts/settings.json). Container stdout is captured by `docker compose
+# logs`, so the key is masked there and only printed in full on an interactive
+# terminal; the panel bootstrap password is still shown once on first run.
+# Without --lan the container published port 8788 to the network while key
+# checking stayed off.
 # No --port on purpose: the gateway already reads PORT from the environment
 # (default 8788), and the exec form cannot expand a variable. Keeping the exec
 # form leaves python as PID 1, so `docker stop` still delivers SIGTERM.

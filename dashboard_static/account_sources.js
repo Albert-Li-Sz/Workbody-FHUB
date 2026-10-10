@@ -103,7 +103,7 @@ function renderSourceAccounts(){
       '<td data-label="调度优先级"><input id="sourcePriority_'+uid+'" aria-label="'+esc(a.nickname)+' 调度优先级" type="number" min="0" max="2147483647" value="'+esc(SOURCE_PRIORITY_DRAFTS.has(a.uid)?SOURCE_PRIORITY_DRAFTS.get(a.uid):a.priority)+'" data-action="editSourcePriority" data-on="input" data-uid="'+uid+'" style="width:92px"> '+action('saveSourcePriority','保存优先级')+'</td>'+
       '<td data-label="余额 / 额度"><span class="source-balance-value">'+(balance.remain == null?'未知':fmt(balance.remain)+' '+esc(balance.unit==='credits'?'积分':balance.unit || unit))+((billingStatus.balance || {}).stale?'（缓存）':'')+'</span>'+(subscription.name?'<div><span class="badge subscription">'+esc(subscription.name)+'</span></div>':'')+planPrice+quota+queried+(balance.note?'<div class="hint">'+esc(balance.note)+'</div>':'')+billingErrors+'</td>'+
       '<td data-label="今日用量">'+fmtTokens(today.tokens || 0)+' Token<div class="hint">免费 '+fmtTokens(today.free_tokens || 0)+'</div><div class="hint">消费 '+fmt(today.paid_cost || 0)+' '+unit+'</div></td>'+
-      '<td data-label="操作"><div class="source-account-actions">'+action('openSourceEditor','编辑')+action('toggleSourceAccount',a.enabled?'停用':'启用')+action('preferSourceAccount','优先使用')+action('refreshSourceBilling','查询余额／额度')+action('openSourceTest','测试调用')+action('exportSourceAccount','导出')+action('deleteSourceAccount','删除')+'</div></td></tr>';
+      '<td data-label="操作"><div class="source-account-actions">'+action('openSourceEditor','编辑')+action('toggleSourceAccount',a.enabled?'停用':'启用')+action('preferSourceAccount','优先使用')+action('refreshSourceBilling','查询余额／额度')+action('openSourceTest','测试调用')+action('exportSourceAccount','导出')+action('exportSourceAccountSecrets','导出含凭据')+action('deleteSourceAccount','删除')+'</div></td></tr>';
   }).join('') + '</tbody></table></div><p class="hint">优先级越小越早调用；保存后重启保留。同优先级下，免费模型均衡 Token，付费模型均衡实际消费，并计入在途请求。自动模式使用较大窗口保留会话账号。</p>';
 }
 
@@ -223,11 +223,13 @@ async function importCommandCli(){
   try { await postJSON(SOURCE_ROOT+'/accounts/cli-import',{}); await loadSourceAccounts(); toast('服务器 CLI 账号已导入','ok'); }
   catch(e){ toast('导入失败：'+e.message+'；也可上传客户端的 auth.json','bad'); }
 }
-async function exportSourceAccounts(uid){
+async function exportSourceAccounts(uid,includeSecrets=false){
+  if(includeSecrets && !confirm('导出文件将包含 API Key、访问令牌等明文凭据，可用于迁移或恢复账号。请妥善保管，确认继续导出？')) return;
   try{
-    const data=await getJSON(SOURCE_ROOT+'/accounts/export?upstream='+encodeURIComponent(accountSource)+(uid?'&uid='+encodeURIComponent(uid):''));
+    const data=await getJSON(SOURCE_ROOT+'/accounts/export?upstream='+encodeURIComponent(accountSource)+(uid?'&uid='+encodeURIComponent(uid):'')+'&includeSecrets='+(includeSecrets?'1':'0'));
     const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
     const link=document.createElement('a'); link.href=url; link.download='fhub-'+accountSource+'-accounts.json'; link.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+    toast(includeSecrets?'已导出（文件含明文凭据，请妥善保管）':'已导出账号信息（不含凭据）','ok');
   }catch(e){ toast('导出失败：'+e.message,'bad'); }
 }
 

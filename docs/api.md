@@ -1,6 +1,6 @@
 # API 与余额协议说明
 
-适用版本：**1.2.7**。
+适用版本：**1.2.8**。
 
 ## 地址与鉴权
 
@@ -13,6 +13,12 @@ Authorization: Bearer <WORKBODY_API_KEY>
 本文路径相对于服务根地址。WorkBuddy 通过 Chat Completions 转换；Cline 和 Zen 支持同协议原生转发与跨协议转换；Command Code 的官方 CLI NDJSON 转成三种客户端协议，详见[多平台接入](platforms.md)。兼容范围以本文为准；余额和用量接口始终要求有效、已启用的网关 Key，面板会话及关闭模型调用鉴权不能绕过这一要求。余额和用量返回使用 `Cache-Control: no-store`。
 
 Key 的 `allowed_upstreams` 限定可用平台，旧 Key 默认只允许 WorkBuddy。WorkBuddy Key 固定绑定 `cn` 或 `intl` 时，查询只读取该渠道；未绑定时跟随当前默认出口。余额与客户端用量不接受 `X-Realm`、`realm` 或 `channel` 参数覆盖 Key 的渠道。
+
+## 诊断状态与账号导出
+
+匿名 `GET /health` 返回 `ok`、`service`、`version`、`api_key_required`；账号数量、身份与渠道详情需要有效网关 Key 或面板会话。匿名 `GET /realm` 返回 `ok`、`version`、`auth_required`，认证后增加 `current`／`options`。关闭模型调用鉴权不会开放这些详情。`GET /panel/status` 在未登录时仅返回基础登录状态，默认密码状态与 API Key 配置状态需要有效面板会话。
+
+平台账号导出 `GET /platforms/accounts/export`（兼容 `/accounts/upstreams/export`）始终需要面板会话，默认不含凭据。迁移／恢复需显式传 `includeSecrets=1` 或 `true`；`0`／`false` 返回账号信息，其他非空值返回 `400`。
 
 ## 模型与生成
 

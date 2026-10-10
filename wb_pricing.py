@@ -1557,7 +1557,7 @@ def policy_id(model, flat, bands, usd_cny):
         {"model": model, "flat": flat, "bands": bands or None,
          "usd_cny": round(_as_float(usd_cny, 0.0), 6)},
         sort_keys=True, ensure_ascii=False)
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
 def load_policies():

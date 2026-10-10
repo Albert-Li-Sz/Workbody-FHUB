@@ -7,6 +7,7 @@ disappearing (checksums asset, tag == source version, healthcheck, PUID/PGID).
 Run with: python _test_release_engineering.py
 """
 import os
+import re
 import sys
 import unittest
 
@@ -29,6 +30,17 @@ class VersionStringTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_actions_are_pinned_to_full_commit_shas(self):
+        directory = os.path.join(ROOT, ".github", "workflows")
+        for filename in os.listdir(directory):
+            if not filename.endswith((".yml", ".yaml")):
+                continue
+            text = read(".github", "workflows", filename)
+            refs = re.findall(r"^\s*(?:-\s*)?uses:\s*([^#\s]+)", text, re.M)
+            for ref in refs:
+                with self.subTest(workflow=filename, action=ref):
+                    self.assertRegex(ref, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
+
     def test_tests_workflow_asserts_tag_against_source(self):
         text = read(".github", "workflows", "tests.yml")
         self.assertIn('tags: ["v*"]', text)

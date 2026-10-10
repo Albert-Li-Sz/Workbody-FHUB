@@ -19,7 +19,7 @@ import time
 import urllib.request
 import uuid
 
-VERSION = "1.2.7"
+VERSION = "1.2.8"
 REPOSITORY = "Albert-Li-Sz/Workbody-FHUB"
 REGISTRY = "ghcr.io/albert-li-sz"
 RUNTIME_FILE = "compose.runtime.json"

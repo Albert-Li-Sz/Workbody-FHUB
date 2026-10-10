@@ -4,11 +4,12 @@ const elements={};
 function element(id){ return elements[id] || (elements[id]={value:'',dataset:{},innerHTML:'',textContent:'',hidden:false,classList:{add(){},remove(){},toggle(){},contains(){return false;}},contains:()=>false,setAttribute(){},focus(){},click(){}}); }
 const account={uid:'cline-fixture',upstream:'cline',nickname:'fixture',enabled:true,priority:100,in_flight:0,models:[],today:{tokens:1000000},proxy_slot:''};
 const data={accounts:[account,{...account,uid:'cc-fixture',upstream:'commandcode'},{...account,uid:'zen-fixture',upstream:'opencode_zen',public:true,enabled:false,auth_type:'api_key'}],catalogues:{cline:{count:1}},models:[{upstream:'cline',id:'cline-pass/test',native_protocol:'chat',context_length:1000000}],routing:{},models_revision:'1',responses:{max_mb:1024,enabled:true,retention_days:7},proxy_slots:[]};
-const posts=[],notices=[];let gets=0;
-const context=vm.createContext({console,window:{addEventListener(){}},document:{activeElement:null,getElementById:element,addEventListener(){}},setTimeout,clearInterval,
+const posts=[],notices=[],downloads=[],blobs=[],confirmations=[];let gets=0,confirmExport=true;
+const context=vm.createContext({console,window:{addEventListener(){}},document:{activeElement:null,getElementById:element,addEventListener(){},createElement(){return {click(){downloads.push(this);}};}},setTimeout:fn=>fn(),clearInterval,
+ Blob,URL:{createObjectURL(blob){blobs.push(blob);return 'blob:audit-fixture';},revokeObjectURL(){}},
  esc:v=>String(v??'').replaceAll('<','&lt;'),fmt:String,fmtTokens:v=>String(v)+'K',isAuthError:()=>false,
  getJSON:async url=>{gets++;return url.includes('/usage?')?{totals:[],recent:[]}:url.endsWith('/models')?{models:data.models}:{...data};},
- postJSON:async(url,body)=>{posts.push({url,body});return{};},toast:(...v)=>notices.push(v),confirm:()=>true});
+ postJSON:async(url,body)=>{posts.push({url,body});return{};},toast:(...v)=>notices.push(v),confirm:message=>{confirmations.push(message);return confirmExport;}});
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../dashboard_static/account_sources.js'),'utf8'),context);
 (async()=>{
  await context.switchAccountSource('cline'); assert.equal(gets,3);
@@ -99,5 +100,27 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,'../dashboard_static/account
      assert((Math.max(fg,bg)+0.05)/(Math.min(fg,bg)+0.05)>=4.5,key+' label contrast must be at least 4.5 in both themes');
    }
  }
- console.log('additional account sources: isolation, drafts, editing, batch, routes and persistence passed');
+ const exports=[];
+ context.getJSON=async url=>{exports.push(url);return {accounts:[{uid:'zen-fixture',...(url.includes('includeSecrets=1')?{api_key:'audit-export-secret'}:{})}]};};
+ await context.exportSourceAccounts('zen-fixture');
+ assert(exports.at(-1).includes('includeSecrets=0'),'ordinary export explicitly excludes credentials');
+ assert.equal(confirmations.length,0,'redacted export does not need a secret warning');
+ assert(!String(await blobs.at(-1).text()).includes('audit-export-secret'));
+ const count=exports.length,downloadCount=downloads.length;
+ confirmExport=false;await context.exportSourceAccounts('zen-fixture',true);
+ assert.equal(exports.length,count,'cancelling secret export prevents any credential request');
+ assert.equal(downloads.length,downloadCount,'cancelling does not create a file');
+ assert(confirmations.at(-1).includes('明文凭据'));
+ confirmExport=true;await context.exportSourceAccounts('zen-fixture',true);
+ assert(exports.at(-1).includes('includeSecrets=1'));
+ assert(String(await blobs.at(-1).text()).includes('audit-export-secret'));
+ assert(notices.at(-1)[0].includes('明文凭据'));
+ const core=fs.readFileSync(path.join(__dirname,'../dashboard_static/core.js'),'utf8');
+ const escapeLine=core.split('\n').find(line=>line.startsWith('const esc ='));
+ const esc=vm.runInNewContext(escapeLine+'; esc;');
+ const escaped=esc("' autofocus onfocus='alert(1) &<>\"");
+ assert(!escaped.includes("'"),'untrusted values cannot break a single-quoted attribute');
+ assert(!/[<>\"]/.test(escaped));
+ assert.equal(esc(null),'');
+ console.log('additional account sources: isolation, drafts, editing, export confirmation and escaping passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -195,7 +195,7 @@ class AccountTests(unittest.TestCase):
         self.assertEqual(captured[-1].full_url, "https://opencode.ai/inference/go/anthropic/v1/messages")
         self.assertEqual(json.loads(captured[-1].data)["model"], "same-model")
         self.assertEqual(captured[-1].get_header("Authorization"), "Bearer go-current")
-        self.manager.import_accounts(self.manager.export_accounts())
+        self.manager.import_accounts(self.manager.export_accounts(secrets=True))
         reloaded = U.Manager(self.work.name)
         restored = reloaded.accounts[account.uid]
         self.assertTrue(restored.allows("go/same-model"))
@@ -218,7 +218,7 @@ class AccountTests(unittest.TestCase):
         accounts=self.manager.import_accounts([{ "upstream":"cline","api_key":"sk_fixture","priority":4},
             {"upstream":"cline","access_token":"oauth-fixture","refresh_token":"refresh-fixture"},
             {"upstream":"commandcode","api_key":"user_fixture_key","priority":9}])
-        exported=self.manager.export_accounts()
+        exported=self.manager.export_accounts(secrets=True)
         self.manager.import_accounts(exported)
         for item in accounts:
             self.assertEqual(self.manager.accounts[item["uid"]].view()["auth_type"], item["auth_type"])

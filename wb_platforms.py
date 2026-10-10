@@ -414,7 +414,7 @@ class Manager:
         self.publish()
         return self.routing()
 
-    def export_accounts(self, uids=None, upstream=None, secrets=True):
+    def export_accounts(self, uids=None, upstream=None, secrets=False):
         selected = set(uids or [])
         with self.lock:
             rows = [copy.deepcopy(account.document) if secrets else account.view()

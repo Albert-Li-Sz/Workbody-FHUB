@@ -263,7 +263,7 @@ class HTTPTests(unittest.TestCase):
         status,document=self.management("/accounts/export")
         self.assertEqual(status,200)
         self.assertEqual(document["count"],1)
-        status,document=self.management("/accounts/upstreams/accounts/export?upstream=commandcode")
+        status,document=self.management("/accounts/upstreams/accounts/export?upstream=commandcode&includeSecrets=1")
         self.assertEqual(status,200)
         self.assertEqual(document["count"],3)
         self.assertTrue(all(row["upstream"]=="commandcode" for row in document["accounts"]))

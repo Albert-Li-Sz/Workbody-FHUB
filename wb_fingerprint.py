@@ -14,7 +14,7 @@ def derive_id(uid: str, salt: str) -> str:
     幂等：同一账号每次调用产生相同值，彻底避免随机机器码导致的上游风控。
     """
     seed = f"{salt}:{uid or 'anonymous'}"
-    return hashlib.md5(seed.encode("utf-8")).hexdigest()[:36]
+    return hashlib.md5(seed.encode("utf-8"), usedforsecurity=False).hexdigest()[:36]
 
 
 def generate_request_id(uid: str) -> str:

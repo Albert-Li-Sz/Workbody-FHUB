@@ -2154,6 +2154,70 @@ KEY_BUCKET_UNKNOWN = "__unknown_key__"
 KEY_MODEL_TOP_N = 5
 
 
+def _fold_usage_stat(stat_obj, row, outcome, cost):
+    """Fold one usage row into a stats bucket (account, model or key).
+
+    Module-level on purpose: this used to be a closure defined inside the
+    per-row loop, which allocated two function objects for every line of the
+    log (audit #12).
+    """
+    if outcome == "client_aborted":
+        stat_obj["client_aborted"] += 1
+    elif outcome not in ("completed", "client_aborted"):
+        stat_obj["errors"] += 1
+    else:
+        stat_obj["requests"] += 1
+    # Token totals follow actual consumption, so a request that failed after
+    # the upstream had already billed for tokens still shows them. Only the
+    # request/error counters depend on the outcome.
+    stat_obj["prompt_tokens"] += (row.get("prompt_tokens") or 0)
+    stat_obj["completion_tokens"] += (row.get("completion_tokens") or 0)
+    stat_obj["reasoning_tokens"] += (row.get("reasoning_tokens") or 0)
+    stat_obj["cached_tokens"] += (row.get("cached_tokens") or 0)
+    stat_obj["total_tokens"] += (row.get("total_tokens") or 0)
+    stat_obj["credit"] += (_counted_credit(row) or 0)
+    if cost["known"]:
+        stat_obj["cost_cny"] += cost["cny"]
+    if outcome == "client_aborted":
+        return
+    if row.get("ttft_ms"):
+        stat_obj["ttft_sum"] += row["ttft_ms"]
+        stat_obj["ttft_n"] += 1
+    speed = wb_metrics.speed_sample(row)
+    if speed:
+        stat_obj["speed_tokens"] += speed[0]
+        stat_obj["speed_gen_ms"] += speed[1]
+        stat_obj["speed_n"] += 1
+    if row.get("elapsed_ms"):
+        stat_obj["elapsed_sum"] += row["elapsed_ms"]
+        stat_obj["elapsed_n"] += 1
+
+
+def _bump_model_totals(tgt_all, tgt_window, row, model_id, cost, outcome, in_window, include_all):
+    """Model distribution counts successful requests only.
+
+    A failed call attributed to a model would show up as demand for it when
+    the caller got nothing. Hoisted out of the per-row loop with the rest of
+    the fold (audit #12).
+    """
+    if outcome != "completed":
+        return
+    if include_all:
+        tm = tgt_all.setdefault(model_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
+        tm["requests"] += 1
+        tm["tokens"] += (row.get("total_tokens") or 0)
+        tm["reasoning"] += (row.get("reasoning_tokens") or 0)
+        if cost["known"]:
+            tm["cost_cny"] += cost["cny"]
+    if in_window:
+        tdm = tgt_window.setdefault(model_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
+        tdm["requests"] += 1
+        tdm["tokens"] += (row.get("total_tokens") or 0)
+        tdm["reasoning"] += (row.get("reasoning_tokens") or 0)
+        if cost["known"]:
+            tdm["cost_cny"] += cost["cny"]
+
+
 def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None, until=None,
                     realm=None, key_map=None, rows=None, include_all=True):
     """Walk the usage JSONL once, folding every row into the maps.
@@ -2187,7 +2251,6 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                     # Confirmed partial consumption contributes to totals;
                     # cancellation has its own count and no speed sample.
                     outcome = row_outcome(r)
-                    is_err = outcome not in ("completed", "client_aborted")
                     cost = wb_pricing.cost_for_row(r)
                     at = r.get("at", 0)
                     # Same bounds as /usage and /usage/perf, so the three
@@ -2196,62 +2259,10 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                                  and (until is None or at <= until))
                     acct_uid = r.get("account") or "(unattributed)"
                     m_id = r.get("model") or "(unknown)"
-                    def feed(stat_obj, is_error):
-                        if outcome == "client_aborted":
-                            stat_obj["client_aborted"] += 1
-                        elif is_error:
-                            stat_obj["errors"] += 1
-                        else:
-                            stat_obj["requests"] += 1
-                        # Token totals follow actual consumption, so a request
-                        # that failed after the upstream had already billed for
-                        # tokens still shows them. Only the request/error
-                        # counters depend on the outcome.
-                        stat_obj["prompt_tokens"] += (r.get("prompt_tokens") or 0)
-                        stat_obj["completion_tokens"] += (r.get("completion_tokens") or 0)
-                        stat_obj["reasoning_tokens"] += (r.get("reasoning_tokens") or 0)
-                        stat_obj["cached_tokens"] += (r.get("cached_tokens") or 0)
-                        stat_obj["total_tokens"] += (r.get("total_tokens") or 0)
-                        stat_obj["credit"] += (_counted_credit(r) or 0)
-                        if cost["known"]:
-                            stat_obj["cost_cny"] += cost["cny"]
-                        if outcome == "client_aborted":
-                            return
-                        if r.get("ttft_ms"):
-                            stat_obj["ttft_sum"] += r["ttft_ms"]
-                            stat_obj["ttft_n"] += 1
-                        speed = wb_metrics.speed_sample(r)
-                        if speed:
-                            stat_obj["speed_tokens"] += speed[0]
-                            stat_obj["speed_gen_ms"] += speed[1]
-                            stat_obj["speed_n"] += 1
-                        if r.get("elapsed_ms"):
-                            stat_obj["elapsed_sum"] += r["elapsed_ms"]
-                            stat_obj["elapsed_n"] += 1
-                    def bump_models(tgt_all, tgt_window, is_error):
-                        # Model distribution counts successful requests only:
-                        # a failed call attributed to a model would show up as
-                        # demand for it when the caller got nothing.
-                        if outcome != "completed":
-                            return
-                        if include_all:
-                            tm = tgt_all.setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
-                            tm["requests"] += 1
-                            tm["tokens"] += (r.get("total_tokens") or 0)
-                            tm["reasoning"] += (r.get("reasoning_tokens") or 0)
-                            if cost["known"]:
-                                tm["cost_cny"] += cost["cny"]
-                        if in_window:
-                            tdm = tgt_window.setdefault(m_id, {"requests": 0, "tokens": 0, "reasoning": 0, "cost_cny": 0.0})
-                            tdm["requests"] += 1
-                            tdm["tokens"] += (r.get("total_tokens") or 0)
-                            tdm["reasoning"] += (r.get("reasoning_tokens") or 0)
-                            if cost["known"]:
-                                tdm["cost_cny"] += cost["cny"]
                     if include_all:
-                        feed(all_summary, is_err)
+                        _fold_usage_stat(all_summary, r, outcome, cost)
                     if in_window:
-                        feed(window_summary, is_err)
+                        _fold_usage_stat(window_summary, r, outcome, cost)
                     if acct_uid not in acct_map:
                         acct_map[acct_uid] = {
                             "uid": acct_uid,
@@ -2264,16 +2275,17 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                             "all_models": {},
                         }
                     if include_all:
-                        feed(acct_map[acct_uid]["all_time"], is_err)
+                        _fold_usage_stat(acct_map[acct_uid]["all_time"], r, outcome, cost)
                     if in_window:
-                        feed(acct_map[acct_uid]["window"], is_err)
-                    bump_models(acct_map[acct_uid]["all_models"], acct_map[acct_uid]["window_models"], is_err)
+                        _fold_usage_stat(acct_map[acct_uid]["window"], r, outcome, cost)
+                    _bump_model_totals(acct_map[acct_uid]["all_models"], acct_map[acct_uid]["window_models"],
+                                       r, m_id, cost, outcome, in_window, include_all)
                     if m_id not in model_map:
                         model_map[m_id] = {"model": m_id, "window": _new_analytics_stat(), "all_time": _new_analytics_stat()}
                     if include_all:
-                        feed(model_map[m_id]["all_time"], is_err)
+                        _fold_usage_stat(model_map[m_id]["all_time"], r, outcome, cost)
                     if in_window:
-                        feed(model_map[m_id]["window"], is_err)
+                        _fold_usage_stat(model_map[m_id]["window"], r, outcome, cost)
                     if key_map is not None:
                         # A row written before this feature existed has no
                         # `key` field at all; a row from a deployment that
@@ -2304,10 +2316,11 @@ def _scan_usage_log(all_summary, window_summary, acct_map, model_map, since=None
                             if at and at > km["last_at"]:
                                 km["last_at"] = at
                         if include_all:
-                            feed(km["all_time"], is_err)
+                            _fold_usage_stat(km["all_time"], r, outcome, cost)
                         if in_window:
-                            feed(km["window"], is_err)
-                        bump_models(km["all_models"], km["window_models"], is_err)
+                            _fold_usage_stat(km["window"], r, outcome, cost)
+                        _bump_model_totals(km["all_models"], km["window_models"],
+                                           r, m_id, cost, outcome, in_window, include_all)
         except Exception as exc:
             if rows is not None:
                 raise
@@ -2538,7 +2551,6 @@ def runtime_settings_view():
             "name": entry.get("name") or "",
             "realm": entry.get("realm") or "",
             "allowed_upstreams": wb_settings.key_upstreams(entry),
-            "models": list(entry.get("models") or []),
             "enabled": entry.get("enabled", True) is not False,
             "models": list(stored_models) if isinstance(stored_models, list) else [],
             "masked": (raw[:4] + "*" * 6 + raw[-4:]) if len(raw) > 8 else "*" * len(raw),
@@ -7985,8 +7997,8 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         except Exception:
             return ""
-    def _key_ok(self):
-        """True when the request carries a right key (or no key is needed)."""
+    def _key_ok(self, require_credentials=False):
+        """Accept a key or panel session; optionally disallow anonymous access."""
         # An authenticated panel session also unlocks the management APIs,
         # so the browser never has to keep the API key in localStorage.
         if self._panel_ok():
@@ -7994,7 +8006,7 @@ class Handler(BaseHTTPRequestHandler):
         self.key_entry = identify_key(self._supplied_key())
         if self.key_entry:
             return True
-        if not auth_required():
+        if not require_credentials and not auth_required():
             return True
         return False
     def _key_realm(self):
@@ -8310,7 +8322,10 @@ class Handler(BaseHTTPRequestHandler):
                     uids = query.get("uid") or []
                     if any(uid not in PLATFORMS.accounts for uid in uids):
                         raise wb_platforms.PlatformError("account not found", 404)
-                    secrets = query.get("includeSecrets", ["1"])[0] not in ("0", "false")
+                    secret_flag = query.get("includeSecrets", ["0"])[0].strip().lower()
+                    if secret_flag not in ("0", "1", "false", "true"):
+                        raise wb_platforms.PlatformError("includeSecrets must be 1 or 0")
+                    secrets = secret_flag in ("1", "true")
                     accounts = PLATFORMS.export_accounts(uids, scope, secrets)
                     document = {"format": "fhub-source-accounts", "accounts": accounts, "count": len(accounts)}
                     if query.get("download", ["0"])[0] in ("1", "true"):
@@ -8429,31 +8444,31 @@ class Handler(BaseHTTPRequestHandler):
         # Answer without a token: the dashboard needs to know whether to
         # show the login screen before it can hold a session.
         info = {
+            "ok": True,
+            "version": VERSION,
             "panel_password_required": True,
-            "panel_password_is_default": wb_settings.panel_password_is_default(ACCOUNTS_DIR),
             "authenticated": self._panel_ok(),
         }
-        # Whether a key exists is not a secret; its value never leaves the
-        # process, and the settings endpoint only reports a masked form.
-        info["api_key_set"] = bool(API_KEY)
+        if info["authenticated"]:
+            info["panel_password_is_default"] = wb_settings.panel_password_is_default(ACCOUNTS_DIR)
+            info["api_key_set"] = bool(API_KEY)
         return self._json(200, info)
 
     def _get_health(self):
-        # Always answer (the launcher uses this to detect a running copy),
-        # but only expose account identity to an authorised caller.
-        rep = current_account()
+        # Keep anonymous probes lightweight. The launcher uses the stable
+        # service marker to recognise a running copy without account details.
         info = {
             "ok": True,
+            "service": "workbody-fhub",
             "version": VERSION,
-            # Report the realm actually in use; this used to be the
-            # literal "intl" and drifted from the panel switch.
-            "realm": CURRENT_REALM,
-            "accounts": len(POOL.accounts) if POOL else 0,
-            "accounts_ready": POOL.count_ready(allow_refresh=False) if POOL else 0,
             "api_key_required": auth_required(),
         }
-        if self._key_ok():
+        if self._key_ok(require_credentials=True):
+            rep = current_account()
             info.update({
+                "realm": CURRENT_REALM,
+                "accounts": len(POOL.accounts) if POOL else 0,
+                "accounts_ready": POOL.count_ready(allow_refresh=False) if POOL else 0,
                 "uid": rep.uid if rep else None,
                 "domain": rep.domain if rep else None,
                 "issuer": wb_accounts.jwt_issuer(rep.access_token) if rep else None,
@@ -8465,7 +8480,10 @@ class Handler(BaseHTTPRequestHandler):
     # differ in whether they append "/v1" themselves.
 
     def _get_realm(self):
-        return self._json(200, {"current": CURRENT_REALM, "options": ["intl", "cn"]})
+        info = {"ok": True, "version": VERSION, "auth_required": True}
+        if self._key_ok(require_credentials=True):
+            info.update({"current": CURRENT_REALM, "options": ["intl", "cn"]})
+        return self._json(200, info)
 
     def _get_v1_models(self, model_id=None):
         if not self._authorized():
@@ -11443,12 +11461,10 @@ def _probe_running_instance(args):
     except Exception:
         existing = None  # nothing answering /health - let the bind below decide
     if isinstance(existing, dict):
-        # Only OUR /health carries the account-pool fields ("accounts"). Other
-        # services can occupy the same port and also answer /health with JSON
-        # (a dev proxy, another gateway); treating that as "already running" made this
-        # launcher exit silently while the port belonged to someone else - the
-        # dashboard then showed a foreign UI and API calls failed with 401/404.
-        foreign = existing.get("service") or "accounts" not in existing
+        # Current health responses have a public service marker; older releases
+        # reported account counts instead. Keep detecting both during upgrades.
+        service = existing.get("service")
+        foreign = service != "workbody-fhub" if service else "accounts" not in existing
         if foreign:
             who = existing.get("service") or "an unknown HTTP service"
             print()
@@ -11577,6 +11593,28 @@ def _report_first_run(args):
             print("  %s  %s  %s" % (account.uid[:8], account.nickname, account.domain))
         return
 
+def _masked_secret(value):
+    """Mask a credential that would otherwise be written to a captured log."""
+    text = str(value or "")
+    if len(text) > 12:
+        return text[:4] + "*" * 8 + text[-4:]
+    return "*" * len(text)
+
+
+def _console_shows_credentials():
+    """True only on an interactive terminal, never for a pipe or a log file.
+
+    `docker compose logs` captures stdout, so a key printed at container start
+    becomes a persisted secret that outlives the process. The panel bootstrap
+    password is still printed on first run (it is the only way in), but the
+    gateway key is shown in full only when a human is watching a terminal.
+    """
+    try:
+        return bool(sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def _log_startup_summary(args, api_key_generated):
     rep = current_account()
     log("accounts   : %d total, %d usable" % (len(POOL.accounts), POOL.count_ready(allow_refresh=False)))
@@ -11606,14 +11644,23 @@ def _log_startup_summary(args, api_key_generated):
             print("    API       : http://%s:%s/v1" % (ip, args.port))
             print("    Dashboard : http://%s:%s/" % (ip, args.port))
         print()
-        print("    API Key   : %s" % API_KEY)
-        if api_key_generated:
-            print("                (newly generated & saved to accounts/settings.json)")
+        interactive = _console_shows_credentials()
+        if interactive:
+            print("    API Key   : %s" % API_KEY)
+            if api_key_generated:
+                print("                (newly generated & saved to accounts/settings.json)")
+            else:
+                print("                (reused from accounts/settings.json)")
         else:
-            print("                (reused from accounts/settings.json)")
+            print("    API Key   : %s  (masked: this output is captured)" % _masked_secret(API_KEY))
+            print("                read or copy the full value in the dashboard: 设置 -> API Key")
         print()
-        print("    Open the dashboard (key already included):")
-        print("      http://%s:%s/?key=%s" % (ips[0], args.port, API_KEY))
+        if interactive:
+            print("    Open the dashboard (key already included):")
+            print("      http://%s:%s/?key=%s" % (ips[0], args.port, API_KEY))
+        else:
+            print("    Open the dashboard:")
+            print("      http://%s:%s/" % (ips[0], args.port))
         print()
         print("    Clients: Base URL = the API address above, then paste the key.")
         print()

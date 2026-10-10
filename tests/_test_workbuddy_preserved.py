@@ -11,6 +11,11 @@ class PreservationTests(unittest.TestCase):
     def test_original_workbuddy_code_is_preserved(self):
         for path,digest in EXPECTED.items():
             source = (ROOT/path).read_bytes().replace(b'\r\n', b'\n')
+            if path == 'dashboard_static/core.js':
+                # Allow precisely the F6 apostrophe escape from the audit;
+                # keep the original hash for every other byte of this file.
+                source = source.replace(b'/[&<>"\']/g', b'/[&<>"]/g')
+                source = source.replace(b',"\'":\'&#39;\'', b'')
             self.assertEqual(hashlib.sha256(source).hexdigest(),digest,path)
 
     def test_original_account_controls_and_oauth_dom_are_preserved(self):

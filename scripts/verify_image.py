@@ -121,6 +121,7 @@ expected_hashes = HASHES_PLACEHOLDER
 expected_machine = MACHINE_PLACEHOLDER
 expected_version = VERSION_PLACEHOLDER
 expected_uid = UID_PLACEHOLDER
+hardened_diagnostics = tuple(map(int, expected_version.split('.'))) >= (1, 2, 8)
 assert platform.machine() == expected_machine
 assert sys.version_info[:2] >= (3, 9)
 assert os.getuid() == expected_uid
@@ -135,7 +136,16 @@ def request(path, payload=None, headers=None):
             return response.status, json.load(response)
     except urllib.error.HTTPError as error:
         return error.code, json.load(error)
-assert request('/health')[0] == 200
+status, health = request('/health')
+assert status == 200
+if hardened_diagnostics:
+    assert health == {'ok': True, 'service': 'workbody-fhub',
+                      'version': expected_version, 'api_key_required': True}
+    status, realm = request('/realm')
+    assert status == 200 and realm == {'ok': True, 'version': expected_version, 'auth_required': True}
+    status, panel = request('/panel/status')
+    assert status == 200 and panel == {'ok': True, 'version': expected_version,
+                                      'panel_password_required': True, 'authenticated': False}
 assert request('/v1/models')[0] == 401
 assert request('/panel/login', {'password': 'admin'})[0] == 401
 status, login = request('/panel/login', {'password': password})
@@ -144,21 +154,38 @@ status, settings = request('/settings', headers={'X-Panel-Token': login['token']
 assert status == 200 and settings['auth_required'] is True
 assert settings['panel_password_is_default'] is False
 assert settings['version'] == expected_version
+status, health = request('/health', headers={'X-Panel-Token': login['token']})
+assert status == 200 and health['accounts'] == 0 and 'realm' in health
 stored = pathlib.Path('/app/accounts/settings.json')
 assert stored.stat().st_mode & 0o777 == 0o600
+stored_settings = json.loads(stored.read_text())
+keys = [stored_settings.get('launcher_key'), stored_settings.get('api_key')] + [
+    item.get('key') for item in stored_settings.get('api_keys', [])]
+if hardened_diagnostics:
+    assert any(keys), 'startup did not persist a gateway key'
+    for key in keys:
+        if key:
+            assert key not in STARTUP_LOGS_PLACEHOLDER, 'gateway key appeared in captured startup logs'
+            status, health = request('/health', headers={'Authorization': 'Bearer ' + key})
+            assert status == 200 and health['accounts'] == 0 and 'realm' in health
+    assert '?key=' not in STARTUP_LOGS_PLACEHOLDER
 assert not pathlib.Path('/app/wb_opencode.py').exists()
 assert '100% Vibe Coding' in pathlib.Path('/app/docs/credits.md').read_text()
 assert 'MIT License' in pathlib.Path('/app/LICENSE.upstream').read_text()
 assert 'Apache License' in pathlib.Path('/app/LICENSE').read_text()
-print(json.dumps({'health': 200, 'anonymous_api': 401, 'admin_login': 401,
+receipt = {'health': 200, 'anonymous_api': 401, 'admin_login': 401,
                   'bootstrap_login': 200, 'authenticated_settings': 200,
                   'version': settings['version'], 'settings_mode': '0600',
                   'machine': platform.machine(), 'python': platform.python_version(),
-                  'uid': os.getuid(), 'source_files_verified': len(expected_hashes)}))
+           'uid': os.getuid(), 'source_files_verified': len(expected_hashes)}
+if hardened_diagnostics:
+    receipt.update({'anonymous_diagnostics': 'minimal', 'startup_api_key': 'redacted'})
+print(json.dumps(receipt))
 '''.replace("PASSWORD_PLACEHOLDER", repr(match.group(1))).replace(
             "HASHES_PLACEHOLDER", repr(hashes)).replace(
             "MACHINE_PLACEHOLDER", repr("x86_64" if platform == "linux/amd64" else "aarch64")).replace(
-            "VERSION_PLACEHOLDER", repr(expected_version)).replace("UID_PLACEHOLDER", repr(1000 if non_root else 0))
+            "VERSION_PLACEHOLDER", repr(expected_version)).replace("UID_PLACEHOLDER", repr(1000 if non_root else 0)).replace(
+            "STARTUP_LOGS_PLACEHOLDER", repr(logs))
         return json.loads(run(["docker", "exec", "-i", name, "python", "-"], verify))
     finally:
         subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True)
@@ -170,7 +197,7 @@ def regressions(platform):
               "messages_web", "anthropic_http", "anthropic_messages", "gateway_hardening",
               "api_key_save_merge", "upstream_integration", "remote_catalog",
               "platforms", "platform_http", "unified_accounts", "unified_http",
-              "commandcode", "response_store", "workbuddy_preserved"]
+              "commandcode", "response_store", "workbuddy_preserved", "audit_2026_10_11"]
     with fixture_tree() as fixtures:
         suites = [suite for suite in suites if (fixtures / "tests" / ("_test_%s.py" % suite)).exists()]
         if not suites:

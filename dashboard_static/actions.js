@@ -26,6 +26,8 @@ const ACTION_HANDLERS = {
   importSourceFile: el => importSourceFile(el),
   exportSourceAccounts: () => exportSourceAccounts(),
   exportSourceAccount: el => exportSourceAccounts(el.dataset.uid),
+  exportSourceAccountsSecrets: () => exportSourceAccounts(undefined,true),
+  exportSourceAccountSecrets: el => exportSourceAccounts(el.dataset.uid,true),
   importCommandCli: () => importCommandCli(),
   refreshAccountSource: () => refreshAccountSource(),
   batchSourceAccounts: (el, ev, arg) => batchSourceAccounts(arg === '1'),

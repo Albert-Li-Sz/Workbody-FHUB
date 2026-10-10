@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Published release tag (e.g. v1.2.7)"
+        description: "Published release tag (e.g. v1.2.8)"
         required: true
         type: string
       reuse_images:
@@ -28,14 +28,14 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
         ref: ${{ inputs.tag || github.event.release.tag_name }}
         fetch-depth: 0
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
       with:
         python-version: "3.11"
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
       with:
         node-version: "20"
     - name: Verify the release tag matches the source version
@@ -61,10 +61,10 @@ jobs:
       run: python tests/run_all.py
     - name: Package public source and migration tools
       run: python scripts/package_release.py --ref HEAD --output-dir release-source
-    - uses: docker/setup-qemu-action@v3
-    - uses: docker/setup-buildx-action@v3
+    - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+    - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
     - name: Log in to GHCR
-      uses: docker/login-action@v3
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -74,7 +74,7 @@ jobs:
         DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
       if: env.DOCKERHUB_USER != '' && env.DOCKERHUB_TOKEN != ''
-      uses: docker/login-action@v3
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -102,7 +102,7 @@ jobs:
         echo "EOF" >> $GITHUB_OUTPUT
         echo "nginx_primary=ghcr.io/${OWNER,,}/workbody-fhub-nginx" >> $GITHUB_OUTPUT
     - name: Extract Docker metadata
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
       id: meta
       with:
         images: ${{ steps.images.outputs.list }}
@@ -116,7 +116,7 @@ jobs:
     - name: Build and push Docker image
       if: ${{ !inputs.reuse_images }}
       id: app_build
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
       with:
         context: .
         push: true
@@ -124,7 +124,7 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
     - name: Extract Nginx Docker metadata
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
       id: nginx_meta
       with:
         images: ${{ steps.images.outputs.nginx_list }}
@@ -136,7 +136,7 @@ jobs:
           type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
     - name: Build and push Nginx image
       if: ${{ !inputs.reuse_images }}
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
       id: nginx_build
       with:
         context: .
@@ -159,7 +159,7 @@ jobs:
         APP_IMAGE: ${{ steps.images.outputs.primary }}
         NGINX_IMAGE: ${{ steps.images.outputs.nginx_primary }}
       run: |
-        for version in 1.1.0 1.1.1 1.1.2 1.1.3 1.2.1 1.2.2 1.2.3 1.2.4 1.2.5 1.2.6; do
+        for version in 1.1.0 1.1.1 1.1.2 1.1.3 1.2.1 1.2.2 1.2.3 1.2.4 1.2.5 1.2.6 1.2.7; do
           docker pull "ghcr.io/albert-li-sz/workbody-fhub:$version"
           docker tag "ghcr.io/albert-li-sz/workbody-fhub:$version" "workbody-fhub:$version"
         done
@@ -172,6 +172,7 @@ jobs:
         docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.4
         docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.5
         docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.6
+        docker pull ghcr.io/albert-li-sz/workbody-fhub-nginx:v1.2.7
         docker pull "$APP_IMAGE:$RELEASE_TAG"
         docker pull "$NGINX_IMAGE:$RELEASE_TAG"
         # Container-written private bind mounts belong to root on Linux. Exercise
