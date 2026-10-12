@@ -81,6 +81,26 @@ class HTTPTests(unittest.TestCase):
         self.assertTrue(all(row["total_tokens"]==12 and row["credit"]==0.25 and row["cost_unit"]=="credits" for row in rows))
         self.assert_reservations_released()
 
+    def test_command_prompt_modes_cover_every_protocol(self):
+        for mode in ("passthrough", "append", "custom"):
+            S.set_prompt_config(P.ACCOUNTS_DIR, {"mode": mode, "text": "GATEWAY-COMMAND"})
+            for protocol in ("chat", "responses", "messages"):
+                for stream in (False, True):
+                    with self.subTest(mode=mode, protocol=protocol, stream=stream):
+                        body = self.body(protocol, "commandcode/fixture", stream)
+                        if protocol == "responses":
+                            body["instructions"] = "CLIENT-COMMAND"
+                        elif protocol == "messages":
+                            body["system"] = "CLIENT-COMMAND"
+                        else:
+                            body["messages"].insert(0, {"role": "developer", "content": "CLIENT-COMMAND"})
+                        path = "/v1/chat/completions" if protocol == "chat" else "/v1/" + protocol
+                        status, raw, _ = self.request(path, body)
+                        self.assertEqual(status, 200, raw.decode())
+                        system = json.dumps(self.upstream.calls[-1][1]["params"]["system"])
+                        self.assertEqual(system.count("GATEWAY-COMMAND"), 0 if mode == "passthrough" else 1)
+                        self.assertEqual("CLIENT-COMMAND" in system, mode != "custom")
+
     def test_command_402_fails_over_within_provider(self):
         self.upstream.fail_key="Bearer user_first_fixture"
         status,raw,_=self.request("/v1/chat/completions",self.body("chat","commandcode/fixture"))

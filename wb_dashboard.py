@@ -26,7 +26,7 @@ def source_html(path):
         for filename in paths:
             if Path(filename).name != filename:
                 raise ValueError("invalid dashboard source path")
-            content += (root / filename).read_text(encoding="utf-8")
+            content += (root / filename).read_text(encoding="utf-8") + "\n"
         return "<script>" + content + "</script>"
     text = re.sub(r'<script src="dashboard_static/([^"/]+)\.js" data-bundle="([^"]+)"></script>', script, text)
     def style(match):

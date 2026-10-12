@@ -6,7 +6,7 @@ function htmlSource(){
   const bundles = JSON.parse(fs.readFileSync(path.join(root, 'bundles.json'), 'utf8'));
   let html = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
   html = html.replace(/<script src="dashboard_static\/([^"/]+)\.js" data-bundle="([^"]+)"><\/script>/g,
-    (_, file, name) => '<script>' + bundles[name].map(file => fs.readFileSync(path.join(root,file),'utf8')).join('') + '</script>');
+    (_, file, name) => '<script>' + bundles[name].map(file => fs.readFileSync(path.join(root,file),'utf8')).join('\n') + '</script>');
   return html.replace(/<link([^>]*?) rel="stylesheet" href="dashboard_static\/([^"/]+)\.css">/g,
     (_, attrs, name) => '<style' + attrs + '>' + fs.readFileSync(path.join(root, name + '.css'), 'utf8') + '</style>');
 }

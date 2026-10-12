@@ -4,6 +4,7 @@ Run with: python _test_prompt_modes.py
 No upstream credentials or outbound network are used.
 """
 import datetime
+import copy
 import io
 import json
 import os
@@ -72,12 +73,61 @@ class PromptTextTests(unittest.TestCase):
         custom = wb_prompt.apply_mode(messages, "custom", "GW", degraded=True)
         self.assertEqual(custom[0]["content"], "GW")
 
+    def test_native_responses_replace_all_instruction_sources_without_mutation(self):
+        payload = {"instructions": "TOP", "input": [
+            {"role": "system", "content": "FIRST"},
+            {"role": "user", "content": "hi"},
+            {"type": "reasoning", "encrypted_content": "opaque"},
+            {"role": "developer", "content": [{"type": "input_text", "text": "LATE"}]}]}
+        before = copy.deepcopy(payload)
+        out = wb_prompt.apply_payload(payload, "responses", "custom", "GW")
+        self.assertEqual(out["instructions"], "GW")
+        self.assertEqual(out["input"], before["input"][1:3])
+        self.assertEqual(payload, before)
+
+    def test_native_responses_append_preserves_instructions_and_opaque_items(self):
+        payload = {"instructions": " TOP \n", "input": [
+            {"role": "developer", "content": "FIRST"},
+            {"type": "function_call_output", "call_id": "c", "output": "result"}]}
+        before = copy.deepcopy(payload)
+        out = wb_prompt.apply_payload(payload, "responses", "append", "GW")
+        self.assertEqual(out["instructions"], before["instructions"])
+        self.assertEqual(out["input"][0], before["input"][0])
+        self.assertEqual(out["input"][1]["content"], "GW")
+        self.assertEqual(out["input"][2], before["input"][1])
+        self.assertEqual(payload, before)
+        string = {"instructions": "TOP", "input": " hello \n"}
+        out = wb_prompt.apply_payload(string, "responses", "append", "GW")
+        self.assertEqual(out["input"][-1]["content"], string["input"])
+
+    def test_native_messages_preserves_cache_and_signed_blocks(self):
+        payload = {"system": [{"type": "text", "text": "CLIENT", "cache_control": {"type": "ephemeral"}}],
+                   "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "trace", "signature": "opaque"}]},
+                                {"role": "user", "content": "hi"}]}
+        before = copy.deepcopy(payload)
+        self.assertIs(wb_prompt.apply_payload(payload, "messages", "passthrough", "GW"), payload)
+        out = wb_prompt.apply_payload(payload, "messages", "append", "GW")
+        self.assertEqual(out["system"], before["system"] + [{"type": "text", "text": "GW"}])
+        self.assertEqual(out["messages"], before["messages"])
+        custom = wb_prompt.apply_payload(payload, "messages", "custom", "GW")
+        self.assertEqual(custom["system"], "GW")
+        self.assertEqual(custom["messages"], before["messages"])
+        self.assertEqual(payload, before)
+
+    def test_append_does_not_remove_later_instruction_messages_or_mutate_history(self):
+        payload = {"messages": [{"role": "user", "content": "hi"},
+                                {"role": "developer", "content": "LATE"}]}
+        before = copy.deepcopy(payload)
+        out = wb_prompt.apply_payload(payload, "chat", "append", "GW")
+        self.assertEqual(out["messages"][1:], before["messages"])
+        self.assertEqual(payload, before)
+
 
 class PromptSettingsTests(unittest.TestCase):
     def test_defaults_are_passthrough(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(wb_settings.prompt_config(directory),
-                             {"mode": "passthrough", "file": "", "retry_on_content_rejection": False})
+                             dict(wb_settings.PROMPT_DEFAULTS))
 
     def test_roundtrip_and_validation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -87,7 +137,8 @@ class PromptSettingsTests(unittest.TestCase):
             cfg = wb_settings.prompt_config(directory)
             self.assertEqual(cfg["mode"], "custom")
             self.assertEqual(cfg["file"], "C:/p.txt")
-        for bad in ({"mode": "weird"}, {"mode": 1}, {"file": 2}, {"nope": 1}):
+        for bad in ({"mode": "weird"}, {"mode": 1}, {"file": 2}, {"nope": 1},
+                    {"text": 2}, {"text": " \n"}, {"text": "中" * wb_prompt.MAX_PROMPT_BYTES}):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 wb_settings.validate_prompt_patch(bad)
 
@@ -96,11 +147,39 @@ class PromptSettingsTests(unittest.TestCase):
             with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
                 json.dump({"prompt": {"mode": "BOGUS", "file": 7}}, fh)
             self.assertEqual(wb_settings.prompt_config(directory),
-                             {"mode": "passthrough", "file": "", "retry_on_content_rejection": False})
+                             dict(wb_settings.PROMPT_DEFAULTS))
         with tempfile.TemporaryDirectory() as directory:
             with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
                 json.dump({"prompt": []}, fh)
             self.assertEqual(wb_settings.prompt_config(directory)["mode"], "passthrough")
+
+    def test_markdown_text_roundtrip_preserves_whitespace_and_partial_updates(self):
+        text = "  # 助手\n\n```python\nprint('OK')\n```\n\n"
+        with tempfile.TemporaryDirectory() as directory:
+            wb_settings.set_prompt_config(directory, {"mode": "custom", "text": text})
+            wb_settings.set_prompt_config(directory, {"retry_on_content_rejection": True})
+            self.assertEqual(wb_settings.prompt_config(directory)["text"], text)
+            self.assertEqual(wb_prompt.load_prompt("custom", text=text), text)
+            wb_settings.set_prompt_config(directory, {"text": ""})
+            self.assertEqual(wb_prompt.preview(wb_settings.prompt_config(directory))["text"], wb_prompt.DEFAULT_PROMPT)
+
+    def test_file_priority_bom_and_read_errors_are_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "prompt.md")
+            with open(path, "wb") as fh:
+                fh.write(b"\xef\xbb\xbf# File\r\n\r\n- rule\r\n")
+            cfg = {"mode": "append", "file": path, "text": "INLINE"}
+            status = wb_prompt.preview(cfg)
+            self.assertEqual(status["text"], "# File\r\n\r\n- rule\r\n")
+            self.assertEqual(status["source"], "file")
+            self.assertTrue(status["active"])
+            for data in (b" \r\n", b"\xff", b"x" * (wb_prompt.MAX_PROMPT_BYTES + 1)):
+                with open(path, "wb") as fh:
+                    fh.write(data)
+                status = wb_prompt.preview(cfg)
+                self.assertTrue(status["error"])
+                self.assertFalse(status["active"])
+                self.assertEqual(status["text"], "")
 
 
 class BuildBodyPromptTests(unittest.TestCase):
@@ -150,6 +229,28 @@ class BuildBodyPromptTests(unittest.TestCase):
             wb_settings.set_prompt_config(directory, {"mode": "custom", "file": path})
             body = self.build(directory, [{"role": "user", "content": "hi"}])
         self.assertEqual(body["messages"][0]["content"], "FILE-PROMPT")
+
+    def test_inline_markdown_goes_upstream_as_source_text(self):
+        text = "# 助手\n\n- **验证**\n\n```text\n<rule>\n```\n"
+        with tempfile.TemporaryDirectory() as directory:
+            wb_settings.set_prompt_config(directory, {"mode": "custom", "text": text})
+            payload = [{"role": "developer", "content": "CLIENT"}, {"role": "user", "content": "hi"}]
+            body = self.build(directory, payload)
+        self.assertEqual(body["messages"][0]["content"], text)
+        self.assertEqual(payload[0]["content"], "CLIENT")
+
+    def test_passthrough_does_not_load_a_configured_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wb_settings.set_prompt_config(directory, {"file": "missing.md", "text": "INLINE"})
+            with mock.patch.object(wb_prompt, "load_prompt", side_effect=AssertionError("must not load")):
+                body = self.build(directory, [{"role": "system", "content": "CLIENT"}, {"role": "user", "content": "hi"}])
+        self.assertEqual(body["messages"][0]["content"], "CLIENT")
+
+    def test_retry_is_independent_of_an_unreadable_append_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wb_settings.set_prompt_config(directory, {"mode": "append", "file": os.path.join(directory, "missing.md")})
+            body = self.build(directory, [{"role": "system", "content": "CLIENT"}, {"role": "user", "content": "hi"}], prompt_degraded=True)
+        self.assertEqual(body["messages"][0]["content"], wb_prompt.DEGRADED_PROMPT)
 
     def test_missing_file_fails_open_to_passthrough(self):
         with tempfile.TemporaryDirectory() as directory:

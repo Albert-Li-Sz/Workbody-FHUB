@@ -136,19 +136,19 @@ function renderProxySlots(){
     + PROXY_SLOTS.map((s, i) =>
         '<tr>'
         + '<td data-label="名称"><input value="' + esc(s.name || '') + '"  data-action="onProxySlotNameInput" data-on="input" data-arg="' + i + '" class="slot-input"></td>'
-        + '<td data-label="代理地址"><input value="' + esc(s.url || '') + '" placeholder="http://host:port 或 socks5h://host:port" aria-label="代理地址" data-action="onProxySlotUrlInput" data-on="input" data-arg="' + i + '" class="slot-input mono">'
-        + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'
-        + '<input value="' + esc(s.username || '') + '" placeholder="用户名（可选）" aria-label="代理用户名" autocomplete="off" data-action="onProxySlotUsernameInput" data-on="input" data-arg="' + i + '" class="slot-input" style="flex:1;min-width:90px;width:90px">'
-        + '<input type="password" value="' + esc(s.password || '') + '" placeholder="密码（可选）" aria-label="代理密码" autocomplete="new-password" data-action="onProxySlotPasswordInput" data-on="input" data-arg="' + i + '" class="slot-input" style="flex:1;min-width:90px;width:90px">'
+        + '<td data-label="代理地址" class="proxy-address"><input value="' + esc(s.url || '') + '" placeholder="http://host:port 或 socks5h://host:port" aria-label="代理地址" data-action="onProxySlotUrlInput" data-on="input" data-arg="' + i + '" class="slot-input mono">'
+        + '<div class="proxy-credentials">'
+        + '<input value="' + esc(s.username || '') + '" placeholder="用户名（可选）" aria-label="代理用户名" autocomplete="off" data-action="onProxySlotUsernameInput" data-on="input" data-arg="' + i + '" class="slot-input">'
+        + '<input type="password" value="' + esc(s.password || '') + '" placeholder="密码（可选）" aria-label="代理密码" autocomplete="new-password" data-action="onProxySlotPasswordInput" data-on="input" data-arg="' + i + '" class="slot-input">'
         + '</div></td>'
         + '<td data-label="出口">' + slotExitHtml(s) + '</td>'
         + '<td style="text-align:center" data-label="启用"><input type="checkbox" ' + (s.enabled === false ? '' : 'checked')
         +   '  data-action="onProxySlotEnabledChange" data-on="change" data-arg="' + i + '"></td>'
         + '<td style="text-align:center" data-label="绑定账号">' + (s.bound || 0) + '</td>'
-        + '<td style="text-align:center;white-space:nowrap" data-label="">'
+        + '<td style="text-align:center;white-space:nowrap" data-label=""><div class="proxy-actions">'
         +   '<button class="sec mini"  data-action="testProxySlot" data-on="click" data-arg="' + i + '">测试</button> '
         +   '<button class="danger mini"  data-action="removeProxySlot" data-on="click" data-arg="' + i + '">删除</button>'
-        + '</td></tr>'
+        + '</div></td></tr>'
       ).join('')
     + '</tbody></table></div>'
     + '<div class="legend"><span>「绑定账号」只统计已启用账号；停用账号会自动释放槽位，重新启用后需重新绑定。在网关页账号表的「出口」下拉中调整绑定。名称留空时按出口自动显示「国家 类型」，点「测试」会补全出口信息并据此命名。</span></div>';

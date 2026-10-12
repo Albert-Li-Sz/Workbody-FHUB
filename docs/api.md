@@ -1,6 +1,6 @@
 # API 与余额协议说明
 
-适用版本：**1.2.8**。
+适用版本：**1.2.9**。
 
 ## 地址与鉴权
 
@@ -237,6 +237,8 @@ data: {"topics":["accounts","usage"],"revision":12,"at":1791417600}
 - `POST /settings/save` 支持 `limits`，键为 `reserve_credits`、`daily_token_limit`、`daily_credit_limit`、`model_daily_token_limit`、`expiring_window_days`。每项包含 `global`、`intl`、`cn`，渠道 `null` 表示继承；旧平面字段继续更新全局值。负数、小数及非法数值整次拒绝，不做部分写入。
 - `pricing_enabled` 为 JSON 布尔值，默认 `true`；关闭后暂停费用估算和取价，Token 与实际积分继续记录。`credits_refresh_hours` 为 `0–72` 的数字，默认 `0.5`。
 - 保存 `api_keys` 时带 `deleted_api_key_ids` 数组采用显式删除与新增／更新：遗漏的已有 Key 保留；空密钥保留对应原值；未提交的名称、渠道、模型范围和启用状态保留。只提交删除数组也可删除。旧调用方不带数组仍采用完整替换语义。已删除的 id 不能重新启用。
+- `prompt` 支持 `mode`（`passthrough`／`custom`／`append`）、`file`、`text` 与 `retry_on_content_rejection`，部分更新保留未提交字段。所有平台及 Chat／Responses／Messages 入口均在出站时应用模式：透传保留客户端提示词；替换覆盖全部 system/developer（包括 Responses instructions 与 Messages system）；追加保留原提示词，在开头连续指令消息之后插入网关提示词。原生 Messages 向 system 内容末尾追加。请求重试、工具续轮及 Responses 历史重放不会保存或累计网关追加内容。
+- 提示词来源优先级为服务器 UTF-8 文件 `file` > 面板原文 `text` > 内置默认；文件及原文最大 256 KiB。面板 Markdown 预览只用于显示，发送的仍是原始文本。文件空白、超限、编码错误或不可读时保留客户端提示词；`GET /settings` 的 `prompt_preview` 返回来源、原文、默认原文、是否应用及读取错误。透传请求不读取提示词文件。WorkBuddy 保留既有 developer 角色兼容、缺省 system 补齐及指纹清洗；其他原生接口保留提示词块的缓存等元数据。审核重试仅对 WorkBuddy 明确的 11140 生效，默认关闭。
 - `POST /accounts/refresh` 发送 `{"async":true}` 返回 `202` 与 `id`、`total`、`completed`、`running`、`results`；`GET /accounts/refresh/status?id=...` 查询批次。只保留当前批次；重启后任务状态清除。省略 `async` 或指定 `uid` 保留同步调用兼容。
 
 Messages 支持 Claude Code 在会话中插入的 `system`／`developer` 消息，按原位置转换为上游 system 消息。部分实时推理元数据按字段合并；未声明 `supportedEfforts` 时保留内置可选档位，防止仅返回默认 effort 的模型被错误锁定。

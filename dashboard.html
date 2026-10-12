@@ -461,27 +461,28 @@
   </div>
 
   <div id="pageAnalytics" class="main-page">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
+    <div class="page-hero">
       <div>
-        <h2 style="margin:0;font-size:16px;color:var(--fg);display:flex;align-items:center;gap:8px">
-          Token 消耗与推理指标透视
-        </h2>
-        <div style="font-size:12px;color:var(--dim);margin-top:4px">全维度统计输入/输出/推理 Token、缓存节省效益与各账号各模型用量</div>
+        <h2>Token 消耗与推理指标透视</h2>
+        <p>全维度统计输入/输出/推理 Token、缓存节省效益与各账号各模型用量</p>
       </div>
-      <div style="display:flex;gap:4px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
+      <div class="analytics-range">
         <button id="btnRangeToday" class="range-btn active"  data-action="setAnalyticsRange" data-on="click" data-arg="today">今日数据 (Today)</button>
         <button id="btnRangeWeek" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="week">本周 (This Week)</button>
         <button id="btnRangeMonth" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="month">本月 (This Month)</button>
         <button id="btnRangeAll" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="all">全部历史 (All Time)</button>
         <button id="btnRangeCustom" class="range-btn"  data-action="setAnalyticsRange" data-on="click" data-arg="custom">自定义 (Custom)</button>
-        <span id="rangeCustomBox" style="display:none;align-items:center;gap:6px;font-size:12px;color:var(--dim)">
-          <input type="datetime-local" id="rangeCustomSince" class="slot-select" style="padding:4px 6px"
+        <div id="rangeCustomBox" style="display:none;align-items:center;gap:12px;font-size:12px;color:var(--dim)">
+          <label class="range-time-field">开始时间
+          <input type="datetime-local" id="rangeCustomSince" class="slot-select"
                   data-action="onRangeCustomChange" data-on="change">
-          <span>~</span>
-          <input type="datetime-local" id="rangeCustomUntil" class="slot-select" style="padding:4px 6px"
+          </label>
+          <label class="range-time-field">结束时间
+          <input type="datetime-local" id="rangeCustomUntil" class="slot-select"
                   data-action="onRangeCustomChange" data-on="change">
-          <span style="font-size:11px">留空表示不限</span>
-        </span>
+          </label>
+          <span class="range-time-hint">留空表示不限</span>
+        </div>
       </div>
     </div>
 
@@ -884,12 +885,12 @@
   </div>
 
   <div id="pageLogs" class="main-page">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px">
+    <div class="page-hero">
       <div>
-        <h2 style="margin:0;font-size:16px;color:var(--fg)">网关运行日志</h2>
-        <div style="font-size:12px;color:var(--dim);margin-top:4px">实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)</div>
+        <h2>网关运行日志</h2>
+        <p>实时捕获反向代理请求、流式转发、调度巡检、任务打卡与异常告警 (内存保留最新 2000 条)</p>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <div class="page-actions">
         <span id="logStatsBadge" style="font-size:12px;color:var(--dim);margin-right:6px">加载中...</span>
         <button class="sec mini"  data-action="fetchNewLogs" data-on="click" data-arg="1" title="立即拉取最新日志">刷新</button>
         <button class="sec mini" id="btnToggleLogAuto"  data-action="toggleLogAuto" data-on="click" style="color:var(--accent2);font-weight:600">实时监听中</button>

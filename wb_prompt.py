@@ -20,7 +20,7 @@ import json
 import threading
 import time
 
-# 內置默認提示詞：用於 custom / append 模式（可用 prompt.file 覆蓋）。
+# 內置默認提示詞：用於 custom / append 模式（file > text > 內置）。
 DEFAULT_PROMPT = """你是一名工程助手，幫助用戶完成軟件工程任務。
 
 - 先理解代碼與上下文再動手，遵循既有模式與約定。
@@ -36,6 +36,7 @@ DEGRADED_PROMPT = ("You are a helpful assistant. Respond in the user's language,
                    "follow the user's instructions, and be direct and concise.")
 
 VALID_MODES = ("passthrough", "custom", "append")
+MAX_PROMPT_BYTES = 256 * 1024
 _retry_lock = threading.Lock()
 _retry_status = {"scope": "request", "count": 0, "last_at": None, "last_model": None}
 
@@ -72,13 +73,37 @@ def normalize_mode(value):
     return mode if mode in VALID_MODES else "passthrough"
 
 
-def load_prompt(mode, file_path=""):
-    """讀取網關提示詞：file 非空則讀檔（失敗拋出，調用方 fail open），否則內置默認。"""
+def load_prompt(mode, file_path="", text=""):
+    """Load bounded UTF-8 source text; never send rendered HTML upstream."""
     path = str(file_path or "").strip()
-    if not path:
-        return DEFAULT_PROMPT
-    with open(path, encoding="utf-8") as fh:
-        return fh.read()
+    if path:
+        with open(path, "rb") as fh:
+            raw = fh.read(MAX_PROMPT_BYTES + 1)
+        if len(raw) > MAX_PROMPT_BYTES:
+            raise ValueError("prompt file exceeds 256 KiB")
+        value = raw.decode("utf-8-sig")
+        if not value.strip():
+            raise ValueError("prompt file is empty")
+        return value
+    if text:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("prompt text must contain non-whitespace text")
+        if len(text.encode("utf-8")) > MAX_PROMPT_BYTES:
+            raise ValueError("prompt text exceeds 256 KiB")
+        return text
+    return DEFAULT_PROMPT
+
+
+def preview(cfg):
+    """Admin-only source preview, including the fail-open state of bad files."""
+    source = "file" if cfg.get("file") else "text" if cfg.get("text") else "builtin"
+    result = {"source": source, "text": "", "default_text": DEFAULT_PROMPT, "error": "",
+              "active": normalize_mode(cfg.get("mode")) != "passthrough"}
+    try:
+        result["text"] = load_prompt(cfg.get("mode"), cfg.get("file"), cfg.get("text", ""))
+    except (OSError, UnicodeError, ValueError) as exc:
+        result.update(error=str(exc), active=False)
+    return result
 
 
 def rewrite(messages, system_prompt):
@@ -118,3 +143,52 @@ def apply_mode(messages, mode, text, degraded=False):
     if degraded:
         return rewrite(messages, DEGRADED_PROMPT)
     return messages
+
+
+def apply_payload(payload, protocol, mode, text, degraded=False):
+    """Apply a policy at the outbound boundary without changing client history.
+
+    Native protocols retain opaque blocks and cache metadata. Responses has
+    both instructions and system/developer input items; custom replaces both.
+    Append preserves instructions and inserts after the leading input block.
+    """
+    mode = normalize_mode(mode)
+    if degraded and mode != "custom":
+        mode, text = "custom", DEGRADED_PROMPT
+    if mode == "passthrough" or not text:
+        return payload
+    body = dict(payload)
+    if protocol == "chat":
+        body["messages"] = apply_mode(payload.get("messages"), mode, text)
+    elif protocol == "responses":
+        items = payload.get("input")
+        if mode == "custom":
+            body["instructions"] = text
+            if isinstance(items, list):
+                body["input"] = [item for item in items if not _instruction(item)]
+        else:
+            items = ([{"role": "user", "content": items}] if isinstance(items, str)
+                     else list(items or []))
+            index = 0
+            while index < len(items) and _instruction(items[index]):
+                index += 1
+            body["input"] = (items[:index] + [{"type": "message", "role": "system",
+                                             "content": text}] + items[index:])
+    elif protocol == "messages":
+        if mode == "custom":
+            body["system"] = text
+            if isinstance(payload.get("messages"), list):
+                body["messages"] = [item for item in payload["messages"] if not _instruction(item)]
+        else:
+            system = payload.get("system")
+            if isinstance(system, list):
+                body["system"] = system + [{"type": "text", "text": text}]
+            else:
+                body["system"] = (system + "\n\n" + text) if system else text
+    else:
+        raise ValueError("unknown prompt protocol: " + str(protocol))
+    return body
+
+
+def _instruction(item):
+    return isinstance(item, dict) and item.get("role") in ("system", "developer")

@@ -3,6 +3,8 @@
     "bootstrap.js"
   ],
   "app": [
+    "markdown_marked.js",
+    "markdown_purify.js",
     "core.js",
     "accounts.js",
     "gateway.js",

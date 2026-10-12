@@ -166,6 +166,57 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(sum(r["total_tokens"] for r in self.db.usage_totals()), 18 * 12)
         self.assertEqual(set(r["upstream"] for r in self.db.usage_totals(group_by=("upstream",))), {"cline", "opencode_zen"})
 
+    def test_prompt_modes_for_every_client_and_native_protocol(self):
+        gateway = "# GATEWAY-PROMPT\n\n- **保留 Markdown**\n"
+        for mode in ("passthrough", "append", "custom"):
+            S.set_prompt_config(P.ACCOUNTS_DIR, {"mode": mode, "text": gateway})
+            for native, model in self.models.items():
+                for protocol in ("chat", "messages", "responses"):
+                    for stream in (False, True):
+                        with self.subTest(mode=mode, native=native, protocol=protocol, stream=stream):
+                            body = self.body(protocol, model, stream)
+                            if protocol == "responses":
+                                body.update(instructions="CLIENT-TOP", input=[
+                                    {"role": "developer", "content": "CLIENT-DEV"},
+                                    {"role": "user", "content": "hello"},
+                                    {"role": "system", "content": "CLIENT-LATE"}])
+                            elif protocol == "messages":
+                                body["system"] = [{"type": "text", "text": "CLIENT-TOP", "cache_control": {"type": "ephemeral"}}]
+                            else:
+                                body["messages"] = [{"role": "system", "content": "CLIENT-TOP"},
+                                    {"role": "developer", "content": "CLIENT-DEV"},
+                                    {"role": "user", "content": "hello"},
+                                    {"role": "system", "content": "CLIENT-LATE"}]
+                            path = "/v1/chat/completions" if protocol == "chat" else "/v1/" + protocol
+                            status, raw, _ = self.request(path, body)
+                            self.assertEqual(status, 200, raw.decode())
+                            forwarded = json.dumps(self.upstream.calls[-1][1], ensure_ascii=False)
+                            self.assertEqual(forwarded.count("GATEWAY-PROMPT"), 0 if mode == "passthrough" else 1)
+                            for text in ("CLIENT-TOP",) if protocol == "messages" else ("CLIENT-TOP", "CLIENT-DEV", "CLIENT-LATE"):
+                                self.assertEqual(text in forwarded, mode != "custom")
+                            if protocol == native == "messages" and mode != "custom":
+                                self.assertEqual(self.upstream.calls[-1][1]["system"][0], body["system"][0])
+
+    def test_prompt_append_is_not_saved_in_response_history(self):
+        for model in self.models.values():
+            S.set_prompt_config(P.ACCOUNTS_DIR, {"mode": "append", "text": "GATEWAY-ONCE"})
+            body = self.body("responses", model)
+            body.update(instructions="CLIENT-TOP", input=[{"role": "developer", "content": "CLIENT-DEV"}, {"role": "user", "content": "hello"}])
+            status, raw, _ = self.request("/v1/responses", body)
+            self.assertEqual(status, 200, raw.decode())
+            previous = json.loads(raw)["id"]
+            status, raw, _ = self.request("/v1/responses", {"previous_response_id": previous, "input": "next"})
+            self.assertEqual(status, 200, raw.decode())
+            forwarded = json.dumps(self.upstream.calls[-1][1])
+            self.assertEqual(forwarded.count("GATEWAY-ONCE"), 1)
+            self.assertIn("CLIENT-DEV", forwarded)
+            S.set_prompt_config(P.ACCOUNTS_DIR, {"mode": "passthrough"})
+            status, raw, _ = self.request("/v1/responses", {"previous_response_id": json.loads(raw)["id"], "input": "again"})
+            self.assertEqual(status, 200, raw.decode())
+            forwarded = json.dumps(self.upstream.calls[-1][1])
+            self.assertNotIn("GATEWAY-ONCE", forwarded)
+            self.assertIn("CLIENT-DEV", forwarded)
+
     def test_response_tools_continuation_and_cross_key_access(self):
         for model in self.models.values():
             status, raw, _ = self.request("/v1/responses", self.body("responses", model, False, "call_tool"))
@@ -240,6 +291,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(P.RESPONSE_STORE.snapshot()['count'],0)
 
     def test_local_search_results_survive_response_continuation(self):
+        S.set_prompt_config(P.ACCOUNTS_DIR, {"mode": "append", "text": "GATEWAY-WEB-ONCE"})
         with mock.patch.object(P,'local_web_tools_enabled',return_value=True), mock.patch.object(P.wb_webtools,'execute',return_value='Synthetic web result https://example.com/reference'):
             for stream in (False,True):
                 body=dict(self.body('responses',self.models['chat'],stream,'local_search'),tools=[{'type':'web_search'}])
@@ -254,6 +306,8 @@ class IntegrationTests(unittest.TestCase):
                 status,raw,_=self.request('/v1/responses',{'previous_response_id':result['id'],'input':'continue'},key='synthetic-cline-only')
                 self.assertEqual(status,200,raw.decode())
                 self.assertIn('Synthetic web result',json.dumps(self.upstream.calls[-1][1]))
+                for _, forwarded, _ in self.upstream.calls:
+                    self.assertEqual(json.dumps(forwarded).count('GATEWAY-WEB-ONCE'), 1)
 
 
 if __name__ == "__main__":

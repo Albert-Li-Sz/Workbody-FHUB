@@ -71,11 +71,12 @@ const ADVANCED_SETTING_GROUPS = [
   },
   {
     id: 'prompt', title: '系统提示词',
-    desc: '选择透传、替换或追加系统提示词。',
+    desc: '对所有平台及 Chat、Responses、Messages 入口生效；保存后用于下一次请求。',
     fields: [
-      {key:'mode', label:'提示词模式', type:'select', options:['passthrough','custom','append'], default:'passthrough', hint:'passthrough = 透传；custom = 网关自有；append = 客户端后追加。'},
-      {key:'retry_on_content_rejection', label:'内容审核失败时重试当前请求', type:'bool', hint:'默认关闭。仅明确审核码 11140 时替换当前请求提示词并重试一次，不影响其他会话。'},
-      {key:'file', label:'提示词文件路径', type:'text', placeholder:'留空 = 内置默认', hint:'custom/append 模式才读取。'},
+      {key:'mode', label:'提示词模式', type:'select', options:['passthrough','custom','append'], optionLabels:{passthrough:'透传客户端提示词',custom:'替换为网关提示词',append:'追加网关提示词'}, default:'passthrough', hint:'替换覆盖全部 system/developer；追加保留客户端提示词。WorkBuddy 仍执行既有协议兼容与指纹清洗。'},
+      {key:'retry_on_content_rejection', label:'内容审核失败时重试当前请求', type:'bool', hint:'默认关闭。仅 WorkBuddy 明确审核码 11140 时替换当前请求提示词并重试一次，不影响其他会话。'},
+      {key:'file', label:'提示词文件路径（选填）', type:'text', placeholder:'如 /app/accounts/prompt.md', hint:'运行网关的服务器上的 UTF-8 文件；优先于下方内容，最大 256 KiB。读取失败时保留客户端提示词，预览会显示错误。'},
+      {key:'text', label:'提示词内容（Markdown）', type:'markdown', placeholder:'# 工程助手\n\n- 遵循项目约定\n- 完成后验证结果', hint:'文件路径与内容均留空时使用内置提示词。保留原始 Markdown 和空白发送给上游；预览只用于显示。'},
     ]
   },
   {
@@ -105,18 +106,21 @@ function renderAdvancedSettings(data){
   box.innerHTML = ADVANCED_SETTING_GROUPS.map(function(group){
     const cfg = (data && data[group.id]) || {};
     const fields = group.fields.map(function(field){
-      const common = 'id="' + advancedFieldId(group.id, field.key) + '" data-adv-group="' + group.id + '" data-adv-key="' + field.key + '" data-adv-type="' + field.type + '"';
+      const common = 'id="' + advancedFieldId(group.id, field.key) + '" data-adv-group="' + group.id + '" data-adv-key="' + field.key + '" data-adv-type="' + field.type + '"' + (group.id === 'prompt' && ['mode','file','text'].includes(field.key) ? ' data-action="updatePromptPreview" data-on="' + (field.type === 'select' ? 'change' : 'input') + '"' : '');
       const label = '<div style="font-size:12px;color:var(--dim);margin-bottom:4px">' + field.label + '</div>';
       const hint = field.hint ? '<div style="font-size:11px;color:var(--dim);line-height:1.35">' + field.hint + '</div>' : '';
       const value = advancedFieldValue(cfg, field.key, field.type);
       let control = '';
+      if(field.type === 'markdown'){
+        return '<div class="prompt-content-field"><div class="prompt-editor-grid"><div><label class="prompt-pane-label" for="' + advancedFieldId(group.id, field.key) + '">' + field.label + '</label><textarea class="slot-input prompt-editor" ' + common + ' rows="14" spellcheck="false" placeholder="' + esc(field.placeholder || '') + '">' + esc(value) + '</textarea></div><div><div class="prompt-pane-label">Markdown 预览 · 网关提示词</div><div id="promptMarkdownPreview" class="prompt-markdown" aria-label="系统提示词 Markdown 预览"></div></div></div><div id="promptSourceStatus" class="prompt-source-status" role="status"></div>' + hint + '</div>';
+      }
       if(field.type === 'bool'){
         control = '<label style="display:flex;align-items:center;gap:8px;min-height:40px;font-size:13px;color:var(--fg)"><input type="checkbox" ' + common + (cfg[field.key] ? ' checked' : '') + ' style="width:16px;height:16px"><span>' + field.label + '</span></label>';
         return '<div style="min-width:190px">' + control + (field.hint ? '<div style="font-size:11px;color:var(--dim);line-height:1.35;margin-left:24px">' + field.hint + '</div>' : '') + '</div>';
       }
       if(field.type === 'select'){
         const options = (field.options || []).map(function(option){
-          return '<option value="' + option + '"' + (String(value || field.default || '') === option ? ' selected' : '') + '>' + option + '</option>';
+          return '<option value="' + option + '"' + (String(value || field.default || '') === option ? ' selected' : '') + '>' + ((field.optionLabels || {})[option] || option) + '</option>';
         }).join('');
         control = '<select class="slot-select" style="width:100%;max-width:none" ' + common + '>' + options + '</select>';
       } else if(field.type === 'hours' || field.type === 'text' || field.type === 'secret'){
@@ -131,6 +135,51 @@ function renderAdvancedSettings(data){
     }).join('');
     return '<details class="advanced-setting" data-adv-group="' + group.id + '"' + (openGroups.has(group.id) ? ' open' : '') + '><summary><div><h3>' + group.title + '</h3><div class="advanced-setting-desc">' + group.desc + '</div></div></summary><div class="advanced-setting-controls">' + fields + '</div><div style="margin-top:16px"><button data-action="saveAdvancedSettings" data-on="click" data-arg="' + group.id + '">保存此分类</button></div></details>';
   }).join('');
+  updatePromptPreview();
+}
+function renderPromptMarkdown(text){
+  if(typeof marked === 'undefined' || typeof DOMPurify === 'undefined' || !DOMPurify.isSupported){
+    return '<pre>' + esc(text) + '</pre>';
+  }
+  const renderer = new marked.Renderer();
+  renderer.html = function(token){ return esc(token.text); };
+  renderer.image = function(token){ return esc(token.text); };
+  const html = marked.parse(text, {gfm:true, async:false, renderer:renderer});
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS:['p','br','h1','h2','h3','h4','h5','h6','strong','em','del','blockquote','ul','ol','li','hr','pre','code','table','thead','tbody','tr','th','td','a','input'],
+    ALLOWED_ATTR:['href','title','align','start','type','checked','disabled']
+  });
+}
+function updatePromptPreview(){
+  const target = document.getElementById('promptMarkdownPreview');
+  const status = document.getElementById('promptSourceStatus');
+  const input = document.getElementById(advancedFieldId('prompt', 'text'));
+  if(!target || !status || !input) return;
+  const saved = ADVANCED_SETTINGS_DATA.prompt || {};
+  const preview = ADVANCED_SETTINGS_DATA.prompt_preview || {};
+  const fileInput = document.getElementById(advancedFieldId('prompt', 'file'));
+  const modeInput = document.getElementById(advancedFieldId('prompt', 'mode'));
+  const file = String(fileInput ? fileInput.value : saved.file || '').trim();
+  const mode = modeInput ? modeInput.value : saved.mode;
+  let text = input.value || preview.default_text || '';
+  let message = input.value ? '来源：下方提示词内容。' : '来源：内置默认提示词。';
+  let error = false;
+  if(file){
+    if(file !== saved.file){
+      text = '';
+      message = '文件路径已修改，保存后读取并预览。文件内容优先于下方编辑内容。';
+    }else{
+      text = preview.text || '';
+      error = !!preview.error;
+      message = error ? '提示词文件读取失败：' + preview.error + '。当前保留客户端提示词。' : '来源：文件 ' + file + '；下方编辑内容暂不生效。';
+    }
+  }
+  if(mode === 'passthrough') message += ' 当前为透传模式，网关提示词不应用。';
+  else message += ' 仅已保存的设置用于请求。';
+  status.textContent = message;
+  status.classList.toggle('prompt-source-error', error);
+  target.innerHTML = text ? renderPromptMarkdown(text) : '<p class="prompt-empty-preview">暂无可预览内容</p>';
+  target.querySelectorAll('a[href]').forEach(function(link){ link.target = '_blank'; link.rel = 'noopener noreferrer'; });
 }
 function readAdvancedSettingsGroup(groupId){
   const group = ADVANCED_SETTING_GROUPS.find(function(item){ return item.id === groupId; });
@@ -140,7 +189,9 @@ function readAdvancedSettingsGroup(groupId){
     const el = document.getElementById(advancedFieldId(groupId, field.key));
     if(!el) throw new Error(field.label + ' 控件不存在');
     if(field.type === 'bool'){ out[field.key] = !!el.checked; return; }
-    const raw = String(el.value == null ? '' : el.value).trim();
+    const value = String(el.value == null ? '' : el.value);
+    if(field.type === 'markdown'){ out[field.key] = value; return; }
+    const raw = value.trim();
     if(field.type === 'int' || field.type === 'number'){
       const number = Number(raw);
       const minimum = field.min == null ? 0 : field.min;
@@ -667,7 +718,7 @@ function renderKeyRows(){
       const options = (retired ? '<option value="' + esc(row.realm) + '" selected disabled>出口已移除，请选择新出口</option>' : '') + REALM_CHOICES.map(([val, lbl]) =>
         '<option value="' + val + '"' + ((row.realm || '') === val ? ' selected' : '') + '>' + lbl + '</option>'
       ).join('');
-      return '<div class="key-card" style="border-color:var(--accent);background:var(--panel);box-shadow:0 0 0 1px var(--accent), var(--shadow-md)">'
+      return '<div class="key-card key-card-editing">'
         + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">'
         +   '<div style="font-size:14px;font-weight:700;color:var(--fg)">' + (row.id ? '编辑 API Key' : '新建 API Key') + '</div>'
         +   '<span class="badge s mini">设置出口</span>'
@@ -686,7 +737,7 @@ function renderKeyRows(){
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
         +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">模型限制 <span style="color:var(--dim-light)">(选填，留空 = 不限制)</span></div>'
-        +     '<div style="margin-bottom:8px">允许平台：' + [['workbuddy','WorkBuddy'],['cline','Cline'],['opencode_zen','OpenCode Zen'],['commandcode','Command Code']].map(([name,label]) => '<label style="margin-right:12px"><input type="checkbox" id="editKeyUpstream_' + i + '_' + name + '"' + ((row.allowed_upstreams || ['workbuddy']).includes(name) ? ' checked' : '') + '> ' + label + '</label>').join('') + '</div>'
+        +     '<div class="key-upstream-options"><span>允许平台</span>' + [['workbuddy','WorkBuddy'],['cline','Cline'],['opencode_zen','OpenCode Zen'],['commandcode','Command Code']].map(([name,label]) => '<label><input type="checkbox" id="editKeyUpstream_' + i + '_' + name + '"' + ((row.allowed_upstreams || ['workbuddy']).includes(name) ? ' checked' : '') + '> ' + label + '</label>').join('') + '</div>'
           +     '<input type="text" id="editKeyModels_' + i + '" value="' + esc(modelPatternsText(row.models)) + '" placeholder="如 deepseek* 或 gpt-6-astra；多个用逗号分隔，支持 * 通配" '
         +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
         +   '</div>'

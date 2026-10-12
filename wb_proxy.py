@@ -2570,6 +2570,7 @@ def runtime_settings_view():
             "created_at": entry.get("created_at") or "",
             "deleted_at": entry.get("deleted_at") or "",
         })
+    prompt_cfg = wb_settings.prompt_config(ACCOUNTS_DIR)
     return {
         "panel_password_is_default": wb_settings.panel_password_is_default(ACCOUNTS_DIR),
         "api_key_set": bool(key),
@@ -2595,7 +2596,8 @@ def runtime_settings_view():
         "schedule": wb_settings.schedule_config(ACCOUNTS_DIR),
         "redis": wb_settings.redis_config(ACCOUNTS_DIR),
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
-        "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
+        "prompt": prompt_cfg,
+        "prompt_preview": wb_prompt.preview(prompt_cfg),
         "prompt_retry_status": wb_prompt.retry_status(),
         "logging": wb_settings.logging_config(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
@@ -4262,26 +4264,28 @@ def prompt_mode_config():
 
 
 def apply_prompt_mode(messages, degraded=False):
-    """Apply the configured prompt mode to one request's messages.
+    """Compatibility wrapper for WorkBuddy's Chat request preparation."""
+    return apply_prompt_policy({"messages": messages}, degraded=degraded)["messages"]
 
-    passthrough is the legacy behaviour (client system prompts ride through);
-    custom/append are opt-in. An explicit content-rejection retry can replace
-    this request's prompt only; unrelated requests always use the saved mode.
-    An unreadable prompt file fails open to passthrough rather than blocking.
+
+def apply_prompt_policy(payload, protocol="chat", degraded=False):
+    """One policy for every outbound protocol; never mutate stored history.
+
+    Unreadable/empty files retain the legacy fail-open behaviour, with the
+    failure visible in the panel's source preview. Passthrough never reads a
+    prompt file. An explicit degraded retry does not depend on file loading.
     """
     cfg = prompt_mode_config()
-    mode = cfg.get("mode") or "passthrough"
+    mode = wb_prompt.normalize_mode(cfg.get("mode"))
+    if degraded and mode != "custom":
+        return wb_prompt.apply_payload(payload, protocol, mode, "", degraded=True)
     if mode in ("custom", "append"):
         try:
-            text = wb_prompt.load_prompt(mode, cfg.get("file"))
-        except Exception:
-            text = ""
-        if text:
-            return wb_prompt.apply_mode(messages, mode, text, degraded=degraded)
-        return messages
-    if degraded:
-        return wb_prompt.apply_mode(messages, mode, "", degraded=True)
-    return messages
+            text = wb_prompt.load_prompt(mode, cfg.get("file"), cfg.get("text", ""))
+        except (OSError, UnicodeError, ValueError):
+            return payload
+        return wb_prompt.apply_payload(payload, protocol, mode, text)
+    return payload
 
 
 def build_upstream_body(payload, prompt_degraded=False):
@@ -8383,6 +8387,7 @@ class Handler(BaseHTTPRequestHandler):
                         model = model[len(prefix):]
                     meta = PLATFORMS.model(account.upstream, model)
                     body = {"model": model, "messages": [{"role": "user", "content": "Reply only OK."}], "max_tokens": 32, "stream": False}
+                    body = apply_prompt_policy(body)
                     if meta["native_protocol"] == "responses":
                         body = wb_platform_api.bridge.chat_to_responses(body)
                     elif meta["native_protocol"] == "messages":

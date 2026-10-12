@@ -74,7 +74,7 @@ def open_chat(proxy, payload, session_key=None, preferred_uid=None):
         {"allowed_upstreams": [hint] if hint in wb_platforms.BASES else list(wb_platforms.BASES)},
         (manager.catalogues.get("cline", {}).get("models") or {}))
     meta = manager.model(upstream, raw_model)
-    body = _native_body(payload, meta["native_protocol"], meta)
+    body = _native_body(proxy.apply_prompt_policy(payload), meta["native_protocol"], meta)
     session = session_key or proxy.derive_affinity_key(payload.get("messages")) or ""
     lease = _open(manager, upstream, raw_model, body, meta, session,
                   getattr(proxy._REQ_CONTEXT, "key_id", ""), preferred_uid)
@@ -137,13 +137,14 @@ def _handle(handler, payload, protocol, upstream, raw_model, public_model):
     bound = handler._response_context.get("account") if handler._response_context and handler._response_context.get("bound") else None
     # Tools in a gateway web workflow retain their definitions in Chat; only
     # the wire body is converted for the model's native upstream endpoint.
-    native_body = _native_body(chat, native, meta)
+    forwarded = proxy.apply_prompt_policy(chat)
+    native_body = _native_body(forwarded, native, meta)
     lease = _open(manager, upstream, raw_model, native_body, meta, session, handler._key_id() or "", bound)
     proxy._apply_stream_idle_timeout(lease, proxy.upstream_timeouts()[1])
     account = lease.account
     raw = bridge.ChatLease(lease, native)
     t_start = wb_metrics.request_started_at()
-    fp = proxy.prompt_fingerprint(chat.get("messages"))
+    fp = proxy.prompt_fingerprint(forwarded.get("messages"))
     effort = chat.get("reasoning_effort")
     try:
         if protocol == "responses":
@@ -165,6 +166,7 @@ def _handle(handler, payload, protocol, upstream, raw_model, public_model):
 
 def _native(handler, payload, protocol, upstream, raw_model, public_model, meta, proxy):
     body = {key: copy.deepcopy(value) for key, value in payload.items() if not key.startswith("_")}
+    body = proxy.apply_prompt_policy(body, protocol)
     if protocol == "responses":
         body["store"] = False
     if protocol == "chat" and payload.get("stream"):

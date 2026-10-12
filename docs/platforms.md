@@ -1,4 +1,4 @@
-# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.8）
+# Cline、OpenCode、Command Code 与 Responses 会话（v1.2.9）
 
 ## 配置账号
 

@@ -107,6 +107,7 @@ const ACTION_HANDLERS = {
   saveDailyChatWeb: (el) => saveDailyChatWeb(el),
   saveLocalWebTools: (el) => saveLocalWebTools(el),
   saveAdvancedSettings: (el, ev, arg) => saveAdvancedSettings(el, ev, arg),
+  updatePromptPreview: () => updatePromptPreview(),
   loadSettings: (el, ev, arg) => loadSettings(arg === '1'),
   loadProxySlots: () => loadProxySlots(),
   panelLogout: () => panelLogout(),

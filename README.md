@@ -2,9 +2,9 @@
 
 WorkBuddy、Cline、OpenCode 与 Command Code 多账号网关。将已有账号接入 OpenAI Chat Completions、Responses 和 Anthropic Messages，提供平台隔离调度、余额与用量查询、可续接的 Responses 会话及实时控制台。
 
-当前版本 **1.2.8** · Python **3.9+** · 应用仅依赖 Python 标准库
+当前版本 **1.2.9** · Python **3.9+** · 应用仅依赖 Python 标准库
 
-1.2.8 修复审计发现的日志凭据暴露、匿名诊断信息暴露和默认导出明文凭据；账号迁移使用新增的「导出含凭据」。Cline 模型直接使用上游 ID，兼容旧前缀调用与配置；五渠道模型页支持勾选、跨页全选筛选结果及批量启停。本名和别名均可调用、复制，刷新保留分页、筛选和滚动位置；API Key、代理槽、行为与工具使用独立页面，Cline／OpenCode API 余额为 5 小时剩余百分比合计。完整保留正式 `v1.2.1` 的 WorkBuddy 原页面、OAuth 跳转链接和账号操作，提供固定版本应用／Nginx 镜像、升级与回滚工具。
+1.2.9 统一系统提示词追加、替换与透传，覆盖各平台的 Chat／Responses／Messages 与历史续轮；面板支持 Markdown 编辑、实时预览及文件读取错误提示。控制台统一输入框、卡片、弹窗与深浅主题，修复手机字段拥挤及断点溢出。保留 WorkBuddy 原页面、OAuth 跳转与账号操作，提供固定版本应用／Nginx 镜像及升级、回滚工具。
 
 [版本发布](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) · [更新记录](CHANGELOG.md) · [升级与回滚](docs/upgrading.md) · [部署说明](docs/integration-plan.md) · [多平台接入](docs/platforms.md) · [项目检查](docs/project-audit-2026-10-10.md) · [API 说明](docs/api.md) · [账号与调度](docs/account-scheduling.md)
 
@@ -21,6 +21,7 @@ WorkBuddy、Cline、OpenCode 与 Command Code 多账号网关。将已有账号�
 - **模型与档位**：WorkBuddy 国内／国际、Cline、OpenCode、Command Code 共五个目录，支持搜索、免费／付费／订阅筛选和分页；显示实际元数据中的价格、权益、能力、容量与思考档位。按渠道保存别名与启停，本名与别名都能复制和调用；列表仅导航或手动刷新时更新。
 - **协议兼容**：模型详情、渠道积分及 ClinePass／OpenCode Go 的 5 小时剩余百分比合计、按 Key 查询 Token；支持 DeepSeek、Kimi、千问及 OpenAI 旧版余额响应格式。
 - **Messages 联网搜索**：本地 DDG 执行与模型续轮，原生搜索结果及引用、DSH 文本兼容、搜索历史回放；支持次数限制与域名过滤，需开启面板本地网络工具。详见 [Messages 接入](docs/api.md#messages-搜索请求)。
+- **系统提示词**：所有平台的三种协议统一支持透传、替换和追加；设置页提供 Markdown 原文编辑、实时预览和服务器文件来源状态，工具续轮与会话重放不会累计追加内容。详见 [提示词设置](docs/api.md#管理设置补充需面板认证)。
 - 账号导入／导出、OAuth、批量凭证刷新、代理槽、分渠道保留积分与每日限额、可选付费临期调度、签到和任务调度；可选[本地网络工具](docs/research/web-search-support.md)。
 
 ## 公网部署：Nginx + 自动 HTTPS
@@ -69,7 +70,7 @@ Windows、macOS、Linux 启动脚本继续可用。面板密码和 API Key 分�
 在原安装目录执行，先保留旧 Compose 配置：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.8/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.9/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -121,7 +122,7 @@ Responses 保存的是会话正文、工具结果及可能包含的上游密文�
 
 应用无额外 pip 依赖；Nginx 镜像额外包含 Certbot。发布工作流同时构建两个镜像的 `linux/amd64`、`linux/arm64` 版本，验证后更新稳定标签，并在 [Release](https://github.com/Albert-Li-Sz/Workbody-FHUB/releases) 附带源码、升级脚本、SHA-256 和镜像摘要。
 
-应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.2.8`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.8`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 111 个套件：90 个 Python + 21 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。测试默认最多 4 个套件并行、每套件使用独立临时目录；可传 `--jobs 1` 串行，`--logs <目录>` 保存完整输出。
+应用镜像为 `ghcr.io/albert-li-sz/workbody-fhub:1.2.9`，Nginx 为 `ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.9`。源码构建采用 `docker-compose.build.yml` overlay，见[升级文档](docs/upgrading.md#镜像与源码构建)。现有回归包含 112 个套件：90 个 Python + 22 个 JS，入口为 `python3 tests/run_all.py`，JavaScript 套件需要 Node.js。测试默认最多 4 个套件并行、每套件使用独立临时目录；可传 `--jobs 1` 串行，`--logs <目录>` 保存完整输出。
 
 提示词重试、首字耗时、连接与统计优化见[性能与可靠性说明](docs/performance.md)。
 

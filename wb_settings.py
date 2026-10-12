@@ -22,6 +22,7 @@ import time
 import wb_storage
 
 import wb_pool
+import wb_prompt
 
 DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
@@ -1005,12 +1006,15 @@ def set_upstream_config(accounts_dir, cfg):
 PROMPT_DEFAULTS = {
     "mode": "passthrough",
     "file": "",
+    "text": "",
     "retry_on_content_rejection": False,
 }
 
 
 def validate_prompt_patch(raw):
     """Strict validation for a panel-saved prompt patch."""
+    if raw is not None and not isinstance(raw, dict):
+        raise ValueError("prompt settings must be an object")
     out = {}
     for key, value in (raw or {}).items():
         if key == "mode":
@@ -1028,6 +1032,14 @@ def validate_prompt_patch(raw):
             if not isinstance(value, str):
                 raise ValueError("prompt file must be a string")
             out["file"] = value.strip()
+        elif key == "text":
+            if not isinstance(value, str):
+                raise ValueError("prompt text must be a string")
+            if value and not value.strip():
+                raise ValueError("prompt text must contain non-whitespace text")
+            if len(value.encode("utf-8")) > wb_prompt.MAX_PROMPT_BYTES:
+                raise ValueError("prompt text exceeds 256 KiB")
+            out["text"] = value
         else:
             raise ValueError("unknown prompt setting %r" % key)
     return out
@@ -1047,17 +1059,19 @@ def prompt_config(accounts_dir):
     if not isinstance(file_path, str):
         file_path = PROMPT_DEFAULTS["file"]
     retry = stored.get("retry_on_content_rejection", False)
+    text = stored.get("text", "")
     return {"mode": mode, "file": file_path.strip(),
+            "text": text if isinstance(text, str) else "",
             "retry_on_content_rejection": retry if isinstance(retry, bool) else False}
 
 
 def set_prompt_config(accounts_dir, cfg):
     """Persist the prompt settings. Returns the stored config."""
-    current = prompt_config(accounts_dir)
-    if isinstance(cfg, dict):
-        current.update({k: v for k, v in cfg.items() if k in PROMPT_DEFAULTS})
-    clean = validate_prompt_patch(current)
+    patch = validate_prompt_patch(cfg)
     with _lock:
+        current = prompt_config(accounts_dir)
+        current.update(patch)
+        clean = validate_prompt_patch(current)
         data = load(accounts_dir)
         data["prompt"] = deep_merge(data.get("prompt"), clean)
         save(accounts_dir, data)
