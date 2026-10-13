@@ -179,11 +179,14 @@ const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve()
   await flush();
   assert.strictEqual(requests.length, 0, 'click must not trigger a change-only action');
 
-  // 10. advanced settings schema covers all six backend groups and 53 keys.
+  // 10. advanced settings schema covers all six backend groups and 55 keys.
   const groups = api.getAdvancedGroups();
   assert.strictEqual(groups.length, 6, 'advanced settings must have six groups');
-  assert.strictEqual(groups.reduce((n, g) => n + g.fields.length, 0), 53,
-    'advanced settings must expose all 53 backend keys');
+  assert.strictEqual(groups.reduce((n, g) => n + g.fields.length, 0), 55,
+    'advanced settings must expose all 55 backend keys');
+  const poolFields = groups.find(g => g.id === 'pool').fields.map(field => field.key);
+  assert.ok(poolFields.includes('request_rate') && poolFields.includes('request_rate_max'),
+    'request frequency recovery must have configurable base and cap');
 
   console.log('action dispatch assertions passed (10 checks)');
 })().catch(err => {

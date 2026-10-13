@@ -470,6 +470,8 @@ class Account(object):
         # weight's last-used stamp and the in-flight lease counter.
         self.pool_cfg = dict(wb_pool.DEFAULTS)
         self.soft_streak = 0
+        self.soft_rate_until = float(data.get("softRateUntil") or (
+            self.cooldown_until if self.last_error.startswith("HTTP 429 (account soft rate") else 0))
         self.fails = 0
         self.breaker_until = 0.0
         self.degrade_count = 0
@@ -538,6 +540,7 @@ class Account(object):
             "priority": self.priority,
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
+            "softRateUntil": self.soft_rate_until,
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
@@ -972,8 +975,9 @@ class Account(object):
         self.expires_at = jwt_exp(token) or self.expires_at
         with self._throttle_lock:
             self.session_dead_fails = 0
-            self.last_error = ""
-            self.cooldown_until = 0
+            if self.soft_rate_until <= time.time():
+                self.last_error = ""
+                self.cooldown_until = 0
         if self.path and os.path.exists(os.path.dirname(self.path)):
             self.save(os.path.dirname(self.path))
         return True
@@ -1678,10 +1682,11 @@ class Account(object):
                 # Model-scoped throttle: keep the account usable for every other model.
                 wait = max(1.0, float(until) - time.time()) if until else (
                     3.0 if single_account else float(cooldown))
-                self.model_cooldowns[model] = time.time() + wait
+                self.model_cooldowns[model] = max(self.model_cooldowns.get(model, 0.0),
+                                                 time.time() + wait)
                 return
             actual_cooldown = 3 if single_account else cooldown
-            self.cooldown_until = time.time() + actual_cooldown
+            self.cooldown_until = max(self.cooldown_until, time.time() + actual_cooldown)
 
     def throttle_wait(self, model=None):
         """Seconds until this account can serve `model` again (0 = right now)."""
@@ -1700,22 +1705,32 @@ class Account(object):
         with self._throttle_lock:
             if model:
                 self.model_cooldowns.pop(model, None)
+                if self.soft_rate_until > time.time():
+                    return
             else:
                 self.model_cooldowns.clear()
+                self.soft_rate_until = 0.0
             if self.last_error or self.cooldown_until:
                 self.last_error = ""
                 self.cooldown_until = 0
 
-    def note_soft_rate(self, message):
-        """Account-level rate limit: soft cooldown with exponential backoff."""
+    def note_soft_rate(self, message, retry_after=None, request_rate=False):
+        """Back off once per recovery attempt, honoring an upstream retry hint."""
         cfg = self.pool_cfg
         with self._throttle_lock:
-            self.soft_streak += 1
-            wait = wb_pool.soft_backoff(self.soft_streak, cfg["soft_rate"],
-                                        cfg["soft_rate_max"])
+            now = time.time()
+            active = self.soft_rate_until > now
+            if not active:
+                self.soft_streak += 1
+            prefix = "request_rate" if request_rate else "soft_rate"
+            wait = (max(1.0, float(retry_after)) if retry_after is not None else
+                    wb_pool.soft_backoff(self.soft_streak, cfg[prefix], cfg[prefix + "_max"]))
+            # Calls already in flight share the first 429's recovery window.
+            if not active or retry_after is not None:
+                self.soft_rate_until = max(self.soft_rate_until, now + wait)
             self.last_error = str(message)[:200]
-            self.cooldown_until = max(self.cooldown_until, time.time() + wait)
-        return wait
+            self.cooldown_until = max(self.cooldown_until, self.soft_rate_until)
+            return max(1.0, self.cooldown_until - now)
 
     def note_failure(self, message):
         """5xx / transport failure: feed the breaker counter (no cooldown yet)."""
@@ -1752,11 +1767,16 @@ class Account(object):
         return self.degrade_until
 
     def note_success(self, model=None):
-        """A served request clears the account-level penalties."""
+        """A successful recovery clears penalties; older in-flight calls cannot."""
         with self._throttle_lock:
+            now = time.time()
+            if max(self.cooldown_until, self.breaker_until, self.degrade_until,
+                   self.balance_until, self.model_cooldowns.get(model, 0.0)) > now:
+                return
             if model:
                 self.model_cooldowns.pop(model, None)
             self.soft_streak = 0
+            self.soft_rate_until = 0.0
             self.fails = 0
             self.degrade_count = 0
             self.breaker_until = 0.0
@@ -1852,6 +1872,7 @@ class Account(object):
             self.degrade_count = 0
             self.degrade_until = 0.0
             self.soft_streak = 0
+            self.soft_rate_until = 0.0
             self.fails = 0
             self.last_error = ""
             self.cooldown_until = 0.0
@@ -2114,7 +2135,7 @@ class AccountPool(object):
                             "nickname", "domain", "realm", "platform", "product",
                             "enterprise_id", "access_token", "refresh_token", "expires_at",
                             "added_at", "source", "proxy_slot", "proxy_legacy", "enabled",
-                            "priority", "_priority_explicit", "last_error", "cooldown_until",
+                            "priority", "_priority_explicit", "last_error", "cooldown_until", "soft_rate_until",
                             "credits", "last_checkin", "last_daily_chat"):
                         setattr(existing, field, getattr(account, field))
                 account = existing
@@ -3195,7 +3216,7 @@ EXPORT_VERSION = 1
 # Fields that describe live state rather than the credential itself. They are
 # exported for inspection but never trusted on import: a stale cooldown or a
 # disabled flag from another machine would silently cripple the target pool.
-VOLATILE_FIELDS = ("cooldownUntil", "lastError", "credits", "lastCheckin", "lastDailyChat")
+VOLATILE_FIELDS = ("cooldownUntil", "softRateUntil", "lastError", "credits", "lastCheckin", "lastDailyChat")
 
 
 def account_to_export(account):

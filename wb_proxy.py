@@ -15,6 +15,8 @@ start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
 """
 import argparse
 import copy
+import datetime
+import email.utils
 import hashlib
 import http.client
 from collections import deque
@@ -4494,8 +4496,7 @@ class ContentRejected(Exception):
 
 
 class RateLimited(Exception):
-    """Upstream throttled this model (429 / code 6004). Distinct from a dead
-    pool: the credential is fine, only the model is cooling down for a while."""
+    """Upstream account/model rate limit, including a pool already cooling."""
 
     def __init__(self, http_error=None, detail="", wait=60, message=""):
         self.http_error = http_error
@@ -4637,15 +4638,13 @@ def retry_after_seconds(model, realm):
     waits = [a.throttle_wait(model=model) for a in POOL.accounts
              if a.realm == realm and a.enabled and a.access_token]
     active = [w for w in waits if w > 0]
-    return int(min(active)) if active else 60
+    return max(1, math.ceil(min(active))) if active else 60
 
 
 def realm_model_throttled(realm, model):
-    """True when accounts exist and are healthy but all are cooling this model.
+    """True when every enabled account has an account or model rate cooldown.
 
-    Only a *model* cooldown counts. A plain account cooldown usually comes from
-    a transient network error, and reporting that as "rate limited" told
-    clients to back off from a model that was never throttled.
+    Generic connection/breaker cooldowns do not count as upstream rate limits.
     """
     if not POOL:
         return (False, 0)
@@ -4655,10 +4654,11 @@ def realm_model_throttled(realm, model):
         return (False, 0)
     waits = []
     for a in existing:
-        wait = getattr(a, "model_cooldowns", {}).get(model, 0.0) - time.time()
+        wait = max(getattr(a, "model_cooldowns", {}).get(model, 0.0),
+                   getattr(a, "soft_rate_until", 0.0)) - time.time()
         waits.append(max(0.0, wait))
     if waits and all(w > 0 for w in waits):
-        return (True, int(min(waits)))
+        return (True, max(1, math.ceil(min(waits))))
     return (False, 0)
 
 
@@ -4683,13 +4683,49 @@ def is_transient(exc):
 def rate_limit_is_account_level(detail, reset_at):
     """True when a 429 is a soft account limit rather than a model park.
 
-    The upstream names a reset wall clock for the model-scoped form (code
-    6004, "usage exceeds frequency limit"). A 429 without one is a soft
-    limit on the credential, which the panel project cools with an
-    exponential backoff instead of parking just one model. The detail is
-    kept for call-site symmetry and stays available for logging.
+    A reset wall clock or explicit JSON code 6004 identifies model quota.
+    Other 429s remain account-scoped; a missing clock alone does not turn
+    a clearly identified model quota into an account-wide cooldown.
     """
-    return reset_at is None
+    return reset_at is None and rate_limit_code(detail) != 6004
+
+
+def rate_limit_code(detail):
+    """Only an explicit JSON code can select a provider-specific policy."""
+    try:
+        body = json.loads(detail)
+        if isinstance(body, dict):
+            error = body.get("error")
+            code = error.get("code") if isinstance(error, dict) else body.get("code")
+            if isinstance(code, int) and not isinstance(code, bool):
+                return code
+            if isinstance(code, str) and re.fullmatch(r"\d+", code):
+                return int(code)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
+def parse_retry_after(headers, now=None):
+    """RFC 9110 Retry-After: delay seconds or an HTTP date, without early retry."""
+    if not headers:
+        return None
+    value = next((str(v).strip() for k, v in headers.items()
+                  if str(k).lower() == "retry-after"), "")
+    now = time.time() if now is None else now
+    try:
+        if re.fullmatch(r"\d+(?:\.\d+)?", value):
+            wait = float(value)
+        else:
+            date = email.utils.parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=datetime.timezone.utc)
+            wait = date.timestamp() - now
+        if math.isfinite(wait):
+            return max(1, math.ceil(min(wait, 31536000)))
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return None
 
 
 def parse_rate_limit_reset(detail):
@@ -4701,20 +4737,21 @@ def parse_rate_limit_reset(detail):
     """
     if not detail:
         return None
-    m = re.search(r"reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", detail)
+    m = re.search(r"reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})", detail, re.I)
     if not m:
         return None
     stamp = m.group(1).replace("T", " ")
-    tz = re.search(r"UTC([+-]\d{1,2})(?::?(\d{2}))?", detail)
-    offset = 0
-    if tz:
-        hours = int(tz.group(1))
-        minutes = int(tz.group(2) or 0)
-        offset = hours * 3600 + (minutes * 60 if hours >= 0 else -minutes * 60)
     try:
-        base = time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")) - time.timezone
-        return base - offset
-    except Exception:
+        tz = re.search(r"UTC([+-])(\d{1,2})(?::?(\d{2}))?", detail, re.I)
+        zone = datetime.timezone.utc
+        if tz:
+            hours, minutes = int(tz.group(2)), int(tz.group(3) or 0)
+            if hours > 23 or minutes > 59:
+                return None
+            offset = (hours * 60 + minutes) * (1 if tz.group(1) == "+" else -1)
+            zone = datetime.timezone(datetime.timedelta(minutes=offset))
+        return datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=zone).timestamp()
+    except (ValueError, OverflowError):
         return None
 
 
@@ -4970,14 +5007,20 @@ def open_upstream(payload, session_key=None, target_realm=None,
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
-                    detail = exc.read(600).decode("utf-8", "replace")
+                    detail = exc.read(8192).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
+                finally:
+                    exc.close()
                 reset_at = parse_rate_limit_reset(detail)
+                retry_after = parse_retry_after(exc.headers)
                 if rate_limit_is_account_level(detail, reset_at):
-                    wait = account.note_soft_rate("HTTP 429 (account soft rate)")
-                    log("account %s soft-rate limited, cooling %.0fs (streak %d)"
-                        % (account.uid[:8], wait, account.soft_streak))
+                    code = rate_limit_code(detail)
+                    message = "HTTP 429 (account soft rate%s)" % (", code %s" % code if code is not None else "")
+                    wait = account.note_soft_rate(message, retry_after=retry_after,
+                                                  request_rate=(code == 14003))
+                    log("account %s soft-rate limited on '%s', code %s, cooling %.0fs (streak %d)"
+                        % (account.uid[:8], model, code, wait, account.soft_streak))
                     if session_key and POOL:
                         POOL.affinity.unbind(routing_key)
                     last_error = exc
@@ -4985,9 +5028,11 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     last_429_detail = detail
                     continue
                 wait = max(1.0, reset_at - time.time()) if reset_at else 60.0
+                if retry_after is not None:
+                    wait = max(wait, retry_after) if reset_at else retry_after
                 # Model-scoped: only this model is throttled for this account,
                 # so sibling models stay serviceable on the same credential.
-                account.note_error("HTTP 429 (model throttled)", model=model, until=reset_at,
+                account.note_error("HTTP 429 (model throttled)", model=model,
                                    cooldown=wait)
                 if auto_switch and _try_switch_product(account, model):
                     # 換了身分就等於換了一條配額線：要把它從「已試過」拿掉，
@@ -7895,7 +7940,7 @@ class Handler(BaseHTTPRequestHandler):
         # upstream wording.
         custom = getattr(exc, "message", "")
         text = custom or (
-            "upstream rate limit reached for this model; retry in %ds" % wait)
+            "upstream rate limit reached; retry in %ds" % wait)
         # The upstream detail only decorates the upstream wording; a local
         # message would only repeat itself.
         detail = ""
@@ -7926,7 +7971,7 @@ class Handler(BaseHTTPRequestHandler):
         """429 with Retry-After in the Anthropic error envelope."""
         wait = max(1, int(getattr(exc, "wait", 60) or 60))
         text = (getattr(exc, "message", "") or
-                "upstream rate limit reached for this model; retry in %ds" % wait)
+                "upstream rate limit reached; retry in %ds" % wait)
         if getattr(exc, "detail", "") and not getattr(exc, "message", ""):
             text += " - " + str(exc.detail)[:200]
         self._close_unread_body()

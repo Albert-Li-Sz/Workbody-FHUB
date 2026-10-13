@@ -76,8 +76,10 @@ class BackoffMathTests(unittest.TestCase):
 class AccountGovernanceTests(unittest.TestCase):
     def test_soft_rate_streak_grows_and_success_resets(self):
         account = make_account("soft")
-        with mock.patch.object(wb_accounts.time, "time", return_value=1000.0):
+        now = [1000.0]
+        with mock.patch.object(wb_accounts.time, "time", side_effect=lambda: now[0]):
             first = account.note_soft_rate("429")
+            now[0] += first
             second = account.note_soft_rate("429")
             self.assertEqual((first, second), (600.0, 1200.0))
             self.assertEqual(account.soft_streak, 2)

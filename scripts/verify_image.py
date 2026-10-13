@@ -197,7 +197,8 @@ def regressions(platform):
               "messages_web", "anthropic_http", "anthropic_messages", "gateway_hardening",
               "api_key_save_merge", "upstream_integration", "remote_catalog",
               "platforms", "platform_http", "unified_accounts", "unified_http",
-              "commandcode", "response_store", "workbuddy_preserved", "audit_2026_10_11"]
+              "commandcode", "response_store", "workbuddy_preserved", "audit_2026_10_11",
+              "soft_rate_recovery", "pool_governance", "model_cooldowns"]
     with fixture_tree() as fixtures:
         suites = [suite for suite in suites if (fixtures / "tests" / ("_test_%s.py" % suite)).exists()]
         if not suites:

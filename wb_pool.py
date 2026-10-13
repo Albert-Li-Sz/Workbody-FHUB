@@ -18,6 +18,8 @@ DEFAULTS = {
     "free_switch_window_tokens": 262144,
     "soft_rate": 600.0,
     "soft_rate_max": 7200.0,
+    "request_rate": 30.0,
+    "request_rate_max": 300.0,
     "breaker_threshold": 3,
     "breaker_cooldown": 1800.0,
     "breaker_cooldown_max": 21600.0,
@@ -55,6 +57,8 @@ _INT_MIN = {
 _FLOAT_KEYS = (
     "soft_rate",
     "soft_rate_max",
+    "request_rate",
+    "request_rate_max",
     "breaker_cooldown",
     "breaker_cooldown_max",
     "degrade_cooldown",

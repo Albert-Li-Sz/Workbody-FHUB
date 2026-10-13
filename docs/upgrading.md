@@ -1,4 +1,4 @@
-# 从旧版升级到 1.2.9
+# 从旧版升级到 1.2.10
 
 升级工具为根目录的 `update.sh` 和 `update.py`。适用于单实例、本机 Docker Compose 安装；原生 Python 安装使用 `--source-only`。在**原安装目录**执行，不能先用新版 Compose 覆盖旧配置。
 
@@ -9,7 +9,7 @@
 旧安装没有更新脚本时，先下载固定版本：
 
 ```bash
-curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.9/update.sh -o update.sh
+curl -fL https://github.com/Albert-Li-Sz/Workbody-FHUB/releases/download/v1.2.10/update.sh -o update.sh
 bash ./update.sh --dry-run
 bash ./update.sh
 ```
@@ -33,7 +33,7 @@ bash ./update.sh --compose-file docker-compose.yml \
 2. 解析旧编排、识别容器与实际挂载，拉取固定版本镜像并检查新配置。
 3. 固定旧容器的实际镜像 ID 和数据卷，包括原来的匿名卷；停止应用和本项目的 Nginx，备份全部可写 bind mount、named volume、将被覆盖的源码及旧编排。
 4. 安装源码，生成私有 `compose.runtime.json`，启动新版；首次启动导入旧账号、优先级、Key、设置和 JSONL 用量到 SQLite。
-5. 从容器内确认 `/health` 返回 `version: 1.2.9`；使用配套 Nginx 时同时检查 `nginx -t`、Nginx 健康入口和已启用的代理入口。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
+5. 从容器内确认 `/health` 返回 `version: 1.2.10`；使用配套 Nginx 时同时检查 `nginx -t`、Nginx 健康入口和已启用的代理入口。启动失败时自动恢复升级前数据、源码、配置和旧镜像；已产生的新数据另存为 `failed-state-*.tar.gz`。
 
 备份位于 `.update-backups/<时间-随机标识>/`，目录权限 `0700`、归档与配置权限 `0600`。旧 JSON／JSONL 不会因迁移被删除。SQLite 主文件、WAL 与 SHM 在停服后一起保存，避免只复制主文件漏掉已提交数据。
 
@@ -108,7 +108,7 @@ Cline／Zen 凭据新增在私有 `accounts/upstreams`；Responses 正文与分�
 
 1.2.7 升级到 1.2.8 继续沿用 schema 3，账号、Key、代理、模型策略与 Responses 历史保留。匿名 `/health`、`/realm` 和 `/panel/status` 仅返回基础状态；依赖账号或渠道详情的监控需要有效网关 Key 或面板会话。平台账号导出默认不含凭据，迁移／恢复请选择「导出含凭据」并确认，API 使用 `includeSecrets=1`。容器及重定向日志中的网关 Key 会脱敏，完整 Key 从面板「设置 → API Key」读取。
 
-1.2.8 升级到 1.2.9 沿用 schema 3，现有账号、Key、代理、模型策略与 Responses 历史保留。提示词模式仍默认透传，已有文件设置继续生效；新增可选 `prompt.text`，优先级为文件、文本、内置提示词。追加与替换用于所有平台的出站请求，历史续轮不会累积网关提示词；WorkBuddy 保留既有协议适配与指纹清洗。Markdown 预览在本地渲染，出站仍发送原始文本。
+1.2.8／1.2.9 升级到 1.2.10 沿用 schema 3，现有账号、Key、代理、模型策略与 Responses 历史保留。WorkBuddy 14003 请求频率限流新增独立的 30–300 秒退避；既有 `pool.soft_rate` 设置继续用于其他账号软限流，可通过新的 `pool.request_rate` 与 `pool.request_rate_max` 调整频率退避。已有账号冷却继续生效，凭证刷新不会提前清除有效限流。其他平台和系统提示词设置保持原有行为。
 
 验证脚本 `scripts/verify_upgrade.py` 覆盖 1.1.0、1.1.1、1.1.2、1.1.3、1.2.1、1.2.2、1.2.3、1.2.4、1.2.5、1.2.6、1.2.7、1.2.8 的 Compose 升级与回滚，以及原生源码迁移；包含旧平台凭据与 Responses 历史保留检查，使用模拟账号／日志，不需要真实凭据。
 
@@ -130,8 +130,8 @@ Windows 使用 `python update.py`；下载的附件可通过同一 Release 的 `
 正式镜像均支持 `linux/amd64` 与 `linux/arm64`：
 
 ```text
-ghcr.io/albert-li-sz/workbody-fhub:1.2.9
-ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.9
+ghcr.io/albert-li-sz/workbody-fhub:1.2.10
+ghcr.io/albert-li-sz/workbody-fhub-nginx:1.2.10
 ```
 
 Release 同时附带源码归档、升级脚本、`checksums.txt` 与 `images.json`。后者记录应用／Nginx 摘要和提交，`latest` 在应用与 Nginx 两种架构镜像验证通过后才更新；校验文件最后生成，并附各镜像验证回执。

@@ -1,4 +1,4 @@
-"""v1.2.1 WorkBuddy preservation contract for additional account sources."""
+"""WorkBuddy preservation contract; v1.2.10 approves the soft-rate recovery changes."""
 import hashlib
 import pathlib
 import re
@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-EXPECTED={'dashboard_static/core.js': '117f86c4a27753cc6f1b4ef0174512e310f96de209447b4f79bdf6545b341bef', 'dashboard_static/accounts.js': 'b31a8f9b7cc487469e0752d3f6256a6585e477992051b141200f672fd48af061', 'wb_accounts.py': 'a50f6863f29b2fe75e37baadaaa724bf587e4147fd9ace295964e49bb08e5d41'}
+EXPECTED={'dashboard_static/core.js': '117f86c4a27753cc6f1b4ef0174512e310f96de209447b4f79bdf6545b341bef', 'dashboard_static/accounts.js': 'b31a8f9b7cc487469e0752d3f6256a6585e477992051b141200f672fd48af061', 'wb_accounts.py': '3e61a2e99ab49401a0b6b7603371a6b472cd49fcf3b0a1156dd5887493071d46'}
 class PreservationTests(unittest.TestCase):
     def test_original_workbuddy_code_is_preserved(self):
         for path,digest in EXPECTED.items():
